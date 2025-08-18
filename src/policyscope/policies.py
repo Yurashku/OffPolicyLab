@@ -38,9 +38,11 @@ __all__ = [
 
 class BasePolicy:
     """Базовый класс политики. Должен реализовать `action_probs(X)`.
-    
+
     Метод `action_argmax` вычисляет индекс действия с максимальной вероятностью.
     """
+
+    ACTIONS = np.array([0, 1, 2, 3], dtype=int)
 
     def action_probs(self, X: pd.DataFrame) -> np.ndarray:
         raise NotImplementedError
