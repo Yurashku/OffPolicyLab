@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "policyscope"
+version = "0.1.0"
+description = "Инструменты оффлайн‑оценки рекомендательных моделей (IPS/SNIPS/DR) на синтетике и логах"
+readme = "README.md"
+authors = [{name = "OffPolicyLab"}]
+license = {text = "MIT"}
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.22",
+    "pandas>=1.4",
+    "scikit-learn>=1.1",
+    "scipy>=1.8",
+    "matplotlib>=3.5"
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
