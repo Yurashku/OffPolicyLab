@@ -25,6 +25,8 @@ from typing import Tuple, Optional, Literal
 from sklearn.linear_model import LogisticRegression, LinearRegression
 from sklearn.preprocessing import OneHotEncoder
 
+from policyscope.policies import BasePolicy
+
 __all__ = [
     "ess",
     "make_design",
@@ -225,7 +227,7 @@ def dm_value(df: pd.DataFrame, policyB, mu_model, target: str = "accept") -> flo
     """Direct Method: ожидание предсказанного исхода под политикой B."""
     probsB = policyB.action_probs(df)
     val = 0.0
-    for a in policyB.base.ACTIONS if hasattr(policyB, 'base') else [0,1,2,3]:
+    for a in BasePolicy.ACTIONS:
         pa = probsB[:, a]
         if pa.sum() == 0:
             continue
@@ -247,7 +249,7 @@ def dr_value(df: pd.DataFrame, policyB, mu_model, target: str = "accept", weight
 
     # DM‑часть: ожидание модели
     dm_part = np.zeros(len(df), dtype=float)
-    for a in policyB.base.ACTIONS if hasattr(policyB, 'base') else [0,1,2,3]:
+    for a in BasePolicy.ACTIONS:
         pa = probsB[:, a]
         if pa.sum() == 0:
             continue
