@@ -80,14 +80,21 @@ def make_design(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, OneHotEncoder
     """
     X_base = df[["loyal", "age_z", "risk_z", "income_z"]].values
     a = df["a_A"].values.reshape(-1, 1)
-    oh = OneHotEncoder(categories='auto', sparse=False, handle_unknown='ignore')
+    try:
+        oh = OneHotEncoder(
+            categories="auto", sparse_output=False, handle_unknown="ignore"
+        )
+    except TypeError:  # scikit-learn < 1.2
+        oh = OneHotEncoder(
+            categories="auto", sparse=False, handle_unknown="ignore"
+        )
     A_oh = oh.fit_transform(a)
     X = np.hstack([X_base, A_oh])
     return X, A_oh, oh
 
 
 def train_mu_hat(df: pd.DataFrame, target: Literal["accept", "cltv"] = "accept"):
-    """Обучает модель исхода \(\hat\mu(x,a)\).
+    r"""Обучает модель исхода \(\hat\mu(x,a)\).
 
     Для бинарного таргета `accept` используется логистическая регрессия.
     Для вещественного `cltv` — линейная регрессия.
@@ -107,7 +114,7 @@ def train_mu_hat(df: pd.DataFrame, target: Literal["accept", "cltv"] = "accept")
 
 
 def mu_hat_predict(model, df: pd.DataFrame, action: np.ndarray, target: str) -> np.ndarray:
-    """Предсказывает \(\hat\mu(x,a)\) для заданного действия.
+    r"""Предсказывает \(\hat\mu(x,a)\) для заданного действия.
 
     Параметр `action` может быть массивом тех же размеров, что и `df`, или
     скалярным значением (будет вещательно расширён).
