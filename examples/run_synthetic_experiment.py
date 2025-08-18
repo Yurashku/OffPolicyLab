@@ -26,6 +26,7 @@ import os
 import json
 import numpy as np
 import pandas as pd
+from typing import Tuple
 
 from policyscope.synthetic import SynthConfig, SyntheticRecommenderEnv
 from policyscope.policies import make_policy
@@ -102,15 +103,30 @@ def main() -> None:
     vB_dm_cltv = dm_value(logsA, policyB, mu_cltv, target="cltv")
 
     # Doubly Robust
-    vB_dr_accept, ess_dr_accept, clip_dr_accept = dr_value(logsA, policyB, mu_accept, target="accept", weight_clip=args.weight_clip)
-    vB_dr_cltv, ess_dr_cltv, clip_dr_cltv = dr_value(logsA, policyB, mu_cltv, target="cltv", weight_clip=args.weight_clip)
+    vB_dr_accept, ess_dr_accept, clip_dr_accept = dr_value(
+        logsA, policyB, mu_accept, target="accept", weight_clip=args.weight_clip
+    )
+    vB_dr_cltv, ess_dr_cltv, clip_dr_cltv = dr_value(
+        logsA, policyB, mu_cltv, target="cltv", weight_clip=args.weight_clip
+    )
 
     # Oracle (истинные ожидания)
     X_oracle = env.sample_users(args.oracle_users)
-    vA_accept_true = env.oracle_value(policyA, X_oracle, metric="accept", n_mc=args.oracle_mc)
-    vB_accept_true = env.oracle_value(policyB, X_oracle, metric="accept", n_mc=args.oracle_mc)
-    vA_cltv_true = env.oracle_value(policyA, X_oracle, metric="cltv", n_mc=args.oracle_mc)
-    vB_cltv_true = env.oracle_value(policyB, X_oracle, metric="cltv", n_mc=args.oracle_mc)
+    vA_accept_true = env.oracle_value(
+        policyA, X_oracle, metric="accept", n_mc=args.oracle_mc
+    )
+    vB_accept_true = env.oracle_value(
+        policyB, X_oracle, metric="accept", n_mc=args.oracle_mc
+    )
+    vA_cltv_true = env.oracle_value(
+        policyA, X_oracle, metric="cltv", n_mc=args.oracle_mc
+    )
+    vB_cltv_true = env.oracle_value(
+        policyB, X_oracle, metric="cltv", n_mc=args.oracle_mc
+    )
+
+    dr_abs_error_accept = abs(vB_dr_accept - vB_accept_true)
+    dr_abs_error_cltv = abs(vB_dr_cltv - vB_cltv_true)
 
     # Paired bootstrap for DR
     def estimator_pair_accept(df_part: pd.DataFrame) -> Tuple[float, float, float]:
@@ -166,6 +182,7 @@ def main() -> None:
             "dr_B": vB_dr_accept,
             "oracle_A": vA_accept_true,
             "oracle_B": vB_accept_true,
+            "dr_abs_error": dr_abs_error_accept,
             "bootstrap_DR": res_accept,
         },
         "cltv": {
@@ -177,6 +194,7 @@ def main() -> None:
             "dr_B": vB_dr_cltv,
             "oracle_A": vA_cltv_true,
             "oracle_B": vB_cltv_true,
+            "dr_abs_error": dr_abs_error_cltv,
             "bootstrap_DR": res_cltv,
         },
     }
@@ -194,9 +212,11 @@ def main() -> None:
     with open(os.path.join(args.artifacts_dir, "report.txt"), "w", encoding="utf-8") as f:
         f.write("# Итоговый отчёт (DR как основной оценщик)\n\n")
         f.write("## Метрика: Отклик\n")
-        f.write(report_accept + "\n\n")
+        f.write(report_accept + "\n")
+        f.write(f"Абсолютная ошибка DR: {dr_abs_error_accept:.6f}\n\n")
         f.write("## Метрика: CLTV\n")
         f.write(report_cltv + "\n")
+        f.write(f"Абсолютная ошибка DR: {dr_abs_error_cltv:.6f}\n")
 
     # Выводим кратко в консоль
     print("==== DR (Отклик) ====")
