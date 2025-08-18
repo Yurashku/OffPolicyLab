@@ -1,4 +1,6 @@
 import numpy as np
+import pandas as pd
+import pytest
 from policyscope.synthetic import SynthConfig, SyntheticRecommenderEnv
 from policyscope.policies import make_policy
 from policyscope.estimators import (
@@ -27,3 +29,16 @@ def test_estimators_run_on_synthetic():
     assert np.isfinite(v_snips)
     assert np.isfinite(v_dr)
     assert ess > 0
+
+
+def test_invalid_inputs_raise_errors():
+    df = pd.DataFrame({"a_A": [0], "propensity_A": [1.2], "accept": [1]})
+    piB = np.array([1.0])
+    with pytest.raises(ValueError):
+        ips_value(df, piB, target="accept")
+
+    df_missing = pd.DataFrame({"propensity_A": [0.5], "accept": [1]})
+    dummy_policy = type("P", (), {"action_probs": lambda self, d: np.ones((len(d), 1))})()
+    dummy_model = object()
+    with pytest.raises(ValueError):
+        dr_value(df_missing, dummy_policy, dummy_model, target="accept")
