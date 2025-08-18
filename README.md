@@ -16,6 +16,13 @@
 - **SNIPS** — нормализует веса IPS для меньшей дисперсии.
 - **Doubly Robust** — комбинирует модель отклика и IPS; достаточно корректности хотя бы одной из них.
 
+## Предположения и ограничения
+
+- **Replay** — новая политика должна часто совпадать со старой, иначе большинство логов отбрасывается.
+- **IPS** — требует точного знания вероятностей действий в обеих политиках; большие веса увеличивают дисперсию.
+- **SNIPS** — нормализует веса IPS и снижает дисперсию, но остаётся чувствительным к ошибкам вероятностей и малым объёмам данных.
+- **Doubly Robust** — корректность достигается, если верна хотя бы модель отклика или пропенсити, но метод чувствителен к ошибкам обеих моделей и выбору клиппинга.
+
 ## Jupyter-туториал
 
 Интерактивный ноутбук с теорией и примером расчёта ATE доступен в файле [examples/tutorial.ipynb](examples/tutorial.ipynb).
@@ -49,34 +56,52 @@ python examples/run_synthetic_experiment.py \
 
 После запуска создаётся папка `artifacts` с логами, оценками и коротким текстовым отчётом.
 
-## Использование на собственных данных
+## Требования к входным данным
 
-Логи политики A должны содержать:
+Логи политики A должны содержать обязательные поля:
 
 - `user_id` — идентификатор пользователя;
 - `a_A` — действие, которое показала политика A;
-- `propensity_A` — вероятность показа этого действия;
-- `accept` и `cltv` — отклик и ценность;
-- признаки пользователя (например, возраст, доход и т.п.).
+- `propensity_A` — вероятность выбора этого действия;
+- `accept` и/или `cltv` — отклик и ценность;
+- признаки пользователя (возраст, доход и др.), используемые моделью.
 
-Пример кода:
+## Пример применения на своих данных
 
 ```python
 import pandas as pd
-from policyscope.estimators import train_mu_hat, prepare_piB_taken, ips_value, snips_value, dr_value
+from policyscope.estimators import (
+    train_mu_hat,
+    prepare_piB_taken,
+    replay_value,
+    ips_value,
+    snips_value,
+    dr_value,
+)
 from policyscope.policies import make_policy
 
 df = pd.read_csv("logs_with_propensity.csv")
 policyB = make_policy("softmax", tau=0.7)
 piB_taken = prepare_piB_taken(df, policyB)
 mu_hat = train_mu_hat(df, target="accept")
-V_B_dr, ess, clip = dr_value(df, policyB, mu_hat, target="accept")
-print(V_B_dr)
+V_replay = replay_value(df, policyB, target="accept")
+V_ips, ess_ips, clip_ips = ips_value(df, policyB, target="accept")
+V_snips, ess_snips, clip_snips = snips_value(df, policyB, target="accept")
+V_dr, ess_dr, clip_dr = dr_value(df, policyB, mu_hat, target="accept")
+print(V_replay, V_ips, V_snips, V_dr)
 ```
+
+## Валидация оценок
+
+- **ESS** — проверяйте эффективный размер выборки, чтобы убедиться в достаточном покрытии новой политики.
+- **Клиппинг** — ограничивайте большие веса IPS, чтобы уменьшить дисперсию и влияние выбросов.
+- **Бутстрэп** — оценивайте доверительные интервалы путём повторной выборки логов.
 
 ## Ссылки
 
-- [Counterfactual Evaluation for Recommendation Systems](https://eugeneyan.com/writing/offline-recsys/)
+- Joachims et al., *Unbiased Learning-to-Rank with Biased Feedback* (WSDM 2017)
+- Dudík et al., *Doubly Robust Policy Evaluation and Learning* (ICML 2011)
 - Farajtabar et al., *More Robust Doubly Robust Off-policy Evaluation* (arXiv:2205.13421)
+- [Counterfactual Evaluation for Recommendation Systems](https://eugeneyan.com/writing/offline-recsys/)
 
 Policyscope распространяется по лицензии MIT.
