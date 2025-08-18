@@ -19,11 +19,14 @@ policyscope.estimators
 
 from __future__ import annotations
 
+import logging
 import numpy as np
 import pandas as pd
 from typing import Tuple, Optional, Literal
 from sklearn.linear_model import LogisticRegression, LinearRegression
 from sklearn.preprocessing import OneHotEncoder
+
+from policyscope.policies import BasePolicy
 
 __all__ = [
     "ess",
@@ -39,6 +42,32 @@ __all__ = [
     "dr_value",
     "ate_from_values",
 ]
+
+
+def _validate_logs(df: pd.DataFrame, target: str, warn: bool = False) -> None:
+    """Проверяет наличие необходимых колонок и корректность `propensity_A`.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Логи политики A.
+    target : str
+        Имя целевой метрики.
+    warn : bool, default False
+        Логировать предупреждение при некорректных значениях `propensity_A`.
+    """
+    required = {"a_A", "propensity_A", target}
+    missing = required - set(df.columns)
+    if missing:
+        missing_str = ", ".join(sorted(missing))
+        raise ValueError(f"Missing required columns: {missing_str}")
+
+    pA = df["propensity_A"].values
+    invalid = (pA <= 0) | (pA > 1)
+    if np.any(invalid):
+        if warn:
+            logging.warning("propensity_A outside (0,1] range")
+        raise ValueError("propensity_A must be in (0,1]")
 
 
 def ess(weights: np.ndarray) -> float:
@@ -189,7 +218,8 @@ def ips_value(df: pd.DataFrame, piB_taken: np.ndarray, target: str = "accept", w
     (value, ess, clip_share)
         Оценка метрики, эффективный размер выборки и доля обрезанных весов.
     """
-    pA = np.clip(df["propensity_A"].values, 1e-12, None)
+    _validate_logs(df, target, warn=True)
+    pA = df["propensity_A"].values
     w = piB_taken / pA
     clip_share = 0.0
     if weight_clip is not None:
@@ -207,7 +237,8 @@ def snips_value(df: pd.DataFrame, piB_taken: np.ndarray, target: str = "accept",
 
     Считается как (∑r_i w_i)/(∑w_i). Применяет обрезку весов, если указано.
     """
-    pA = np.clip(df["propensity_A"].values, 1e-12, None)
+    _validate_logs(df, target, warn=False)
+    pA = df["propensity_A"].values
     w = piB_taken / pA
     clip_share = 0.0
     if weight_clip is not None:
@@ -225,7 +256,7 @@ def dm_value(df: pd.DataFrame, policyB, mu_model, target: str = "accept") -> flo
     """Direct Method: ожидание предсказанного исхода под политикой B."""
     probsB = policyB.action_probs(df)
     val = 0.0
-    for a in policyB.base.ACTIONS if hasattr(policyB, 'base') else [0,1,2,3]:
+    for a in BasePolicy.ACTIONS:
         pa = probsB[:, a]
         if pa.sum() == 0:
             continue
@@ -237,17 +268,18 @@ def dm_value(df: pd.DataFrame, policyB, mu_model, target: str = "accept") -> flo
 def dr_value(df: pd.DataFrame, policyB, mu_model, target: str = "accept", weight_clip: Optional[float] = None) -> Tuple[float, float, float]:
     """Doubly Robust оценка значения новой политики.
 
-    Комбинирует Direct Method и IPS‑поправку. При корректном 
+    Комбинирует Direct Method и IPS‑поправку. При корректном
     моделировании хотя бы одной составляющей даёт несмещённую оценку.
     """
+    _validate_logs(df, target, warn=True)
     probsB = policyB.action_probs(df)
     r = df[target].values
     aA = df["a_A"].values
-    pA = np.clip(df["propensity_A"].values, 1e-12, None)
+    pA = df["propensity_A"].values
 
     # DM‑часть: ожидание модели
     dm_part = np.zeros(len(df), dtype=float)
-    for a in policyB.base.ACTIONS if hasattr(policyB, 'base') else [0,1,2,3]:
+    for a in BasePolicy.ACTIONS:
         pa = probsB[:, a]
         if pa.sum() == 0:
             continue
