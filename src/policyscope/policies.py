@@ -55,7 +55,7 @@ class BasePolicy:
 class GreedyUnknown(BasePolicy):
     """Детерминированная «чёрная» политика: выбирает действие с максимальным
     скрытым скором. Скртытые веса генерируются случайно при инициализации.
-    
+
     Для синтетического эксперимента это имитирует текущий работающий
     алгоритм, который мы не можем проанализировать детально, но можем
     использовать для генерации логов.
@@ -88,7 +88,7 @@ class GreedyUnknown(BasePolicy):
 
 class EpsilonGreedy(BasePolicy):
     """ε‑жадная политика.
-    
+
     C вероятностью `1-ε` выбирает действие, которое бы выбрала базовая
     детерминированная политика, а с вероятностью `ε` — выбирает случайное
     действие равновероятно. Таким образом, логируется пропенсити для всех
@@ -111,7 +111,7 @@ class EpsilonGreedy(BasePolicy):
 
 class SoftmaxFromScores(BasePolicy):
     """Softmax‑политика на основе скрытых скорингов.
-    
+
     Преобразует сырые скоры базовой политики к вероятностям softmax с
     температурой `tau`. Чем выше τ, тем ближе распределение к равномерному.
     """
@@ -128,7 +128,12 @@ class SoftmaxFromScores(BasePolicy):
         return ez / ez.sum(axis=1, keepdims=True)
 
 
-def make_policy(kind: Literal["greedy", "epsilon_greedy", "softmax"], seed: int = 123, epsilon: float = 0.1, tau: float = 1.0) -> BasePolicy:
+def make_policy(
+    kind: Literal["greedy", "epsilon_greedy", "softmax"],
+    seed: int = 123,
+    epsilon: float = 0.1,
+    tau: float = 1.0,
+) -> BasePolicy:
     """Фабрика политик.
 
     Parameters
