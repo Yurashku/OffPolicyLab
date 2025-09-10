@@ -20,6 +20,7 @@ policyscope.estimators
 
 from __future__ import annotations
 
+import logging
 import numpy as np
 import pandas as pd
 from typing import Tuple, Optional, Literal
@@ -201,9 +202,16 @@ def replay_value(df: pd.DataFrame, a_B: np.ndarray, target: str = "accept") -> f
     Оставляем соответствующие исходы и усредняем.
     Если совпадений нет, возвращаем NaN.
     """
-    mask = (df["a_A"].values == a_B)
+    logging.info("[Replay] Начинаем оценку Replay для новой политики…")
+    mask = df["a_A"].values == a_B
     if mask.sum() == 0:
-        return float('nan')
+        logging.info(
+            "[Replay] Нет совпадающих действий – политика B вне области данных A"
+        )
+        return float("nan")
+    logging.info(
+        f"[Replay] Совпадающих действий: {mask.sum()} из {len(df)}"
+    )
     return float(df.loc[mask, target].mean())
 
 
@@ -254,6 +262,7 @@ def ips_value(
     (value, ess, clip_share)
         Оценка метрики, эффективный размер выборки и доля обрезанных весов.
     """
+    logging.info("[IPS] Начинаем оценку IPS для новой политики…")
     _validate_logs(df, target)
     if len(pA) != len(df):
         raise ValueError("pA must have same length as df")
@@ -262,13 +271,16 @@ def ips_value(
     w = piB_taken / pA
     clip_share = 0.0
     if weight_clip is not None:
-        # доля весов, которые были клипнуты
         clip_mask = w > weight_clip
         clip_share = float(clip_mask.mean())
         w = np.minimum(w, weight_clip)
     r = df[target].values
     value = float(np.mean(r * w))
-    return value, ess(w), clip_share
+    ess_w = ess(w)
+    logging.info(f"[IPS] ESS = {ess_w:.1f} из {len(df)}")
+    if weight_clip is not None:
+        logging.info(f"[IPS] Обрезано весов: {clip_share:.2%}")
+    return value, ess_w, clip_share
 
 
 def snips_value(
@@ -282,6 +294,7 @@ def snips_value(
 
     Считается как (∑r_i w_i)/(∑w_i). Применяет обрезку весов, если указано.
     """
+    logging.info("[SNIPS] Начинаем оценку SNIPS для новой политики…")
     _validate_logs(df, target)
     if len(pA) != len(df):
         raise ValueError("pA must have same length as df")
@@ -297,11 +310,19 @@ def snips_value(
     num = np.sum(r * w)
     den = np.sum(w) + 1e-12
     value = float(num / den)
-    return value, ess(w), clip_share
+    ess_w = ess(w)
+    logging.info("[SNIPS] Веса нормализованы")
+    logging.info(f"[SNIPS] ESS = {ess_w:.1f} из {len(df)}")
+    if weight_clip is not None:
+        logging.info(f"[SNIPS] Обрезано весов: {clip_share:.2%}")
+    return value, ess_w, clip_share
 
 
 def dm_value(df: pd.DataFrame, policyB, mu_model, target: str = "accept") -> float:
     """Direct Method: ожидание предсказанного исхода под политикой B."""
+    logging.info(
+        "[DM] Начинаем оценку Direct Method для новой политики…"
+    )
     probsB = policyB.action_probs(df)
     val = 0.0
     for a in BasePolicy.ACTIONS:
@@ -310,6 +331,7 @@ def dm_value(df: pd.DataFrame, policyB, mu_model, target: str = "accept") -> flo
             continue
         mu = mu_hat_predict(mu_model, df, np.full(len(df), a), target)
         val += float(np.mean(pa * mu))
+    logging.info("[DM] Оценка завершена")
     return val
 
 
@@ -341,6 +363,7 @@ def dr_value(
     weight_clip : float, optional
         Обрезка весов.
     """
+    logging.info("[DR] Начинаем оценку Doubly Robust для новой политики…")
     _validate_logs(df, target)
     if len(pA) != len(df):
         raise ValueError("pA must have same length as df")
@@ -350,7 +373,6 @@ def dr_value(
     r = df[target].values
     aA = df["a_A"].values
 
-    # DM‑часть: ожидание модели
     dm_part = np.zeros(len(df), dtype=float)
     for a in BasePolicy.ACTIONS:
         pa = probsB[:, a]
@@ -367,10 +389,15 @@ def dr_value(
         clip_share = float(clip_mask.mean())
         w = np.minimum(w, weight_clip)
 
+    logging.info("[DR] Комбинируем DM и IPS-поправку")
     mu_taken = mu_hat_predict(mu_model, df, aA, target)
     adj = w * (r - mu_taken)
     value = float(np.mean(dm_part + adj))
-    return value, ess(w), clip_share
+    ess_w = ess(w)
+    logging.info(f"[DR] ESS = {ess_w:.1f} из {len(df)}")
+    if weight_clip is not None:
+        logging.info(f"[DR] Обрезано весов: {clip_share:.2%}")
+    return value, ess_w, clip_share
 
 
 def sndr_value(
@@ -407,6 +434,9 @@ def sndr_value(
     (value, ess, clip_share)
         Оценка метрики, эффективный размер выборки и доля обрезанных весов.
     """
+    logging.info(
+        "[SNDR] Начинаем оценку Self-Normalized DR для новой политики…"
+    )
     _validate_logs(df, target)
     if len(pA) != len(df):
         raise ValueError("pA must have same length as df")
@@ -432,11 +462,17 @@ def sndr_value(
         clip_share = float(clip_mask.mean())
         w = np.minimum(w, weight_clip)
 
+    logging.info("[SNDR] Комбинируем DM и IPS-поправку")
     mu_taken = mu_hat_predict(mu_model, df, aA, target)
     mean_w = np.mean(w) + 1e-12
+    logging.info("[SNDR] Веса нормализованы")
     adj = (w / mean_w) * (r - mu_taken)
     value = float(np.mean(dm_part + adj))
-    return value, ess(w), clip_share
+    ess_w = ess(w)
+    logging.info(f"[SNDR] ESS = {ess_w:.1f} из {len(df)}")
+    if weight_clip is not None:
+        logging.info(f"[SNDR] Обрезано весов: {clip_share:.2%}")
+    return value, ess_w, clip_share
 
 
 def switch_dr_value(
@@ -473,6 +509,9 @@ def switch_dr_value(
     (value, ess, switch_share)
         Оценка метрики, эффективный размер выборки и доля записей без IPS‑поправки.
     """
+    logging.info(
+        "[Switch-DR] Начинаем оценку Switch-DR: IPS-поправка только при весах ≤ τ…"
+    )
     _validate_logs(df, target)
     if len(pA) != len(df):
         raise ValueError("pA must have same length as df")
@@ -499,7 +538,12 @@ def switch_dr_value(
     mu_taken = mu_hat_predict(mu_model, df, aA, target)
     adj = w_sw * (r - mu_taken)
     value = float(np.mean(dm_part + adj))
-    return value, ess(w_sw), switch_share
+    ess_w = ess(w_sw)
+    logging.info(f"[Switch-DR] ESS = {ess_w:.1f} из {len(df)}")
+    logging.info(
+        f"[Switch-DR] Без IPS-поправки: {switch_share:.2%}"
+    )
+    return value, ess_w, switch_share
 
 
 def ate_from_values(vB: float, vA: float) -> float:
