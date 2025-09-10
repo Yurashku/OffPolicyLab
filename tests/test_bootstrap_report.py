@@ -12,10 +12,13 @@ def test_cluster_bootstrap_ci_basic():
             "reward": [1.0, 2.0, 3.0, 4.0],
         }
     )
-    estimator = lambda d: d["reward"].mean()
+
+    def estimator(d):
+        return d["reward"].mean()
+
     theta, low, high = cluster_bootstrap_ci(
         df, estimator, cluster_col="user_id", n_boot=200, rng_seed=0
-        )
+    )
     assert isinstance(theta, float)
     assert isinstance(low, float) and isinstance(high, float)
     assert low <= theta <= high
