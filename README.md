@@ -15,6 +15,8 @@
 - **IPS** — взвешивает отклики по отношению вероятностей выбора в B и A.
 - **SNIPS** — нормализует веса IPS для меньшей дисперсии.
 - **Doubly Robust** — комбинирует модель отклика и IPS; достаточно корректности хотя бы одной из них.
+- **SN-DR** — нормализует поправку Doubly Robust, что снижает дисперсию.
+- **Switch-DR** — применяет IPS-поправку только при малых весах, иначе полагается на модель.
 
 ## Предположения и ограничения
 
@@ -22,6 +24,8 @@
 - **IPS** — требует точного знания вероятностей действий в обеих политиках; большие веса увеличивают дисперсию.
 - **SNIPS** — нормализует веса IPS и снижает дисперсию, но остаётся чувствительным к ошибкам вероятностей и малым объёмам данных.
 - **Doubly Robust** — корректность достигается, если верна хотя бы модель отклика или пропенсити, но метод чувствителен к ошибкам обеих моделей и выбору клиппинга.
+- **SN-DR** — уменьшает дисперсию DR за счёт нормализации весов, но наследует его предположения.
+- **Switch-DR** — отбрасывает экстремальные веса, сочетая DM и DR, но выбор порога влияет на смещение.
 
 ## Jupyter-туториал
 
@@ -88,6 +92,8 @@ from policyscope.estimators import (
     ips_value,
     snips_value,
     dr_value,
+    sndr_value,
+    switch_dr_value,
 )
 from policyscope.policies import make_policy
 
@@ -102,7 +108,9 @@ V_replay = replay_value(df, policyB, target="accept")
 V_ips, ess_ips, clip_ips = ips_value(df, piB_taken, pA_taken, target="accept")
 V_snips, ess_snips, clip_snips = snips_value(df, piB_taken, pA_taken, target="accept")
 V_dr, ess_dr, clip_dr = dr_value(df, policyB, mu_hat, pA_taken, target="accept")
-print(V_replay, V_ips, V_snips, V_dr)
+V_sndr, ess_sndr, clip_sndr = sndr_value(df, policyB, mu_hat, pA_taken, target="accept")
+V_switch, ess_switch, share_switch = switch_dr_value(df, policyB, mu_hat, pA_taken, tau=20, target="accept")
+print(V_replay, V_ips, V_snips, V_dr, V_sndr, V_switch)
 ```
 
 ## Валидация оценок

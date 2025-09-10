@@ -11,6 +11,7 @@ policyscope.estimators
 * replay value (`replay_value`)
 * IPS и SNIPS (`ips_value`, `snips_value`)
 * Direct Method (`dm_value`) и Doubly Robust (`dr_value`)
+* Self-Normalized DR (`sndr_value`) и Switch-DR (`switch_dr_value`)
 
 Также реализованы вспомогательные функции для обучения модели исхода,
 расчёта веса и эффективного размера выборки (ESS) и подготовки
@@ -41,6 +42,8 @@ __all__ = [
     "snips_value",
     "dm_value",
     "dr_value",
+    "sndr_value",
+    "switch_dr_value",
     "ate_from_values",
 ]
 
@@ -368,6 +371,135 @@ def dr_value(
     adj = w * (r - mu_taken)
     value = float(np.mean(dm_part + adj))
     return value, ess(w), clip_share
+
+
+def sndr_value(
+    df: pd.DataFrame,
+    policyB,
+    mu_model,
+    pA: np.ndarray,
+    target: str = "accept",
+    weight_clip: Optional[float] = None,
+) -> Tuple[float, float, float]:
+    """Self-Normalized Doubly Robust оценка значения новой политики.
+
+    Для каждого наблюдения добавляет IPS-поправку, нормализованную на
+    средний вес:
+    \(\frac{1}{n} \sum_i \big[q^\,(x_i, \pi_B) + \frac{w_i}{\bar{w}} (r_i - q^\,(x_i, a_i))\big]\).
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Логи политики A с исходом `target`.
+    policyB : BasePolicy
+        Новая политика.
+    mu_model : модель исхода
+        Обученная модель `\hat\mu(x,a)`.
+    pA : np.ndarray
+        Оценённые вероятности поведения `π_A(a_A|x)`.
+    target : {"accept", "cltv"}
+        Название колонки исхода.
+    weight_clip : float, optional
+        Обрезка весов перед нормализацией.
+
+    Returns
+    -------
+    (value, ess, clip_share)
+        Оценка метрики, эффективный размер выборки и доля обрезанных весов.
+    """
+    _validate_logs(df, target)
+    if len(pA) != len(df):
+        raise ValueError("pA must have same length as df")
+    if np.any((pA <= 0) | (pA > 1)):
+        raise ValueError("propensity scores must be in (0,1]")
+    probsB = policyB.action_probs(df)
+    r = df[target].values
+    aA = df["a_A"].values
+
+    dm_part = np.zeros(len(df), dtype=float)
+    for a in BasePolicy.ACTIONS:
+        pa = probsB[:, a]
+        if pa.sum() == 0:
+            continue
+        mu = mu_hat_predict(mu_model, df, np.full(len(df), a), target)
+        dm_part += pa * mu
+
+    piB_taken = probsB[np.arange(len(df)), aA]
+    w = piB_taken / pA
+    clip_share = 0.0
+    if weight_clip is not None:
+        clip_mask = w > weight_clip
+        clip_share = float(clip_mask.mean())
+        w = np.minimum(w, weight_clip)
+
+    mu_taken = mu_hat_predict(mu_model, df, aA, target)
+    mean_w = np.mean(w) + 1e-12
+    adj = (w / mean_w) * (r - mu_taken)
+    value = float(np.mean(dm_part + adj))
+    return value, ess(w), clip_share
+
+
+def switch_dr_value(
+    df: pd.DataFrame,
+    policyB,
+    mu_model,
+    pA: np.ndarray,
+    tau: float,
+    target: str = "accept",
+) -> Tuple[float, float, float]:
+    """Switch-DR оценка с переключением по весу.
+
+    Добавляет IPS-поправку только если вес \(w_i = \pi_B/\pi_A\) не превышает
+    порог `tau`. При больших весах используется только DM‑часть, что снижает
+    дисперсию оценщика.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Логи политики A с исходом `target`.
+    policyB : BasePolicy
+        Новая политика.
+    mu_model : модель исхода
+        Обученная модель `\hat\mu(x,a)`.
+    pA : np.ndarray
+        Оценённые вероятности поведения `π_A(a_A|x)`.
+    tau : float
+        Порог для применения IPS-поправки.
+    target : {"accept", "cltv"}
+        Название колонки исхода.
+
+    Returns
+    -------
+    (value, ess, switch_share)
+        Оценка метрики, эффективный размер выборки и доля записей без IPS‑поправки.
+    """
+    _validate_logs(df, target)
+    if len(pA) != len(df):
+        raise ValueError("pA must have same length as df")
+    if np.any((pA <= 0) | (pA > 1)):
+        raise ValueError("propensity scores must be in (0,1]")
+    probsB = policyB.action_probs(df)
+    r = df[target].values
+    aA = df["a_A"].values
+
+    dm_part = np.zeros(len(df), dtype=float)
+    for a in BasePolicy.ACTIONS:
+        pa = probsB[:, a]
+        if pa.sum() == 0:
+            continue
+        mu = mu_hat_predict(mu_model, df, np.full(len(df), a), target)
+        dm_part += pa * mu
+
+    piB_taken = probsB[np.arange(len(df)), aA]
+    w = piB_taken / pA
+    mask = w <= tau
+    switch_share = float((~mask).mean())
+    w_sw = np.where(mask, w, 0.0)
+
+    mu_taken = mu_hat_predict(mu_model, df, aA, target)
+    adj = w_sw * (r - mu_taken)
+    value = float(np.mean(dm_part + adj))
+    return value, ess(w_sw), switch_share
 
 
 def ate_from_values(vB: float, vA: float) -> float:
