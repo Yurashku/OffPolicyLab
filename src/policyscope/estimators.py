@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 from typing import Tuple, Optional, Literal
 from sklearn.linear_model import LogisticRegression, LinearRegression
-from sklearn.preprocessing import OneHotEncoder
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 from policyscope.policies import BasePolicy
 
@@ -85,10 +85,12 @@ def ess(weights: np.ndarray) -> float:
     return float((s1 * s1) / s2)
 
 
-def make_design(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, OneHotEncoder]:
+def make_design(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, OneHotEncoder, StandardScaler]:
     """Создаёт дизайн‑матрицу для обучения модели исхода.
 
-    Признаки: [loyal, age_z, risk_z, income_z] + one-hot по действию.
+    Числовые признаки ``age``, ``risk`` и ``income`` нормализуются с помощью
+    ``StandardScaler`` перед конкатенацией с ``loyal`` и one-hot представлением
+    действия.
 
     Returns
     -------
@@ -98,8 +100,12 @@ def make_design(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, OneHotEncoder
         One-hot представление действий.
     oh : OneHotEncoder
         Обученный кодировщик (полезен для предсказаний).
+    scaler : StandardScaler
+        Обученный нормализатор числовых признаков.
     """
-    X_base = df[["loyal", "age_z", "risk_z", "income_z"]].values
+    scaler = StandardScaler()
+    num_scaled = scaler.fit_transform(df[["age", "risk", "income"]])
+    X_base = np.hstack([df[["loyal"]].values, num_scaled])
     a = df["a_A"].values.reshape(-1, 1)
     try:
         oh = OneHotEncoder(
@@ -111,25 +117,30 @@ def make_design(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, OneHotEncoder
         )
     A_oh = oh.fit_transform(a)
     X = np.hstack([X_base, A_oh])
-    return X, A_oh, oh
+    return X, A_oh, oh, scaler
 
 
 def train_pi_hat(df: pd.DataFrame):
     """Обучает модель пропенсити ``\hat\pi(a|x)``.
 
-    Используется многоклассовая логистическая регрессия по признакам
-    [loyal, age_z, risk_z, income_z].
+    Используется многоклассовая логистическая регрессия. Перед обучением
+    признаки ``age``, ``risk`` и ``income`` нормализуются с помощью
+    ``StandardScaler``.
     """
-    X = df[["loyal", "age_z", "risk_z", "income_z"]].values
+    scaler = StandardScaler()
+    num_scaled = scaler.fit_transform(df[["age", "risk", "income"]])
+    X = np.hstack([df[["loyal"]].values, num_scaled])
     y = df["a_A"].values
     model = LogisticRegression(max_iter=1000, multi_class="multinomial")
     model.fit(X, y)
+    model._scaler = scaler  # type: ignore[attr-defined]
     return model
 
 
 def pi_hat_predict(model, df: pd.DataFrame) -> np.ndarray:
     """Предсказывает ``\hat\pi(a|x)`` для всех действий."""
-    X = df[["loyal", "age_z", "risk_z", "income_z"]].values
+    num_scaled = model._scaler.transform(df[["age", "risk", "income"]])  # type: ignore[attr-defined]
+    X = np.hstack([df[["loyal"]].values, num_scaled])
     probs = model.predict_proba(X)
     return np.clip(probs, 1e-6, 1 - 1e-6)
 
@@ -142,7 +153,7 @@ def train_mu_hat(df: pd.DataFrame, target: Literal["accept", "cltv"] = "accept")
 
     Возвращает обученную модель с атрибутом `_oh` для кодировщика one-hot.
     """
-    X, _, oh = make_design(df)
+    X, _, oh, scaler = make_design(df)
     y = df[target].values
     if target == "accept":
         model = LogisticRegression(max_iter=1000)
@@ -151,6 +162,7 @@ def train_mu_hat(df: pd.DataFrame, target: Literal["accept", "cltv"] = "accept")
         model = LinearRegression()
         model.fit(X, y)
     model._oh = oh  # type: ignore[attr-defined]
+    model._scaler = scaler  # type: ignore[attr-defined]
     return model
 
 
@@ -160,7 +172,8 @@ def mu_hat_predict(model, df: pd.DataFrame, action: np.ndarray, target: str) -> 
     Параметр `action` может быть массивом тех же размеров, что и `df`, или
     скалярным значением (будет вещательно расширён).
     """
-    num = df[["loyal", "age_z", "risk_z", "income_z"]].values
+    num_scaled = model._scaler.transform(df[["age", "risk", "income"]])  # type: ignore[attr-defined]
+    num = np.hstack([df[["loyal"]].values, num_scaled])
     if np.isscalar(action):
         act = np.full(len(df), action, dtype=int).reshape(-1, 1)
     else:
