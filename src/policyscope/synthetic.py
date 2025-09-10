@@ -97,8 +97,7 @@ class SyntheticRecommenderEnv:
         -------
         pandas.DataFrame
             Таблица пользователей со столбцами:
-            user_id, loyal, age, risk, income, region,
-            age_z, risk_z, income_z.
+            user_id, loyal, age, risk, income, region.
         """
         n = n or self.cfg.n_users
         r = self.rng
@@ -109,11 +108,6 @@ class SyntheticRecommenderEnv:
         income = r.lognormal(mean=10.5, sigma=0.5, size=n)
         region = r.integers(0, 5, size=n)
 
-        # Нормализация
-        age_z = (age - 40) / 12.0
-        risk_z = (risk - 0.5) / 0.25
-        income_z = (np.log(income) - np.log(income).mean()) / np.log(income).std()
-
         df = pd.DataFrame({
             "user_id": np.arange(n, dtype=np.int64),
             "loyal": loyal,
@@ -121,20 +115,25 @@ class SyntheticRecommenderEnv:
             "risk": risk,
             "income": income,
             "region": region,
-            "age_z": age_z,
-            "risk_z": risk_z,
-            "income_z": income_z,
         })
         return df
 
     def _features_row(self, row: pd.Series) -> np.ndarray:
-        """Вектор признаков для одной строки (1, loyal, age_z, risk_z, income_z)."""
+        """Вектор признаков для одной строки.
+
+        Нормализация признаков ``age``, ``risk`` и ``income`` выполняется на
+        лету, чтобы синтетическая среда оперировала только сырыми значениями.
+        Возвращается массив ``(1, loyal, age_z, risk_z, income_z)``.
+        """
+        age_z = (row["age"] - 40) / 12.0
+        risk_z = (row["risk"] - 0.5) / 0.25
+        income_z = (np.log(row["income"]) - 10.5) / 0.5
         return np.array([
             1.0,
             row["loyal"],
-            row["age_z"],
-            row["risk_z"],
-            row["income_z"],
+            age_z,
+            risk_z,
+            income_z,
         ], dtype=float)
 
     def true_accept_prob(self, X: pd.DataFrame, a: np.ndarray) -> np.ndarray:
@@ -165,7 +164,8 @@ class SyntheticRecommenderEnv:
 
     def base_cltv(self, X: pd.DataFrame) -> np.ndarray:
         """Базовая составляющая CLTV (до uplift)."""
-        base = 300.0 + 400.0 * X["loyal"].values + 120.0 * np.maximum(X["income_z"].values, -1)
+        income_z = (np.log(X["income"]) - 10.5) / 0.5
+        base = 300.0 + 400.0 * X["loyal"].values + 120.0 * np.maximum(income_z, -1)
         noise = self.rng.normal(0, 30, size=len(X))
         return np.maximum(base + noise, 50.0)
 

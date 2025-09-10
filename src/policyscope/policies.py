@@ -69,12 +69,15 @@ class GreedyUnknown(BasePolicy):
         self.W[:, 0] += np.array([0.5, 0.4, 0.3, 0.2])
 
     def _score(self, X: pd.DataFrame) -> np.ndarray:
+        age_z = (X["age"] - 40) / 12.0
+        risk_z = (X["risk"] - 0.5) / 0.25
+        income_z = (np.log(X["income"]) - 10.5) / 0.5
         feats = np.stack([
             np.ones(len(X)),
             X["loyal"].values,
-            X["age_z"].values,
-            X["risk_z"].values,
-            X["income_z"].values,
+            age_z.values,
+            risk_z.values,
+            income_z.values,
         ], axis=1)  # (n,5)
         return feats @ self.W.T  # (n,4)
 
