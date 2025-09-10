@@ -212,7 +212,9 @@ def replay_value(df: pd.DataFrame, a_B: np.ndarray, target: str = "accept") -> f
     logging.info(
         f"[Replay] Совпадающих действий: {mask.sum()} из {len(df)}"
     )
-    return float(df.loc[mask, target].mean())
+    val = float(df.loc[mask, target].mean())
+    logging.info(f"[Replay] Оценённое значение метрики: {val:.4f}")
+    return val
 
 
 def prepare_piB_taken(df: pd.DataFrame, policyB) -> np.ndarray:
@@ -267,6 +269,7 @@ def ips_value(
     if len(pA) != len(df):
         raise ValueError("pA must have same length as df")
     if np.any((pA <= 0) | (pA > 1)):
+        logging.warning("[IPS] Обнаружены нулевые или отрицательные пропенсити")
         raise ValueError("propensity scores must be in (0,1]")
     w = piB_taken / pA
     clip_share = 0.0
@@ -278,8 +281,11 @@ def ips_value(
     value = float(np.mean(r * w))
     ess_w = ess(w)
     logging.info(f"[IPS] ESS = {ess_w:.1f} из {len(df)}")
+    if ess_w < 0.5 * len(df):
+        logging.warning("[IPS] Низкий ESS — данных может быть недостаточно")
     if weight_clip is not None:
         logging.info(f"[IPS] Обрезано весов: {clip_share:.2%}")
+    logging.info(f"[IPS] Оценённое значение метрики: {value:.4f}")
     return value, ess_w, clip_share
 
 
@@ -299,6 +305,7 @@ def snips_value(
     if len(pA) != len(df):
         raise ValueError("pA must have same length as df")
     if np.any((pA <= 0) | (pA > 1)):
+        logging.warning("[SNIPS] Обнаружены нулевые или отрицательные пропенсити")
         raise ValueError("propensity scores must be in (0,1]")
     w = piB_taken / pA
     clip_share = 0.0
@@ -313,8 +320,11 @@ def snips_value(
     ess_w = ess(w)
     logging.info("[SNIPS] Веса нормализованы")
     logging.info(f"[SNIPS] ESS = {ess_w:.1f} из {len(df)}")
+    if ess_w < 0.5 * len(df):
+        logging.warning("[SNIPS] Низкий ESS — данных может быть недостаточно")
     if weight_clip is not None:
         logging.info(f"[SNIPS] Обрезано весов: {clip_share:.2%}")
+    logging.info(f"[SNIPS] Оценённое значение метрики: {value:.4f}")
     return value, ess_w, clip_share
 
 
@@ -331,7 +341,7 @@ def dm_value(df: pd.DataFrame, policyB, mu_model, target: str = "accept") -> flo
             continue
         mu = mu_hat_predict(mu_model, df, np.full(len(df), a), target)
         val += float(np.mean(pa * mu))
-    logging.info("[DM] Оценка завершена")
+    logging.info(f"[DM] Оценённое значение метрики: {val:.4f}")
     return val
 
 
@@ -368,6 +378,7 @@ def dr_value(
     if len(pA) != len(df):
         raise ValueError("pA must have same length as df")
     if np.any((pA <= 0) | (pA > 1)):
+        logging.warning("[DR] Обнаружены нулевые или отрицательные пропенсити")
         raise ValueError("propensity scores must be in (0,1]")
     probsB = policyB.action_probs(df)
     r = df[target].values
@@ -395,8 +406,11 @@ def dr_value(
     value = float(np.mean(dm_part + adj))
     ess_w = ess(w)
     logging.info(f"[DR] ESS = {ess_w:.1f} из {len(df)}")
+    if ess_w < 0.5 * len(df):
+        logging.warning("[DR] Низкий ESS — данных может быть недостаточно")
     if weight_clip is not None:
         logging.info(f"[DR] Обрезано весов: {clip_share:.2%}")
+    logging.info(f"[DR] Оценённое значение метрики: {value:.4f}")
     return value, ess_w, clip_share
 
 
@@ -441,6 +455,7 @@ def sndr_value(
     if len(pA) != len(df):
         raise ValueError("pA must have same length as df")
     if np.any((pA <= 0) | (pA > 1)):
+        logging.warning("[SNDR] Обнаружены нулевые или отрицательные пропенсити")
         raise ValueError("propensity scores must be in (0,1]")
     probsB = policyB.action_probs(df)
     r = df[target].values
@@ -470,8 +485,11 @@ def sndr_value(
     value = float(np.mean(dm_part + adj))
     ess_w = ess(w)
     logging.info(f"[SNDR] ESS = {ess_w:.1f} из {len(df)}")
+    if ess_w < 0.5 * len(df):
+        logging.warning("[SNDR] Низкий ESS — данных может быть недостаточно")
     if weight_clip is not None:
         logging.info(f"[SNDR] Обрезано весов: {clip_share:.2%}")
+    logging.info(f"[SNDR] Оценённое значение метрики: {value:.4f}")
     return value, ess_w, clip_share
 
 
@@ -516,6 +534,7 @@ def switch_dr_value(
     if len(pA) != len(df):
         raise ValueError("pA must have same length as df")
     if np.any((pA <= 0) | (pA > 1)):
+        logging.warning("[Switch-DR] Обнаружены нулевые или отрицательные пропенсити")
         raise ValueError("propensity scores must be in (0,1]")
     probsB = policyB.action_probs(df)
     r = df[target].values
@@ -540,9 +559,12 @@ def switch_dr_value(
     value = float(np.mean(dm_part + adj))
     ess_w = ess(w_sw)
     logging.info(f"[Switch-DR] ESS = {ess_w:.1f} из {len(df)}")
+    if ess_w < 0.5 * len(df):
+        logging.warning("[Switch-DR] Низкий ESS — данных может быть недостаточно")
     logging.info(
         f"[Switch-DR] Без IPS-поправки: {switch_share:.2%}"
     )
+    logging.info(f"[Switch-DR] Оценённое значение метрики: {value:.4f}")
     return value, ess_w, switch_share
 
 
