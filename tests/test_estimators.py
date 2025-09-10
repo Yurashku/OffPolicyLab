@@ -11,6 +11,8 @@ from policyscope.estimators import (
     ips_value,
     snips_value,
     dr_value,
+    sndr_value,
+    switch_dr_value,
 )
 
 
@@ -29,10 +31,14 @@ def test_estimators_run_on_synthetic():
     v_ips, ess, _ = ips_value(logsA, piB_taken, pA_taken, target="accept", weight_clip=20)
     v_snips, _, _ = snips_value(logsA, piB_taken, pA_taken, target="accept", weight_clip=20)
     v_dr, _, _ = dr_value(logsA, policyB, mu_accept, pA_taken, target="accept", weight_clip=20)
+    v_sndr, _, _ = sndr_value(logsA, policyB, mu_accept, pA_taken, target="accept", weight_clip=20)
+    v_switch, _, _ = switch_dr_value(logsA, policyB, mu_accept, pA_taken, tau=20, target="accept")
 
     assert np.isfinite(v_ips)
     assert np.isfinite(v_snips)
     assert np.isfinite(v_dr)
+    assert np.isfinite(v_sndr)
+    assert np.isfinite(v_switch)
     assert ess > 0
 
 
@@ -49,3 +55,7 @@ def test_invalid_inputs_raise_errors():
     dummy_model = object()
     with pytest.raises(ValueError):
         dr_value(df_missing, dummy_policy, dummy_model, pA2, target="accept")
+    with pytest.raises(ValueError):
+        sndr_value(df_missing, dummy_policy, dummy_model, pA2, target="accept")
+    with pytest.raises(ValueError):
+        switch_dr_value(df_missing, dummy_policy, dummy_model, pA2, tau=1.0, target="accept")
