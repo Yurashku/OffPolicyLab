@@ -64,15 +64,17 @@ python examples/run_synthetic_experiment.py \
 
 - `user_id` — идентификатор пользователя;
 - `a_A` — действие, которое показала политика A;
-- `propensity_A` — вероятность выбора этого действия;
 - `accept` и/или `cltv` — отклик и ценность;
 - признаки пользователя (возраст, доход и др.), используемые моделью.
 
 ## Пример применения на своих данных
 
 ```python
+import numpy as np
 import pandas as pd
 from policyscope.estimators import (
+    train_pi_hat,
+    pi_hat_predict,
     train_mu_hat,
     prepare_piB_taken,
     replay_value,
@@ -82,14 +84,17 @@ from policyscope.estimators import (
 )
 from policyscope.policies import make_policy
 
-df = pd.read_csv("logs_with_propensity.csv")
+df = pd.read_csv("logs_without_propensity.csv")
 policyB = make_policy("softmax", tau=0.7)
 piB_taken = prepare_piB_taken(df, policyB)
+pi_model = train_pi_hat(df)
+pA_all = pi_hat_predict(pi_model, df)
+pA_taken = pA_all[np.arange(len(df)), df["a_A"].values]
 mu_hat = train_mu_hat(df, target="accept")
 V_replay = replay_value(df, policyB, target="accept")
-V_ips, ess_ips, clip_ips = ips_value(df, policyB, target="accept")
-V_snips, ess_snips, clip_snips = snips_value(df, policyB, target="accept")
-V_dr, ess_dr, clip_dr = dr_value(df, policyB, mu_hat, target="accept")
+V_ips, ess_ips, clip_ips = ips_value(df, piB_taken, pA_taken, target="accept")
+V_snips, ess_snips, clip_snips = snips_value(df, piB_taken, pA_taken, target="accept")
+V_dr, ess_dr, clip_dr = dr_value(df, policyB, mu_hat, pA_taken, target="accept")
 print(V_replay, V_ips, V_snips, V_dr)
 ```
 

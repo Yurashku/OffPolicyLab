@@ -31,6 +31,8 @@ from policyscope.policies import BasePolicy
 __all__ = [
     "ess",
     "make_design",
+    "train_pi_hat",
+    "pi_hat_predict",
     "train_mu_hat",
     "mu_hat_predict",
     "value_on_policy",
@@ -44,8 +46,8 @@ __all__ = [
 ]
 
 
-def _validate_logs(df: pd.DataFrame, target: str, warn: bool = False) -> None:
-    """Проверяет наличие необходимых колонок и корректность `propensity_A`.
+def _validate_logs(df: pd.DataFrame, target: str) -> None:
+    """Проверяет наличие необходимых колонок в логах.
 
     Parameters
     ----------
@@ -53,21 +55,12 @@ def _validate_logs(df: pd.DataFrame, target: str, warn: bool = False) -> None:
         Логи политики A.
     target : str
         Имя целевой метрики.
-    warn : bool, default False
-        Логировать предупреждение при некорректных значениях `propensity_A`.
     """
-    required = {"a_A", "propensity_A", target}
+    required = {"a_A", target}
     missing = required - set(df.columns)
     if missing:
         missing_str = ", ".join(sorted(missing))
         raise ValueError(f"Missing required columns: {missing_str}")
-
-    pA = df["propensity_A"].values
-    invalid = (pA <= 0) | (pA > 1)
-    if np.any(invalid):
-        if warn:
-            logging.warning("propensity_A outside (0,1] range")
-        raise ValueError("propensity_A must be in (0,1]")
 
 
 def ess(weights: np.ndarray) -> float:
@@ -120,6 +113,26 @@ def make_design(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, OneHotEncoder
     A_oh = oh.fit_transform(a)
     X = np.hstack([X_base, A_oh])
     return X, A_oh, oh
+
+
+def train_pi_hat(df: pd.DataFrame):
+    """Обучает модель пропенсити ``\hat\pi(a|x)``.
+
+    Используется многоклассовая логистическая регрессия по признакам
+    [loyal, age_z, risk_z, income_z].
+    """
+    X = df[["loyal", "age_z", "risk_z", "income_z"]].values
+    y = df["a_A"].values
+    model = LogisticRegression(max_iter=1000, multi_class="multinomial")
+    model.fit(X, y)
+    return model
+
+
+def pi_hat_predict(model, df: pd.DataFrame) -> np.ndarray:
+    """Предсказывает ``\hat\pi(a|x)`` для всех действий."""
+    X = df[["loyal", "age_z", "risk_z", "income_z"]].values
+    probs = model.predict_proba(X)
+    return np.clip(probs, 1e-6, 1 - 1e-6)
 
 
 def train_mu_hat(df: pd.DataFrame, target: Literal["accept", "cltv"] = "accept"):
@@ -199,15 +212,23 @@ def prepare_piB_taken(df: pd.DataFrame, policyB) -> np.ndarray:
     return probsB[np.arange(len(df)), aA]
 
 
-def ips_value(df: pd.DataFrame, piB_taken: np.ndarray, target: str = "accept", weight_clip: Optional[float] = None) -> Tuple[float, float, float]:
+def ips_value(
+    df: pd.DataFrame,
+    piB_taken: np.ndarray,
+    pA: np.ndarray,
+    target: str = "accept",
+    weight_clip: Optional[float] = None,
+) -> Tuple[float, float, float]:
     """IPS‑оценка значения новой политики.
 
     Parameters
     ----------
     df : pd.DataFrame
-        Логи политики A c колонками propensity_A и исходом `target`.
+        Логи политики A с исходом `target`.
     piB_taken : np.ndarray
         Probabilities π_B(a_A|x) — вероятности, с которыми политика B выбрала бы логированные действия.
+    pA : np.ndarray
+        Оценённые вероятности поведения `π_A(a_A|x)`.
     target : {"accept", "cltv"}
         Название колонки исхода.
     weight_clip : float, optional
@@ -218,8 +239,11 @@ def ips_value(df: pd.DataFrame, piB_taken: np.ndarray, target: str = "accept", w
     (value, ess, clip_share)
         Оценка метрики, эффективный размер выборки и доля обрезанных весов.
     """
-    _validate_logs(df, target, warn=True)
-    pA = df["propensity_A"].values
+    _validate_logs(df, target)
+    if len(pA) != len(df):
+        raise ValueError("pA must have same length as df")
+    if np.any((pA <= 0) | (pA > 1)):
+        raise ValueError("propensity scores must be in (0,1]")
     w = piB_taken / pA
     clip_share = 0.0
     if weight_clip is not None:
@@ -232,13 +256,22 @@ def ips_value(df: pd.DataFrame, piB_taken: np.ndarray, target: str = "accept", w
     return value, ess(w), clip_share
 
 
-def snips_value(df: pd.DataFrame, piB_taken: np.ndarray, target: str = "accept", weight_clip: Optional[float] = None) -> Tuple[float, float, float]:
+def snips_value(
+    df: pd.DataFrame,
+    piB_taken: np.ndarray,
+    pA: np.ndarray,
+    target: str = "accept",
+    weight_clip: Optional[float] = None,
+) -> Tuple[float, float, float]:
     """SNIPS‑оценка значения новой политики.
 
     Считается как (∑r_i w_i)/(∑w_i). Применяет обрезку весов, если указано.
     """
-    _validate_logs(df, target, warn=False)
-    pA = df["propensity_A"].values
+    _validate_logs(df, target)
+    if len(pA) != len(df):
+        raise ValueError("pA must have same length as df")
+    if np.any((pA <= 0) | (pA > 1)):
+        raise ValueError("propensity scores must be in (0,1]")
     w = piB_taken / pA
     clip_share = 0.0
     if weight_clip is not None:
@@ -265,17 +298,42 @@ def dm_value(df: pd.DataFrame, policyB, mu_model, target: str = "accept") -> flo
     return val
 
 
-def dr_value(df: pd.DataFrame, policyB, mu_model, target: str = "accept", weight_clip: Optional[float] = None) -> Tuple[float, float, float]:
+def dr_value(
+    df: pd.DataFrame,
+    policyB,
+    mu_model,
+    pA: np.ndarray,
+    target: str = "accept",
+    weight_clip: Optional[float] = None,
+) -> Tuple[float, float, float]:
     """Doubly Robust оценка значения новой политики.
 
     Комбинирует Direct Method и IPS‑поправку. При корректном
     моделировании хотя бы одной составляющей даёт несмещённую оценку.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Логи политики A с исходом `target`.
+    policyB : BasePolicy
+        Новая политика.
+    mu_model : модель исхода
+        Обученная модель `\hat\mu(x,a)`.
+    pA : np.ndarray
+        Оценённые вероятности поведения `π_A(a_A|x)`.
+    target : {"accept", "cltv"}
+        Название колонки исхода.
+    weight_clip : float, optional
+        Обрезка весов.
     """
-    _validate_logs(df, target, warn=True)
+    _validate_logs(df, target)
+    if len(pA) != len(df):
+        raise ValueError("pA must have same length as df")
+    if np.any((pA <= 0) | (pA > 1)):
+        raise ValueError("propensity scores must be in (0,1]")
     probsB = policyB.action_probs(df)
     r = df[target].values
     aA = df["a_A"].values
-    pA = df["propensity_A"].values
 
     # DM‑часть: ожидание модели
     dm_part = np.zeros(len(df), dtype=float)

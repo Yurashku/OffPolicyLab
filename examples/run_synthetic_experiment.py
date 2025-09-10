@@ -39,6 +39,8 @@ from policyscope.estimators import (
     dm_value,
     dr_value,
     train_mu_hat,
+    train_pi_hat,
+    pi_hat_predict,
     ate_from_values,
 )
 from policyscope.bootstrap import paired_bootstrap_ci
@@ -83,20 +85,23 @@ def main() -> None:
     # Расчёт вероятностей выбора текущих действий под B
     piB_taken = prepare_piB_taken(logsA, policyB)
 
-    # Обучаем модели исхода для DM/DR
+    # Обучаем модели исхода и пропенсити для DM/DR/IPS/SNIPS
     mu_accept = train_mu_hat(logsA, target="accept")
     mu_cltv = train_mu_hat(logsA, target="cltv")
+    pi_model = train_pi_hat(logsA)
+    pA_all = pi_hat_predict(pi_model, logsA)
+    pA_taken = pA_all[np.arange(len(logsA)), logsA["a_A"].values]
 
     # Replay (на совпадающих действиях)
     vB_replay_accept = replay_value(logsA, policyB.action_argmax(X), target="accept")
     vB_replay_cltv = replay_value(logsA, policyB.action_argmax(X), target="cltv")
 
     # IPS и SNIPS
-    vB_ips_accept, ess_ips_accept, clip_ips_accept = ips_value(logsA, piB_taken, target="accept", weight_clip=args.weight_clip)
-    vB_ips_cltv, ess_ips_cltv, clip_ips_cltv = ips_value(logsA, piB_taken, target="cltv", weight_clip=args.weight_clip)
+    vB_ips_accept, ess_ips_accept, clip_ips_accept = ips_value(logsA, piB_taken, pA_taken, target="accept", weight_clip=args.weight_clip)
+    vB_ips_cltv, ess_ips_cltv, clip_ips_cltv = ips_value(logsA, piB_taken, pA_taken, target="cltv", weight_clip=args.weight_clip)
 
-    vB_snips_accept, ess_snips_accept, clip_snips_accept = snips_value(logsA, piB_taken, target="accept", weight_clip=args.weight_clip)
-    vB_snips_cltv, ess_snips_cltv, clip_snips_cltv = snips_value(logsA, piB_taken, target="cltv", weight_clip=args.weight_clip)
+    vB_snips_accept, ess_snips_accept, clip_snips_accept = snips_value(logsA, piB_taken, pA_taken, target="accept", weight_clip=args.weight_clip)
+    vB_snips_cltv, ess_snips_cltv, clip_snips_cltv = snips_value(logsA, piB_taken, pA_taken, target="cltv", weight_clip=args.weight_clip)
 
     # Direct Method
     vB_dm_accept = dm_value(logsA, policyB, mu_accept, target="accept")
@@ -104,10 +109,10 @@ def main() -> None:
 
     # Doubly Robust
     vB_dr_accept, ess_dr_accept, clip_dr_accept = dr_value(
-        logsA, policyB, mu_accept, target="accept", weight_clip=args.weight_clip
+        logsA, policyB, mu_accept, pA_taken, target="accept", weight_clip=args.weight_clip
     )
     vB_dr_cltv, ess_dr_cltv, clip_dr_cltv = dr_value(
-        logsA, policyB, mu_cltv, target="cltv", weight_clip=args.weight_clip
+        logsA, policyB, mu_cltv, pA_taken, target="cltv", weight_clip=args.weight_clip
     )
 
     # Oracle (истинные ожидания)

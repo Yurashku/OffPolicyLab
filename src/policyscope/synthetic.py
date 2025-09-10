@@ -230,27 +230,25 @@ class SyntheticRecommenderEnv:
         Параметры
         ----------
         policyA : объект политики
-            Политика, генерирующая действие и пропенсити.
+            Политика, генерирующая действие.
         X : pd.DataFrame
             Данные пользователей.
 
         Returns
         -------
         pd.DataFrame
-            Логи со столбцами: a_A, propensity_A, accept, cltv + исходные признаки.
+            Логи со столбцами: a_A, accept, cltv + исходные признаки.
         """
         probs = policyA.action_probs(X)
         a = np.array([
             self.rng.choice(self.ACTIONS, p=probs[i])
             for i in range(len(X))
         ], dtype=int)
-        prop = probs[np.arange(len(X)), a]
         p_accept = self.true_accept_prob(X, a)
         acc = self.draw_accept(p_accept)
         cltv = self.draw_cltv(X, a, acc)
         df = X.copy()
         df["a_A"] = a
-        df["propensity_A"] = prop
         df["accept"] = acc
         df["cltv"] = cltv
         return df
