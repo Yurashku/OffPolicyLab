@@ -8,6 +8,10 @@ Policyscope package.
 Версия пакета определяется переменной `__version__`.
 """
 
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+
 __all__ = ["__version__"]
 
 __version__ = "0.1.0"
