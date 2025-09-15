@@ -38,6 +38,8 @@
 
 ## Установка
 
+Требуется Python 3.8 или новее.
+
 ```bash
 python -m venv .venv && source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
