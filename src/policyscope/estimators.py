@@ -136,8 +136,8 @@ def train_pi_hat(df: pd.DataFrame):
     X = np.hstack([df[["loyal"]].values, num_scaled])
     y = df["a_A"].values
     # ``multi_class`` deprecated in scikit-learn>=1.5 and will always use
-    # ``multinomial`` in future versions. Rely on default behaviour to
-    # keep compatibility and avoid noisy FutureWarning.
+    # ``multinomial`` в будущих версиях. Оставляем значение по умолчанию,
+    # чтобы сохранить совместимость и не получать FutureWarning.
     model = LogisticRegression(max_iter=1000)
     model.fit(X, y)
     model._scaler = scaler  # type: ignore[attr-defined]
