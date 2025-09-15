@@ -125,7 +125,7 @@ def make_design(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, OneHotEncoder
 
 
 def train_pi_hat(df: pd.DataFrame):
-    """Обучает модель пропенсити ``\hat\pi(a|x)``.
+    r"""Обучает модель пропенсити ``\hat\pi(a|x)``.
 
     Используется многоклассовая логистическая регрессия. Перед обучением
     признаки ``age``, ``risk`` и ``income`` нормализуются с помощью
@@ -135,14 +135,17 @@ def train_pi_hat(df: pd.DataFrame):
     num_scaled = scaler.fit_transform(df[["age", "risk", "income"]])
     X = np.hstack([df[["loyal"]].values, num_scaled])
     y = df["a_A"].values
-    model = LogisticRegression(max_iter=1000, multi_class="multinomial")
+    # ``multi_class`` deprecated in scikit-learn>=1.5 and will always use
+    # ``multinomial`` in future versions. Rely on default behaviour to
+    # keep compatibility and avoid noisy FutureWarning.
+    model = LogisticRegression(max_iter=1000)
     model.fit(X, y)
     model._scaler = scaler  # type: ignore[attr-defined]
     return model
 
 
 def pi_hat_predict(model, df: pd.DataFrame) -> np.ndarray:
-    """Предсказывает ``\hat\pi(a|x)`` для всех действий."""
+    r"""Предсказывает ``\hat\pi(a|x)`` для всех действий."""
     num_scaled = model._scaler.transform(df[["age", "risk", "income"]])  # type: ignore[attr-defined]
     X = np.hstack([df[["loyal"]].values, num_scaled])
     probs = model.predict_proba(X)
@@ -353,7 +356,7 @@ def dr_value(
     target: str = "accept",
     weight_clip: Optional[float] = None,
 ) -> Tuple[float, float, float]:
-    """Doubly Robust оценка значения новой политики.
+    r"""Doubly Robust оценка значения новой политики.
 
     Комбинирует Direct Method и IPS‑поправку. При корректном
     моделировании хотя бы одной составляющей даёт несмещённую оценку.
@@ -422,7 +425,7 @@ def sndr_value(
     target: str = "accept",
     weight_clip: Optional[float] = None,
 ) -> Tuple[float, float, float]:
-    """Self-Normalized Doubly Robust оценка значения новой политики.
+    r"""Self-Normalized Doubly Robust оценка значения новой политики.
 
     Для каждого наблюдения добавляет IPS-поправку, нормализованную на
     средний вес:
@@ -501,7 +504,7 @@ def switch_dr_value(
     tau: float,
     target: str = "accept",
 ) -> Tuple[float, float, float]:
-    """Switch-DR оценка с переключением по весу.
+    r"""Switch-DR оценка с переключением по весу.
 
     Добавляет IPS-поправку только если вес \(w_i = \pi_B/\pi_A\) не превышает
     порог `tau`. При больших весах используется только DM‑часть, что снижает
