@@ -20,7 +20,6 @@ import pandas as pd
 
 from .policies import BasePolicy
 
-logger = logging.getLogger(__name__)
 __all__ = ["decision_summary", "dump_json", "analyze_logs"]
 
 
@@ -132,5 +131,5 @@ def analyze_logs(df: pd.DataFrame, policyB: Optional[BasePolicy] = None) -> str:
         lines.append("- DR: можно применить, пропенсити присутствуют.")
 
     for line in lines:
-        logger.info(line)
+        logging.info(line)
     return "\n".join(lines)
