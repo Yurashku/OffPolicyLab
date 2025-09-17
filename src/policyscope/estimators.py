@@ -29,6 +29,20 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 from policyscope.policies import BasePolicy
 
+
+logger = logging.getLogger(__name__)
+
+
+def _log(
+    enabled: bool,
+    message: str,
+    level: Literal["info", "warning"] = "info",
+) -> None:
+    """Proxy к logger, уважающий флаг включения логов."""
+    if not enabled:
+        return
+    getattr(logger, level)(message)
+
 __all__ = [
     "ess",
     "make_design",
@@ -198,25 +212,30 @@ def value_on_policy(df: pd.DataFrame, target: str = "accept") -> float:
     return float(df[target].mean())
 
 
-def replay_value(df: pd.DataFrame, a_B: np.ndarray, target: str = "accept") -> float:
+def replay_value(
+    df: pd.DataFrame,
+    a_B: np.ndarray,
+    target: str = "accept",
+    log: bool = False,
+) -> float:
     """Оценка значения новой политики через повтор (replay).
 
     Отбираем только те записи, где новое действие совпадает с логом.
     Оставляем соответствующие исходы и усредняем.
-    Если совпадений нет, возвращаем NaN.
+    Если совпадений нет, возвращаем NaN. Чтобы включить пошаговый вывод,
+    передайте ``log=True``.
     """
-    logging.info("[Replay] Начинаем оценку Replay для новой политики…")
+    _log(log, "[Replay] Начинаем оценку Replay для новой политики…")
     mask = df["a_A"].values == a_B
     if mask.sum() == 0:
-        logging.info(
-            "[Replay] Нет совпадающих действий – политика B вне области данных A"
+        _log(
+            log,
+            "[Replay] Нет совпадающих действий – политика B вне области данных A",
         )
         return float("nan")
-    logging.info(
-        f"[Replay] Совпадающих действий: {mask.sum()} из {len(df)}"
-    )
+    _log(log, f"[Replay] Совпадающих действий: {mask.sum()} из {len(df)}")
     val = float(df.loc[mask, target].mean())
-    logging.info(f"[Replay] Оценённое значение метрики: {val:.4f}")
+    _log(log, f"[Replay] Оценённое значение метрики: {val:.4f}")
     return val
 
 
@@ -246,6 +265,7 @@ def ips_value(
     pA: np.ndarray,
     target: str = "accept",
     weight_clip: Optional[float] = None,
+    log: bool = False,
 ) -> Tuple[float, float, float]:
     """IPS‑оценка значения новой политики.
 
@@ -261,18 +281,24 @@ def ips_value(
         Название колонки исхода.
     weight_clip : float, optional
         Обрезка весов: w = min(w, weight_clip).
+    log : bool, default False
+        Включить подробное логирование хода расчёта.
 
     Returns
     -------
     (value, ess, clip_share)
         Оценка метрики, эффективный размер выборки и доля обрезанных весов.
     """
-    logging.info("[IPS] Начинаем оценку IPS для новой политики…")
+    _log(log, "[IPS] Начинаем оценку IPS для новой политики…")
     _validate_logs(df, target)
     if len(pA) != len(df):
         raise ValueError("pA must have same length as df")
     if np.any((pA <= 0) | (pA > 1)):
-        logging.warning("[IPS] Обнаружены нулевые или отрицательные пропенсити")
+        _log(
+            log,
+            "[IPS] Обнаружены нулевые или отрицательные пропенсити",
+            level="warning",
+        )
         raise ValueError("propensity scores must be in (0,1]")
     w = piB_taken / pA
     clip_share = 0.0
@@ -283,12 +309,16 @@ def ips_value(
     r = df[target].values
     value = float(np.mean(r * w))
     ess_w = ess(w)
-    logging.info(f"[IPS] ESS = {ess_w:.1f} из {len(df)}")
+    _log(log, f"[IPS] ESS = {ess_w:.1f} из {len(df)}")
     if ess_w < 0.5 * len(df):
-        logging.warning("[IPS] Низкий ESS — данных может быть недостаточно")
+        _log(
+            log,
+            "[IPS] Низкий ESS — данных может быть недостаточно",
+            level="warning",
+        )
     if weight_clip is not None:
-        logging.info(f"[IPS] Обрезано весов: {clip_share:.2%}")
-    logging.info(f"[IPS] Оценённое значение метрики: {value:.4f}")
+        _log(log, f"[IPS] Обрезано весов: {clip_share:.2%}")
+    _log(log, f"[IPS] Оценённое значение метрики: {value:.4f}")
     return value, ess_w, clip_share
 
 
@@ -298,17 +328,37 @@ def snips_value(
     pA: np.ndarray,
     target: str = "accept",
     weight_clip: Optional[float] = None,
+    log: bool = False,
 ) -> Tuple[float, float, float]:
     """SNIPS‑оценка значения новой политики.
 
     Считается как (∑r_i w_i)/(∑w_i). Применяет обрезку весов, если указано.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Логи политики A с исходом ``target``.
+    piB_taken : np.ndarray
+        Вероятности ``π_B(a_A|x)``.
+    pA : np.ndarray
+        Оценённые вероятности ``π_A(a_A|x)``.
+    target : {"accept", "cltv"}
+        Название колонки исхода.
+    weight_clip : float, optional
+        Обрезка весов: ``w = min(w, weight_clip)`` перед нормализацией.
+    log : bool, default False
+        Включить подробное логирование хода расчёта.
     """
-    logging.info("[SNIPS] Начинаем оценку SNIPS для новой политики…")
+    _log(log, "[SNIPS] Начинаем оценку SNIPS для новой политики…")
     _validate_logs(df, target)
     if len(pA) != len(df):
         raise ValueError("pA must have same length as df")
     if np.any((pA <= 0) | (pA > 1)):
-        logging.warning("[SNIPS] Обнаружены нулевые или отрицательные пропенсити")
+        _log(
+            log,
+            "[SNIPS] Обнаружены нулевые или отрицательные пропенсити",
+            level="warning",
+        )
         raise ValueError("propensity scores must be in (0,1]")
     w = piB_taken / pA
     clip_share = 0.0
@@ -321,21 +371,32 @@ def snips_value(
     den = np.sum(w) + 1e-12
     value = float(num / den)
     ess_w = ess(w)
-    logging.info("[SNIPS] Веса нормализованы")
-    logging.info(f"[SNIPS] ESS = {ess_w:.1f} из {len(df)}")
+    _log(log, "[SNIPS] Веса нормализованы")
+    _log(log, f"[SNIPS] ESS = {ess_w:.1f} из {len(df)}")
     if ess_w < 0.5 * len(df):
-        logging.warning("[SNIPS] Низкий ESS — данных может быть недостаточно")
+        _log(
+            log,
+            "[SNIPS] Низкий ESS — данных может быть недостаточно",
+            level="warning",
+        )
     if weight_clip is not None:
-        logging.info(f"[SNIPS] Обрезано весов: {clip_share:.2%}")
-    logging.info(f"[SNIPS] Оценённое значение метрики: {value:.4f}")
+        _log(log, f"[SNIPS] Обрезано весов: {clip_share:.2%}")
+    _log(log, f"[SNIPS] Оценённое значение метрики: {value:.4f}")
     return value, ess_w, clip_share
 
 
-def dm_value(df: pd.DataFrame, policyB, mu_model, target: str = "accept") -> float:
-    """Direct Method: ожидание предсказанного исхода под политикой B."""
-    logging.info(
-        "[DM] Начинаем оценку Direct Method для новой политики…"
-    )
+def dm_value(
+    df: pd.DataFrame,
+    policyB,
+    mu_model,
+    target: str = "accept",
+    log: bool = False,
+) -> float:
+    """Direct Method: ожидание предсказанного исхода под политикой B.
+
+    Передайте ``log=True``, чтобы увидеть подробные сообщения о ходе расчёта.
+    """
+    _log(log, "[DM] Начинаем оценку Direct Method для новой политики…")
     probsB = policyB.action_probs(df)
     val = 0.0
     for a in BasePolicy.ACTIONS:
@@ -344,7 +405,7 @@ def dm_value(df: pd.DataFrame, policyB, mu_model, target: str = "accept") -> flo
             continue
         mu = mu_hat_predict(mu_model, df, np.full(len(df), a), target)
         val += float(np.mean(pa * mu))
-    logging.info(f"[DM] Оценённое значение метрики: {val:.4f}")
+    _log(log, f"[DM] Оценённое значение метрики: {val:.4f}")
     return val
 
 
@@ -355,6 +416,7 @@ def dr_value(
     pA: np.ndarray,
     target: str = "accept",
     weight_clip: Optional[float] = None,
+    log: bool = False,
 ) -> Tuple[float, float, float]:
     r"""Doubly Robust оценка значения новой политики.
 
@@ -375,13 +437,19 @@ def dr_value(
         Название колонки исхода.
     weight_clip : float, optional
         Обрезка весов.
+    log : bool, default False
+        Включить подробное логирование хода расчёта.
     """
-    logging.info("[DR] Начинаем оценку Doubly Robust для новой политики…")
+    _log(log, "[DR] Начинаем оценку Doubly Robust для новой политики…")
     _validate_logs(df, target)
     if len(pA) != len(df):
         raise ValueError("pA must have same length as df")
     if np.any((pA <= 0) | (pA > 1)):
-        logging.warning("[DR] Обнаружены нулевые или отрицательные пропенсити")
+        _log(
+            log,
+            "[DR] Обнаружены нулевые или отрицательные пропенсити",
+            level="warning",
+        )
         raise ValueError("propensity scores must be in (0,1]")
     probsB = policyB.action_probs(df)
     r = df[target].values
@@ -403,17 +471,21 @@ def dr_value(
         clip_share = float(clip_mask.mean())
         w = np.minimum(w, weight_clip)
 
-    logging.info("[DR] Комбинируем DM и IPS-поправку")
+    _log(log, "[DR] Комбинируем DM и IPS-поправку")
     mu_taken = mu_hat_predict(mu_model, df, aA, target)
     adj = w * (r - mu_taken)
     value = float(np.mean(dm_part + adj))
     ess_w = ess(w)
-    logging.info(f"[DR] ESS = {ess_w:.1f} из {len(df)}")
+    _log(log, f"[DR] ESS = {ess_w:.1f} из {len(df)}")
     if ess_w < 0.5 * len(df):
-        logging.warning("[DR] Низкий ESS — данных может быть недостаточно")
+        _log(
+            log,
+            "[DR] Низкий ESS — данных может быть недостаточно",
+            level="warning",
+        )
     if weight_clip is not None:
-        logging.info(f"[DR] Обрезано весов: {clip_share:.2%}")
-    logging.info(f"[DR] Оценённое значение метрики: {value:.4f}")
+        _log(log, f"[DR] Обрезано весов: {clip_share:.2%}")
+    _log(log, f"[DR] Оценённое значение метрики: {value:.4f}")
     return value, ess_w, clip_share
 
 
@@ -424,6 +496,7 @@ def sndr_value(
     pA: np.ndarray,
     target: str = "accept",
     weight_clip: Optional[float] = None,
+    log: bool = False,
 ) -> Tuple[float, float, float]:
     r"""Self-Normalized Doubly Robust оценка значения новой политики.
 
@@ -445,20 +518,24 @@ def sndr_value(
         Название колонки исхода.
     weight_clip : float, optional
         Обрезка весов перед нормализацией.
+    log : bool, default False
+        Включить подробное логирование хода расчёта.
 
     Returns
     -------
     (value, ess, clip_share)
         Оценка метрики, эффективный размер выборки и доля обрезанных весов.
     """
-    logging.info(
-        "[SNDR] Начинаем оценку Self-Normalized DR для новой политики…"
-    )
+    _log(log, "[SNDR] Начинаем оценку Self-Normalized DR для новой политики…")
     _validate_logs(df, target)
     if len(pA) != len(df):
         raise ValueError("pA must have same length as df")
     if np.any((pA <= 0) | (pA > 1)):
-        logging.warning("[SNDR] Обнаружены нулевые или отрицательные пропенсити")
+        _log(
+            log,
+            "[SNDR] Обнаружены нулевые или отрицательные пропенсити",
+            level="warning",
+        )
         raise ValueError("propensity scores must be in (0,1]")
     probsB = policyB.action_probs(df)
     r = df[target].values
@@ -480,19 +557,23 @@ def sndr_value(
         clip_share = float(clip_mask.mean())
         w = np.minimum(w, weight_clip)
 
-    logging.info("[SNDR] Комбинируем DM и IPS-поправку")
+    _log(log, "[SNDR] Комбинируем DM и IPS-поправку")
     mu_taken = mu_hat_predict(mu_model, df, aA, target)
     mean_w = np.mean(w) + 1e-12
-    logging.info("[SNDR] Веса нормализованы")
+    _log(log, "[SNDR] Веса нормализованы")
     adj = (w / mean_w) * (r - mu_taken)
     value = float(np.mean(dm_part + adj))
     ess_w = ess(w)
-    logging.info(f"[SNDR] ESS = {ess_w:.1f} из {len(df)}")
+    _log(log, f"[SNDR] ESS = {ess_w:.1f} из {len(df)}")
     if ess_w < 0.5 * len(df):
-        logging.warning("[SNDR] Низкий ESS — данных может быть недостаточно")
+        _log(
+            log,
+            "[SNDR] Низкий ESS — данных может быть недостаточно",
+            level="warning",
+        )
     if weight_clip is not None:
-        logging.info(f"[SNDR] Обрезано весов: {clip_share:.2%}")
-    logging.info(f"[SNDR] Оценённое значение метрики: {value:.4f}")
+        _log(log, f"[SNDR] Обрезано весов: {clip_share:.2%}")
+    _log(log, f"[SNDR] Оценённое значение метрики: {value:.4f}")
     return value, ess_w, clip_share
 
 
@@ -503,6 +584,7 @@ def switch_dr_value(
     pA: np.ndarray,
     tau: float,
     target: str = "accept",
+    log: bool = False,
 ) -> Tuple[float, float, float]:
     r"""Switch-DR оценка с переключением по весу.
 
@@ -524,20 +606,27 @@ def switch_dr_value(
         Порог для применения IPS-поправки.
     target : {"accept", "cltv"}
         Название колонки исхода.
+    log : bool, default False
+        Включить подробное логирование хода расчёта.
 
     Returns
     -------
     (value, ess, switch_share)
         Оценка метрики, эффективный размер выборки и доля записей без IPS‑поправки.
     """
-    logging.info(
-        "[Switch-DR] Начинаем оценку Switch-DR: IPS-поправка только при весах ≤ τ…"
+    _log(
+        log,
+        "[Switch-DR] Начинаем оценку Switch-DR: IPS-поправка только при весах ≤ τ…",
     )
     _validate_logs(df, target)
     if len(pA) != len(df):
         raise ValueError("pA must have same length as df")
     if np.any((pA <= 0) | (pA > 1)):
-        logging.warning("[Switch-DR] Обнаружены нулевые или отрицательные пропенсити")
+        _log(
+            log,
+            "[Switch-DR] Обнаружены нулевые или отрицательные пропенсити",
+            level="warning",
+        )
         raise ValueError("propensity scores must be in (0,1]")
     probsB = policyB.action_probs(df)
     r = df[target].values
@@ -561,13 +650,15 @@ def switch_dr_value(
     adj = w_sw * (r - mu_taken)
     value = float(np.mean(dm_part + adj))
     ess_w = ess(w_sw)
-    logging.info(f"[Switch-DR] ESS = {ess_w:.1f} из {len(df)}")
+    _log(log, f"[Switch-DR] ESS = {ess_w:.1f} из {len(df)}")
     if ess_w < 0.5 * len(df):
-        logging.warning("[Switch-DR] Низкий ESS — данных может быть недостаточно")
-    logging.info(
-        f"[Switch-DR] Без IPS-поправки: {switch_share:.2%}"
-    )
-    logging.info(f"[Switch-DR] Оценённое значение метрики: {value:.4f}")
+        _log(
+            log,
+            "[Switch-DR] Низкий ESS — данных может быть недостаточно",
+            level="warning",
+        )
+    _log(log, f"[Switch-DR] Без IPS-поправки: {switch_share:.2%}")
+    _log(log, f"[Switch-DR] Оценённое значение метрики: {value:.4f}")
     return value, ess_w, switch_share
 
 
