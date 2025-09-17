@@ -12,11 +12,25 @@ policyscope.bootstrap
 
 from __future__ import annotations
 
-import numpy as np
-import pandas as pd
+import logging
+from contextlib import contextmanager
 from typing import Callable, Tuple, Dict, Any
 
+import numpy as np
+import pandas as pd
+
 __all__ = ["cluster_bootstrap_ci", "paired_bootstrap_ci"]
+
+@contextmanager
+def _suppress_logging():
+    """Временное отключение логирования во время бутстрэпа."""
+
+    previous_level = logging.root.manager.disable
+    logging.disable(logging.CRITICAL)
+    try:
+        yield
+    finally:
+        logging.disable(previous_level)
 
 
 def cluster_bootstrap_ci(
@@ -50,13 +64,15 @@ def cluster_bootstrap_ci(
         Оценка метрики и нижняя/верхняя границы CI.
     """
     rng = np.random.default_rng(rng_seed)
-    theta_hat = float(estimator(df))
+    with _suppress_logging():
+        theta_hat = float(estimator(df))
     clusters = df[cluster_col].unique()
     B = []
     for _ in range(n_boot):
         sampled = rng.choice(clusters, size=len(clusters), replace=True)
         part = df[df[cluster_col].isin(sampled)].copy()
-        B.append(float(estimator(part)))
+        with _suppress_logging():
+            B.append(float(estimator(part)))
     low = np.percentile(B, 100 * alpha / 2)
     high = np.percentile(B, 100 * (1 - alpha / 2))
     return theta_hat, float(low), float(high)
@@ -83,14 +99,16 @@ def paired_bootstrap_ci(
     """
     rng = np.random.default_rng(rng_seed)
     clusters = df[cluster_col].unique()
-    vA, vB, dlt = estimator_pair(df)
+    with _suppress_logging():
+        vA, vB, dlt = estimator_pair(df)
     BA: list[float] = []
     BB: list[float] = []
     BD: list[float] = []
     for _ in range(n_boot):
         sampled = rng.choice(clusters, size=len(clusters), replace=True)
         part = df[df[cluster_col].isin(sampled)].copy()
-        a, b, d = estimator_pair(part)
+        with _suppress_logging():
+            a, b, d = estimator_pair(part)
         BA.append(a)
         BB.append(b)
         BD.append(d)
