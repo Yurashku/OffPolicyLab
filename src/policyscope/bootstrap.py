@@ -12,11 +12,26 @@ policyscope.bootstrap
 
 from __future__ import annotations
 
+import logging
+from contextlib import contextmanager
+from typing import Any, Callable, Dict, Tuple
+
 import numpy as np
 import pandas as pd
-from typing import Callable, Tuple, Dict, Any
 
 __all__ = ["cluster_bootstrap_ci", "paired_bootstrap_ci"]
+
+
+@contextmanager
+def _suppress_logging(level: int = logging.CRITICAL):
+    """Временно отключает логирование ниже указанного уровня."""
+
+    previous_disable = logging.root.manager.disable
+    logging.disable(level)
+    try:
+        yield
+    finally:
+        logging.disable(previous_disable)
 
 
 def cluster_bootstrap_ci(
@@ -56,7 +71,8 @@ def cluster_bootstrap_ci(
     for _ in range(n_boot):
         sampled = rng.choice(clusters, size=len(clusters), replace=True)
         part = df[df[cluster_col].isin(sampled)].copy()
-        B.append(float(estimator(part)))
+        with _suppress_logging():
+            B.append(float(estimator(part)))
     low = np.percentile(B, 100 * alpha / 2)
     high = np.percentile(B, 100 * (1 - alpha / 2))
     return theta_hat, float(low), float(high)
@@ -90,7 +106,8 @@ def paired_bootstrap_ci(
     for _ in range(n_boot):
         sampled = rng.choice(clusters, size=len(clusters), replace=True)
         part = df[df[cluster_col].isin(sampled)].copy()
-        a, b, d = estimator_pair(part)
+        with _suppress_logging():
+            a, b, d = estimator_pair(part)
         BA.append(a)
         BB.append(b)
         BD.append(d)
