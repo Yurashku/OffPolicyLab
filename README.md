@@ -94,6 +94,38 @@ print(analyze_logs(df, policyB))
 Функция сообщит о наличии ключевых колонок, пересечении политик для Replay и
 подскажет, что требуется для IPS/SNIPS, DM и DR.
 
+## PySpark backend (экспериментально)
+
+Для работы с миллионами событий удобнее использовать PySpark. В каталоге
+`policyscope.backends` появился адаптер `SparkFrameAdapter`, который
+повторяет ключевые агрегации pandas‑версии, но реализован поверх
+`pyspark.sql.DataFrame`. Первая реализованная операция — `.mean`, она
+вычисляет средние по одной или нескольким колонкам за один проход по данным.
+
+```python
+from pyspark.sql import SparkSession
+from policyscope.backends import SparkFrameAdapter
+
+spark = SparkSession.builder.getOrCreate()
+logs_spark = spark.read.parquet("logs.parquet")
+backend = SparkFrameAdapter(logs_spark)
+
+# Среднее значение отклика
+mean_accept = backend.mean("accept")
+
+# Взвешенное среднее с фильтром по стране
+weighted = backend.mean(
+    ["accept", "cltv"],
+    where="country = 'DE'",
+    weight_col="exposure_weight",
+)
+```
+
+Адаптер лениво импортирует PySpark и выполняет все агрегации внутри Spark,
+поэтому из Python на драйвер возвращается только одна строка с итогами. Это
+минимизирует передачу данных и обеспечивает хорошее время выполнения даже на
+больших датасетах. Убедитесь, что пакет `pyspark` установлен в окружении.
+
 ## Пример применения на своих данных
 
 Функции обучения выполняют внутреннюю нормализацию числовых признаков,
