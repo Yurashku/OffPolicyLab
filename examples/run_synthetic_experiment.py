@@ -23,10 +23,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import json
-import numpy as np
-import pandas as pd
-from typing import Tuple
 
 from policyscope.synthetic import SynthConfig, SyntheticRecommenderEnv
 from policyscope.policies import make_policy
@@ -41,9 +37,9 @@ from policyscope.estimators import (
     train_mu_hat,
     train_pi_hat,
     pi_hat_predict,
-    ate_from_values,
+    take_action_probabilities,
+    dr_with_bootstrap_ci,
 )
-from policyscope.bootstrap import paired_bootstrap_ci
 from policyscope.report import decision_summary, dump_json
 
 
@@ -77,6 +73,7 @@ def main() -> None:
 
     # Генерируем логи A
     logsA = env.simulate_logs_A(policyA, X)
+    logsA["a_B"] = policyB.action_argmax(X)
 
     # On‑policy значения для A
     vA_accept = value_on_policy(logsA, target="accept")
@@ -90,7 +87,7 @@ def main() -> None:
     mu_cltv = train_mu_hat(logsA, target="cltv")
     pi_model = train_pi_hat(logsA)
     pA_all = pi_hat_predict(pi_model, logsA)
-    pA_taken = pA_all[np.arange(len(logsA)), logsA["a_A"].values]
+    pA_taken = take_action_probabilities(pA_all, logsA["a_A"].values, action_space=pi_model.classes_)
 
     # Replay (на совпадающих действиях)
     vB_replay_accept = replay_value(logsA, policyB.action_argmax(X), target="accept")
@@ -133,21 +130,27 @@ def main() -> None:
     dr_abs_error_accept = abs(vB_dr_accept - vB_accept_true)
     dr_abs_error_cltv = abs(vB_dr_cltv - vB_cltv_true)
 
-    # Paired bootstrap for DR
-    def estimator_pair_accept(df_part: pd.DataFrame) -> Tuple[float, float, float]:
-        mu_acc = train_mu_hat(df_part, target="accept")
-        vA = value_on_policy(df_part, target="accept")
-        vB, _, _ = dr_value(df_part, policyB, mu_acc, target="accept", weight_clip=args.weight_clip)
-        return vA, vB, ate_from_values(vB, vA)
-
-    def estimator_pair_cltv(df_part: pd.DataFrame) -> Tuple[float, float, float]:
-        mu = train_mu_hat(df_part, target="cltv")
-        vA = value_on_policy(df_part, target="cltv")
-        vB, _, _ = dr_value(df_part, policyB, mu, target="cltv", weight_clip=args.weight_clip)
-        return vA, vB, ate_from_values(vB, vA)
-
-    res_accept = paired_bootstrap_ci(logsA, estimator_pair_accept, cluster_col="user_id", n_boot=300, alpha=0.05)
-    res_cltv = paired_bootstrap_ci(logsA, estimator_pair_cltv, cluster_col="user_id", n_boot=300, alpha=0.05)
+    # Paired bootstrap for DR (внутренняя обёртка)
+    res_accept = dr_with_bootstrap_ci(
+        logsA,
+        policyB,
+        target="accept",
+        feature_cols=["loyal", "age", "risk", "income"],
+        action_col="a_A",
+        n_boot=300,
+        alpha=0.05,
+        weight_clip=args.weight_clip,
+    )
+    res_cltv = dr_with_bootstrap_ci(
+        logsA,
+        policyB,
+        target="cltv",
+        feature_cols=["loyal", "age", "risk", "income"],
+        action_col="a_A",
+        n_boot=300,
+        alpha=0.05,
+        weight_clip=args.weight_clip,
+    )
 
     # Диагностика весов
     diagnostics = {
