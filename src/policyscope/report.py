@@ -70,25 +70,39 @@ def dump_json(path: str, obj) -> None:
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
 
-def analyze_logs(df: pd.DataFrame, policyB: Optional[BasePolicy] = None) -> str:
+def analyze_logs(
+    df: pd.DataFrame,
+    policyB: Optional[BasePolicy] = None,
+    *,
+    action_a_col: str = "a_A",
+    action_b_col: str = "a_B",
+    user_id_col: str = "user_id",
+    propensity_col: str = "propensity_A",
+    targets: tuple[str, ...] = ("accept", "cltv"),
+    feature_cols: Optional[list[str]] = None,
+) -> str:
     """Проверяет наличие ключевых столбцов в логах и формирует краткий отчёт."""
 
     lines = ["Проверка входных данных для off-policy оценки:"]
 
     # базовые колонки
-    missing_basic = [c for c in ("user_id", "a_A") if c not in df.columns]
+    missing_basic = [c for c in (user_id_col, action_a_col) if c not in df.columns]
     if missing_basic:
         lines.append(f"- Отсутствуют столбцы {missing_basic}.")
     else:
-        lines.append("- Колонки user_id и a_A найдены.")
-    if not any(c in df.columns for c in ("accept", "cltv")):
-        lines.append("- Отклики (accept/cltv) не найдены.")
+        lines.append(f"- Колонки {user_id_col} и {action_a_col} найдены.")
+    if not any(c in df.columns for c in targets):
+        lines.append(f"- Отклики {targets} не найдены.")
+
+    if action_b_col in df.columns:
+        share_ab = float(np.mean(df[action_b_col] == df[action_a_col])) if action_a_col in df.columns else 0.0
+        lines.append(f"- Найден столбец {action_b_col}; пересечение с {action_a_col}: {share_ab * 100:.1f}%.")
 
     # Replay
     if policyB is not None:
         try:
             a_B = policyB.action_argmax(df)
-            share = float(np.mean(a_B == df.get("a_A", -1)))
+            share = float(np.mean(a_B == df.get(action_a_col, -1)))
             lines.append(
                 f"- Replay: политика B совпадает с A в {share * 100:.1f}% случаев."
             )
@@ -102,8 +116,8 @@ def analyze_logs(df: pd.DataFrame, policyB: Optional[BasePolicy] = None) -> str:
         lines.append("- Replay: политика B не передана.")
 
     # IPS / SNIPS
-    if "propensity_A" in df.columns:
-        lines.append("- IPS/SNIPS: колонка propensity_A найдена.")
+    if propensity_col in df.columns:
+        lines.append(f"- IPS/SNIPS: колонка {propensity_col} найдена.")
     else:
         lines.append(
             "- IPS/SNIPS: propensities не найдены."
@@ -111,15 +125,18 @@ def analyze_logs(df: pd.DataFrame, policyB: Optional[BasePolicy] = None) -> str:
         )
 
     # DM
-    feature_candidates = ["age", "income", "risk", "loyal"]
-    feats = [c for c in feature_candidates if c in df.columns]
+    if feature_cols is None:
+        feature_candidates = ["age", "income", "risk", "loyal"]
+        feats = [c for c in feature_candidates if c in df.columns]
+    else:
+        feats = [c for c in feature_cols if c in df.columns]
     if feats:
         lines.append(f"- DM: доступны признаки {feats}, ок.")
     else:
         lines.append("- DM: признаки не найдены.")
 
     # DR
-    if "propensity_A" not in df.columns:
+    if propensity_col not in df.columns:
         if feats:
             lines.append(
                 "- DR: пропенсити отсутствуют, но можно применить DM;"
