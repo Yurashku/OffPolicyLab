@@ -22,7 +22,7 @@ __all__ = ["cluster_bootstrap_ci", "paired_bootstrap_ci"]
 def cluster_bootstrap_ci(
     df: pd.DataFrame,
     estimator: Callable[[pd.DataFrame], float],
-    cluster_col: str = "user_id",
+    cluster_col: str | None = "user_id",
     n_boot: int = 300,
     alpha: float = 0.05,
     rng_seed: int = 1234,
@@ -51,11 +51,20 @@ def cluster_bootstrap_ci(
     """
     rng = np.random.default_rng(rng_seed)
     theta_hat = float(estimator(df))
-    clusters = df[cluster_col].unique()
+    if cluster_col is None or cluster_col not in df.columns:
+        clusters = np.arange(len(df))
+        use_rows = True
+    else:
+        clusters = df[cluster_col].unique()
+        use_rows = False
     B = []
     for _ in range(n_boot):
         sampled = rng.choice(clusters, size=len(clusters), replace=True)
-        part = df[df[cluster_col].isin(sampled)].copy()
+        if use_rows:
+            part = df.iloc[sampled].copy()
+        else:
+            parts = [df[df[cluster_col] == c] for c in sampled]
+            part = pd.concat(parts, ignore_index=True)
         B.append(float(estimator(part)))
     low = np.percentile(B, 100 * alpha / 2)
     high = np.percentile(B, 100 * (1 - alpha / 2))
@@ -65,7 +74,7 @@ def cluster_bootstrap_ci(
 def paired_bootstrap_ci(
     df: pd.DataFrame,
     estimator_pair: Callable[[pd.DataFrame], Tuple[float, float, float]],
-    cluster_col: str = "user_id",
+    cluster_col: str | None = "user_id",
     n_boot: int = 300,
     alpha: float = 0.05,
     rng_seed: int = 4321,
@@ -82,14 +91,23 @@ def paired_bootstrap_ci(
         Содержит оценки V_A, V_B, Δ и 95% CI для каждой величины.
     """
     rng = np.random.default_rng(rng_seed)
-    clusters = df[cluster_col].unique()
+    if cluster_col is None or cluster_col not in df.columns:
+        clusters = np.arange(len(df))
+        use_rows = True
+    else:
+        clusters = df[cluster_col].unique()
+        use_rows = False
     vA, vB, dlt = estimator_pair(df)
     BA: list[float] = []
     BB: list[float] = []
     BD: list[float] = []
     for _ in range(n_boot):
         sampled = rng.choice(clusters, size=len(clusters), replace=True)
-        part = df[df[cluster_col].isin(sampled)].copy()
+        if use_rows:
+            part = df.iloc[sampled].copy()
+        else:
+            parts = [df[df[cluster_col] == c] for c in sampled]
+            part = pd.concat(parts, ignore_index=True)
         a, b, d = estimator_pair(part)
         BA.append(a)
         BB.append(b)

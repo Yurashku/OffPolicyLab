@@ -13,6 +13,7 @@ from policyscope.estimators import (
     dr_value,
     sndr_value,
     switch_dr_value,
+    take_action_probabilities,
 )
 
 
@@ -26,7 +27,7 @@ def test_estimators_run_on_synthetic():
     piB_taken = prepare_piB_taken(logsA, policyB)
     pi_model = train_pi_hat(logsA)
     pA_all = pi_hat_predict(pi_model, logsA)
-    pA_taken = pA_all[np.arange(len(logsA)), logsA["a_A"].values]
+    pA_taken = take_action_probabilities(pA_all, logsA["a_A"].values, action_space=pi_model.classes_)
     mu_accept = train_mu_hat(logsA, target="accept")
     v_ips, ess, _ = ips_value(logsA, piB_taken, pA_taken, target="accept", weight_clip=20)
     v_snips, _, _ = snips_value(logsA, piB_taken, pA_taken, target="accept", weight_clip=20)
@@ -59,3 +60,28 @@ def test_invalid_inputs_raise_errors():
         sndr_value(df_missing, dummy_policy, dummy_model, pA2, target="accept")
     with pytest.raises(ValueError):
         switch_dr_value(df_missing, dummy_policy, dummy_model, pA2, tau=1.0, target="accept")
+
+
+def test_estimators_support_custom_columns():
+    cfg = SynthConfig(n_users=80, horizon_days=30, seed=7)
+    env = SyntheticRecommenderEnv(cfg)
+    X = env.sample_users()
+    policyA = make_policy("epsilon_greedy", epsilon=0.2, seed=7)
+    logs = env.simulate_logs_A(policyA, X).rename(columns={"a_A": "action_logged", "accept": "reward"})
+    policyB = make_policy("softmax", tau=0.9, seed=8)
+    piB_taken = prepare_piB_taken(logs, policyB, action_col="action_logged")
+    pi_model = train_pi_hat(logs, feature_cols=["loyal", "age", "risk", "income"], action_col="action_logged")
+    pA_all = pi_hat_predict(pi_model, logs)
+    pA_taken = take_action_probabilities(pA_all, logs["action_logged"].values, action_space=pi_model.classes_)
+    mu = train_mu_hat(logs, target="reward", feature_cols=["loyal", "age", "risk", "income"], action_col="action_logged")
+
+    v_dr, _, _ = dr_value(
+        logs,
+        policyB,
+        mu,
+        pA_taken,
+        target="reward",
+        weight_clip=10.0,
+        action_col="action_logged",
+    )
+    assert np.isfinite(v_dr)
