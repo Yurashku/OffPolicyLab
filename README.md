@@ -99,6 +99,14 @@ dr_ci = dr_with_bootstrap_ci(
 print(v_ips, v_snips, v_dm, v_dr, dr_ci)
 ```
 
+## Теория и ссылки на статьи (RU)
+
+Добавлен отдельный подробный гайд по математической интуиции и строгим источникам для всех реализованных OPE-методов:
+
+- `docs/ope_methods_math_guide_ru.md`
+
+В гайде разобраны: On-policy baseline, Replay, IPS, SNIPS, DM, DR, SNDR, Switch-DR и bootstrap CI.
+
 ## Быстрый синтетический запуск
 
 ```bash
