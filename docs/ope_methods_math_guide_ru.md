@@ -1,6 +1,8 @@
-# Методы офлайн-оценки политик в `Policyscope`: математическая интуиция и путь к глубокому пониманию
+# Методы офлайн-оценки политик в `Policyscope`: интуиция, формулы и ссылки на статьи
 
-Этот материал объясняет **все реализованные в репозитории методы OPE** (Off-Policy Evaluation):
+> Важно про отображение: в этом документе формулы даны в **plain-text формате** (без LaTeX-разметки `$$...$$`), чтобы текст одинаково читался на GitHub и в локальных Markdown-просмотрщиках без MathJax/KaTeX.
+
+Этот гайд покрывает все методы, реализованные в репозитории:
 
 - On-policy baseline (`value_on_policy`)
 - Replay (`replay_value`)
@@ -12,246 +14,210 @@
 - Switch-DR (`switch_dr_value`)
 - Bootstrap CI для DR (`dr_with_bootstrap_ci`)
 
-Цель: дать новичку «рабочую» интуицию, а затем указать, куда читать для строгого обоснования.
-
 ---
 
-## 1) Формализация задачи (единый язык для всех методов)
+## 1) Единая постановка задачи
 
-Пусть в логах политики **A** есть наблюдения:
-$$
-(x_i, a_i, r_i), \quad i=1,\dots,n,
-$$
-где:
-- $x_i$ — контекст (признаки пользователя/сессии),
-- $a_i$ — действие, выбранное логирующей политикой $\pi_A$,
-- $r_i$ — наблюдаемая награда (например, `accept` или `cltv`).
+Есть логи политики A: `(x_i, a_i, r_i)`, где:
 
-Мы хотим оценить качество новой политики $\pi_B$:
-$$
-V(\pi_B) = \mathbb{E}_{x\sim D}\,\mathbb{E}_{a\sim \pi_B(\cdot|x)}[r(x,a)].
-$$
+- `x_i` — контекст,
+- `a_i` — действие, выбранное логирующей политикой `pi_A`,
+- `r_i` — наблюдаемая награда.
 
-Проблема: в логах наблюдаем награду только для $a_i$, а не для всех действий.
+Нужно оценить ожидаемую ценность новой политики `pi_B`:
+
+```text
+V(pi_B) = E_x [ E_{a~pi_B(.|x)} [ r(x, a) ] ]
+```
 
 Ключевые обозначения:
-- $\mu(x,a)=\mathbb{E}[r\mid x,a]$ — модель ожидаемой награды,
-- $p_A(a\mid x)=\pi_A(a\mid x)$ — propensity логирующей политики,
-- $w_i = \pi_B(a_i\mid x_i)/p_A(a_i\mid x_i)$ — важностный вес.
+
+- `mu(x, a) = E[r | x, a]` — модель ожидаемой награды,
+- `p_A(a|x) = pi_A(a|x)` — propensity логирующей политики,
+- `w_i = pi_B(a_i|x_i) / p_A(a_i|x_i)` — importance weight.
 
 ---
 
 ## 2) On-policy baseline (`value_on_policy`)
 
-**Идея:** средняя награда в логах A:
-$$
-\hat V_A = \frac{1}{n}\sum_i r_i.
-$$
+Средняя награда на логах A:
 
-Это не OPE для B, но важная база сравнения (дельта $V_B-V_A$).
+```text
+V_A_hat = (1/n) * sum_i r_i
+```
+
+Это baseline для сравнения с `V_B`.
 
 ---
 
 ## 3) Replay (`replay_value`)
 
-**Идея:** оставить только строки, где B выбрала бы то же действие, что и A:
-$$
-\hat V_{\text{Replay}} = \frac{1}{|\mathcal I|}\sum_{i\in\mathcal I} r_i,
-\quad
-\mathcal I=\{i: a_i = a^B_i\}.
-$$
+Берём только строки, где действия A и B совпали:
 
-### Интуиция
-- Это «честный» способ не додумывать контрфакты.
-- Но при малом пересечении действий дисперсия взлетает, а оценка может стать неустойчивой/неопределённой.
+```text
+I = { i : a_i == a_i^B }
+V_replay_hat = (1 / |I|) * sum_{i in I} r_i
+```
 
-### База в литературе
-- Li et al. (2010/2011), unbiased offline evaluation / replay-подход в contextual bandits.
-  - arXiv: https://arxiv.org/abs/1003.5956
+Интуиция:
+- максимально «честно» (без моделирования контрфактов),
+- но может иметь высокую дисперсию при малом числе совпадений.
+
+Литература:
+- Li et al. (unbiased offline evaluation / replay): https://arxiv.org/abs/1003.5956
 
 ---
 
 ## 4) IPS (`ips_value`)
 
-$$
-\hat V_{\text{IPS}} = \frac{1}{n}\sum_i w_i r_i,
-\quad
-w_i=\frac{\pi_B(a_i\mid x_i)}{p_A(a_i\mid x_i)}.
-$$
+```text
+V_IPS_hat = (1/n) * sum_i (w_i * r_i)
+where w_i = pi_B(a_i|x_i) / p_A(a_i|x_i)
+```
 
-### Почему это работает
-При корректных propensity и overlap ($p_A>0$ там, где $\pi_B>0$) IPS несмещён: лог A можно «перевзвесить», чтобы имитировать B.
+Интуиция:
+- корректно перевзвешивает логи A «под» политику B,
+- несмещён при корректных propensity и overlap,
+- чувствителен к большим весам.
 
-### Плюсы / минусы
-- + Теоретически прозрачный и несмещённый.
-- − Очень чувствителен к большим весам (редкие действия $\Rightarrow$ большая дисперсия).
-
-### База в литературе
-- Dudík, Langford, Li (DR paper, разделы с IPS): https://arxiv.org/abs/1103.4601
-- Практика OPE в bandits: https://arxiv.org/abs/1003.5956
+Литература:
+- Dudík, Langford, Li: https://arxiv.org/abs/1103.4601
+- Практический контекст bandits: https://arxiv.org/abs/1003.5956
 
 ---
 
 ## 5) SNIPS (`snips_value`)
 
-$$
-\hat V_{\text{SNIPS}} = \frac{\sum_i w_i r_i}{\sum_i w_i}.
-$$
+```text
+V_SNIPS_hat = sum_i (w_i * r_i) / sum_i w_i
+```
 
-### Интуиция
-Нормировка на $\sum_i w_i$ стабилизирует масштаб весов:
-- обычно уменьшает дисперсию,
-- но вводит смещение (особенно в малой выборке).
+Интуиция:
+- нормировка стабилизирует оценки,
+- обычно снижает дисперсию,
+- может добавлять смещение.
 
-### Когда полезен
-Когда IPS «шумит» из-за тяжёлого хвоста весов.
-
-### База в литературе
-- Swaminathan & Joachims, Counterfactual Risk Minimization (self-normalized weighting):
-  - arXiv: https://arxiv.org/abs/1502.02362
-  - JMLR версия: https://jmlr.org/papers/v16/swaminathan15a.html
+Литература:
+- Swaminathan & Joachims: https://arxiv.org/abs/1502.02362
+- JMLR version: https://jmlr.org/papers/v16/swaminathan15a.html
 
 ---
 
 ## 6) DM / Direct Method (`dm_value`)
 
-Сначала оцениваем $\mu(x,a)$, затем:
-$$
-\hat V_{\text{DM}} = \frac{1}{n}\sum_i\sum_a \pi_B(a\mid x_i)\,\hat\mu(x_i,a).
-$$
+Сначала строится модель `mu_hat(x,a)`, затем:
 
-### Интуиция
-DM полностью опирается на модель награды:
-- если $\hat\mu$ хороша — низкая дисперсия,
-- если $\hat\mu$ смещена — оценка смещена.
+```text
+V_DM_hat = (1/n) * sum_i sum_a [ pi_B(a|x_i) * mu_hat(x_i, a) ]
+```
 
-### База в литературе
-- Dudík et al. (сравнение DM/IPS/DR): https://arxiv.org/abs/1103.4601
+Интуиция:
+- низкая дисперсия,
+- зависит от качества модели награды.
+
+Литература:
+- Dudík et al. (DM/IPS/DR): https://arxiv.org/abs/1103.4601
 
 ---
 
 ## 7) DR / Doubly Robust (`dr_value`)
 
-$$
-\hat V_{\text{DR}} =
-\frac{1}{n}\sum_i
-\left[
-\sum_a \pi_B(a\mid x_i)\hat\mu(x_i,a)
-+
-\frac{\pi_B(a_i\mid x_i)}{p_A(a_i\mid x_i)}\bigl(r_i-\hat\mu(x_i,a_i)\bigr)
-\right].
-$$
+```text
+V_DR_hat = (1/n) * sum_i [
+    sum_a pi_B(a|x_i) * mu_hat(x_i, a)
+    + (pi_B(a_i|x_i)/p_A(a_i|x_i)) * (r_i - mu_hat(x_i, a_i))
+]
+```
 
-### Главная идея
-DR = DM + IPS-коррекция ошибки модели на наблюдаемом действии.
+Интуиция:
+- сочетает DM + IPS-коррекцию,
+- консистентен, если корректна хотя бы одна часть: propensity или `mu_hat`.
 
-### Почему «doubly robust»
-Оценка консистентна, если корректна **хотя бы одна** часть:
-1. либо propensity $p_A$,
-2. либо outcome-модель $\mu$.
-
-### База в литературе
-- Классическая работа: https://arxiv.org/abs/1103.4601
-- Развитие и анализ: https://arxiv.org/abs/1503.02834
+Литература:
+- Классика DR: https://arxiv.org/abs/1103.4601
+- Доп. анализ DR: https://arxiv.org/abs/1503.02834
 
 ---
 
 ## 8) SNDR / Self-Normalized DR (`sndr_value`)
 
-В `Policyscope` нормируется именно коррекционный член DR:
-$$
-\hat V_{\text{SNDR}} =
-\frac{1}{n}\sum_i
-\left[
-\sum_a \pi_B(a\mid x_i)\hat\mu(x_i,a)
-+
-\frac{w_i}{\bar w}\bigl(r_i-\hat\mu(x_i,a_i)\bigr)
-\right],
-\quad \bar w=\frac{1}{n}\sum_i w_i.
-$$
+В реализации `Policyscope` нормируется коррекционный член DR:
 
-### Интуиция
-- DR может быть нестабилен при тяжёлых весах.
-- Нормировка поправки снижает вариативность ценой дополнительного смещения.
+```text
+w_bar = (1/n) * sum_i w_i
+V_SNDR_hat = (1/n) * sum_i [
+    sum_a pi_B(a|x_i) * mu_hat(x_i, a)
+    + (w_i / w_bar) * (r_i - mu_hat(x_i, a_i))
+]
+```
 
-### Что читать
-SNDR как инженерная стабилизация опирается на идеи self-normalization и DR:
-- Self-normalization в bandit-оценивании: https://arxiv.org/abs/1502.02362
+Интуиция:
+- меньше вариативность при «тяжёлых» весах,
+- ценой некоторого смещения.
+
+Литература:
+- Self-normalization: https://arxiv.org/abs/1502.02362
 - DR фундамент: https://arxiv.org/abs/1103.4601
 
 ---
 
 ## 9) Switch-DR (`switch_dr_value`)
 
-Вводится порог $\tau$: если $w_i>\tau$, IPS-поправку отключаем.
+Для весов выше порога `tau` IPS-поправка выключается:
 
-$$
-\hat V_{\text{Switch-DR}} =
-\frac{1}{n}\sum_i
-\left[
-\sum_a \pi_B(a\mid x_i)\hat\mu(x_i,a)
-+
-\mathbb{1}(w_i\le \tau)\,w_i\bigl(r_i-\hat\mu(x_i,a_i)\bigr)
-\right].
-$$
+```text
+V_SwitchDR_hat = (1/n) * sum_i [
+    sum_a pi_B(a|x_i) * mu_hat(x_i, a)
+    + 1[w_i <= tau] * w_i * (r_i - mu_hat(x_i, a_i))
+]
+```
 
-### Интуиция
-- Большие веса дают огромную дисперсию.
-- Switch-DR «обрезает» опасные точки, оставляя там только DM.
-- Это управляемый bias–variance trade-off через $\tau$.
+Интуиция:
+- снижает дисперсию за счёт контролируемого bias-variance trade-off.
 
-### База в литературе
-- Wang et al., *Optimal and Adaptive Off-policy Evaluation in Contextual Bandits* (SWITCH):
-  - PMLR: https://proceedings.mlr.press/v70/wang17a.html
-  - arXiv: https://arxiv.org/abs/1612.01205
+Литература:
+- SWITCH estimator: https://proceedings.mlr.press/v70/wang17a.html
+- arXiv: https://arxiv.org/abs/1612.01205
 
 ---
 
 ## 10) Bootstrap CI для DR (`dr_with_bootstrap_ci`)
 
-`Policyscope` даёт доверительные интервалы через бутстрэп по строкам или кластерам (`cluster_col`).
+Интервалы строятся бутстрэпом (по строкам или по кластерам `user_id`).
 
-### Интуиция
-- Вместо аналитической дисперсии эмпирически приближаем распределение оценок,
-  многократно ресемплируя данные.
-- Кластерный бутстрэп нужен, если наблюдения внутри `user_id` зависимы.
+Интуиция:
+- эмпирически оцениваем распределение оценки,
+- учитываем зависимость внутри кластера при cluster bootstrap.
 
-### База в литературе
-- Efron & Tibshirani (классика bootstrap):
-  - издатель: https://www.routledge.com/An-Introductionto-the-Bootstrap/Efron-Tibshirani/p/book/9780412042317
-- Cameron, Gelbach, Miller (bootstrap для clustered inference):
-  - https://direct.mit.edu/rest/article/90/3/414/57731/Bootstrap-Based-Improvements-for-Inference-with
+Литература:
+- Efron & Tibshirani: https://www.routledge.com/An-Introductionto-the-Bootstrap/Efron-Tibshirani/p/book/9780412042317
+- Cluster bootstrap: https://direct.mit.edu/rest/article/90/3/414/57731/Bootstrap-Based-Improvements-for-Inference-with
 
 ---
 
-## 11) Как читать результаты на практике
+## 11) Практический чек-лист
 
-Короткая памятка:
-1. **Проверяйте overlap**: нет ли областей, где $p_A(a|x)$ очень мал, а $\pi_B(a|x)$ велик.
-2. Смотрите **ESS**: низкий ESS = фактически мало «информативных» наблюдений.
-3. Сравнивайте **IPS vs SNIPS vs DR vs Switch-DR**:
-   - если IPS сильно шумит, а DR/Switch-DR стабильны — это нормально.
-4. Всегда добавляйте **CI** (bootstrap), а не смотрите на одну точку.
-5. Для решения «катить/не катить» оценивайте и $V_B$, и $\Delta=V_B-V_A$.
+1. Проверяйте overlap: нет ли зон, где `p_A(a|x)` очень мал, а `pi_B(a|x)` велик.
+2. Контролируйте ESS: низкий ESS = мало эффективных наблюдений.
+3. Сравнивайте IPS/SNIPS/DR/Switch-DR, а не одну точечную оценку.
+4. Всегда смотрите доверительные интервалы.
+5. Решение о выкладке делайте по `V_B` и `Delta = V_B - V_A`.
 
 ---
 
-## 12) Что важно помнить про допущения
+## 12) Важные допущения
 
-Любой OPE-метод требует минимум:
-- **SUTVA / корректная постановка награды**: награда зависит от своего контекста и действия,
-- **Positivity / overlap**: если B может выбрать действие, A иногда тоже должна была его выбирать,
-- **Корректность логов**: action и propensity соответствуют одному и тому же процессу логирования.
+- Positivity (overlap): действия B должны иметь поддержку в логах A.
+- Корректное логирование действий и propensity.
+- Стабильность определения награды.
 
-Нарушение этих пунктов чаще всего важнее выбора между IPS/DR/Switch-DR.
+Нарушение допущений обычно критичнее, чем выбор конкретного OPE-оценщика.
 
 ---
 
-## 13) Карта «какой метод брать первым»
+## 13) Что использовать первым
 
-- Хотите самый простой и прозрачный baseline → **IPS**.
-- Нужна практическая устойчивость на реальных логах → **DR**.
-- Весы «тяжёлые», DR шумит → **SNDR** или **Switch-DR**.
-- Есть хорошая модель $\mu$, но сомнения в propensity → сравнивайте **DM + DR**.
-- Для отчёта и принятия решения обязательно → **DR/Switch-DR + bootstrap CI**.
-
+- Нужен прозрачный baseline: **IPS**.
+- Нужна устойчивая практика: **DR**.
+- Тяжёлые веса/нестабильность: **SNDR** или **Switch-DR**.
+- Обязательный слой для принятия решения: **bootstrap CI**.
