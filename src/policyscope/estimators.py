@@ -91,6 +91,17 @@ def _validate_logs(df: pd.DataFrame, target: str, action_col: str) -> None:
 
 
 def ess(weights: np.ndarray) -> float:
+    """Считает effective sample size (ESS) для массива весов.
+
+    ESS показывает, какое «эквивалентное» число наблюдений остаётся после
+    применения весов (чем сильнее разброс весов, тем меньше ESS).
+
+    Args:
+        weights: Веса важности ``w_i`` длины ``n``.
+
+    Returns:
+        Значение ``(sum(w)^2 / sum(w^2))``. Если все веса нулевые, возвращается ``0.0``.
+    """
     s1 = weights.sum()
     s2 = (weights**2).sum()
     if s2 <= 0.0:
@@ -127,7 +138,23 @@ def make_design(
     feature_cols: Optional[Sequence[str]] = None,
     action_col: str = "a_A",
 ) -> Tuple[np.ndarray, np.ndarray, OneHotEncoder, StandardScaler, list[str]]:
-    """Создаёт дизайн-матрицу ``[scaled_features, onehot(action)]``."""
+    """Собирает дизайн-матрицу для обучения модели исхода ``mu(x, a)``.
+
+    Формирует матрицу признаков вида ``[scaled(feature_cols), onehot(action_col)]``.
+
+    Args:
+        df: Логи с признаками и колонкой действия.
+        feature_cols: Список колонок признаков. Если ``None``, используется авто-выбор.
+        action_col: Колонка с фактическим действием из логов политики A.
+
+    Returns:
+        Кортеж ``(X, A_oh, oh, scaler, feats)``:
+        - ``X`` — итоговая матрица для обучения,
+        - ``A_oh`` — one-hot действий,
+        - ``oh`` — обученный ``OneHotEncoder`` для действий,
+        - ``scaler`` — обученный ``StandardScaler`` для числовых фич,
+        - ``feats`` — фактический список использованных признаков.
+    """
     feats = _resolve_feature_cols(df, feature_cols)
     X_num, scaler = _build_scaler(df, feats)
     a = df[action_col].to_numpy().reshape(-1, 1)
@@ -143,7 +170,21 @@ def train_pi_hat(
     feature_cols: Optional[Sequence[str]] = None,
     action_col: str = "a_A",
 ):
-    """Обучает модель поведения ``pi_A(a|x)``."""
+    """Обучает оценку behavior policy: ``pi_A(a|x)``.
+
+    Используется мультиклассовая ``LogisticRegression`` по признакам ``x``,
+    чтобы оценить вероятность каждого действия, с которым работала текущая
+    политика A в логах.
+
+    Args:
+        df: Логи с признаками и действием ``action_col``.
+        feature_cols: Колонки признаков. Если ``None``, выбираются автоматически.
+        action_col: Колонка с действием, выбранным политикой A.
+
+    Returns:
+        Обученная sklearn-модель классификации с сохранёнными служебными
+        атрибутами: ``_scaler``, ``_feature_cols``, ``_action_col``.
+    """
     feats = _resolve_feature_cols(df, feature_cols)
     X_num, scaler = _build_scaler(df, feats)
     y = df[action_col].to_numpy()
@@ -156,6 +197,16 @@ def train_pi_hat(
 
 
 def pi_hat_predict(model, df: pd.DataFrame) -> np.ndarray:
+    """Предсказывает ``pi_A(a|x)`` для каждой строки.
+
+    Args:
+        model: Модель из ``train_pi_hat``.
+        df: DataFrame с теми же признаками, что использовались при обучении.
+
+    Returns:
+        Матрица вероятностей формы ``(n, k)``, где ``k`` — число действий.
+        Значения клипуются в интервал ``[1e-6, 1 - 1e-6]`` для устойчивости.
+    """
     X = _transform_features(df, model._feature_cols, model._scaler)  # type: ignore[attr-defined]
     probs = model.predict_proba(X)
     return np.clip(probs, 1e-6, 1 - 1e-6)
@@ -167,7 +218,19 @@ def take_action_probabilities(
     *,
     action_space: Sequence,
 ) -> np.ndarray:
-    """Достаёт вероятность для фактически выбранного действия по action_space."""
+    """Извлекает вероятность конкретно выбранного действия для каждой строки.
+
+    Часто нужно перейти от полной матрицы ``p(a|x)`` к вектору ``p(a_logged|x)``
+    или ``p(a_B|x)``. Эта функция делает такое извлечение по ``action_space``.
+
+    Args:
+        probs: Матрица вероятностей формы ``(n, k)``.
+        actions: Последовательность действий длины ``n`` (например, ``df[action_col]``).
+        action_space: Порядок действий, соответствующий столбцам ``probs``.
+
+    Returns:
+        Вектор длины ``n`` с вероятностью указанного действия в каждой строке.
+    """
     idx_map = {a: i for i, a in enumerate(action_space)}
     idx = np.array([idx_map[a] for a in actions], dtype=int)
     return probs[np.arange(len(idx)), idx]
@@ -180,6 +243,22 @@ def train_mu_hat(
     feature_cols: Optional[Sequence[str]] = None,
     action_col: str = "a_A",
 ):
+    """Обучает модель исхода ``mu(x, a)=E[r|x,a]``.
+
+    Для бинарной цели ``accept`` используется ``LogisticRegression`` и далее
+    возвращаются вероятности класса 1. Для непрерывной цели (например ``cltv``)
+    используется ``LinearRegression``.
+
+    Args:
+        df: Логи с признаками, действием и целевой колонкой.
+        target: Название целевой метрики (``accept`` или ``cltv``).
+        feature_cols: Колонки признаков. Если ``None``, выбираются автоматически.
+        action_col: Колонка с действием в логах.
+
+    Returns:
+        Обученная модель исхода с сохранёнными служебными атрибутами:
+        ``_oh``, ``_scaler``, ``_feature_cols``, ``_action_col``.
+    """
     X, _, oh, scaler, feats = make_design(df, feature_cols=feature_cols, action_col=action_col)
     y = df[target].to_numpy()
     model = LogisticRegression(max_iter=1000) if target == "accept" else LinearRegression()
@@ -192,6 +271,17 @@ def train_mu_hat(
 
 
 def mu_hat_predict(model, df: pd.DataFrame, action: np.ndarray, target: str) -> np.ndarray:
+    """Предсказывает ``mu(x, a)`` для заданного действия.
+
+    Args:
+        model: Модель из ``train_mu_hat``.
+        df: DataFrame с признаками.
+        action: Одно действие (скаляр) или массив действий длины ``n``.
+        target: Тип цели. Для ``accept`` вернёт вероятности, иначе регрессионный прогноз.
+
+    Returns:
+        Вектор предсказаний ``mu(x, a)`` длины ``n``.
+    """
     X_num = _transform_features(df, model._feature_cols, model._scaler)  # type: ignore[attr-defined]
     if np.isscalar(action):
         act = np.full(len(df), action, dtype=object).reshape(-1, 1)
@@ -205,6 +295,15 @@ def mu_hat_predict(model, df: pd.DataFrame, action: np.ndarray, target: str) -> 
 
 
 def value_on_policy(df: pd.DataFrame, target: str = "accept") -> float:
+    """Оценивает значение текущей (логирующей) политики A как среднюю награду.
+
+    Args:
+        df: Логи политики A.
+        target: Целевая метрика/награда.
+
+    Returns:
+        Среднее ``df[target]``.
+    """
     return float(df[target].mean())
 
 
@@ -215,6 +314,20 @@ def replay_value(
     *,
     action_col: str = "a_A",
 ) -> float:
+    """Replay-оценка: средняя награда на пересечении действий A и B.
+
+    Берутся только строки, где ``a_A == a_B`` (или, в общем виде,
+    ``df[action_col] == a_B[i]``), и считается среднее по ``target``.
+
+    Args:
+        df: Логи политики A.
+        a_B: Действия, которые выбирает новая политика B на тех же объектах.
+        target: Целевая метрика.
+        action_col: Колонка действия из логов A.
+
+    Returns:
+        Replay-оценка ``V_B``. Если совпадений нет, возвращается ``nan``.
+    """
     logging.info("[Replay] Начинаем оценку Replay для новой политики…")
     mask = df[action_col].to_numpy() == a_B
     if mask.sum() == 0:
@@ -233,6 +346,18 @@ def prepare_piB_taken(
     action_col: str = "a_A",
     action_space: Optional[Sequence] = None,
 ) -> np.ndarray:
+    """Готовит вектор ``pi_B(a_logged|x)`` для IPS/DR-оценок.
+
+    Args:
+        df: Логи с колонкой ``action_col``.
+        policyB: Объект политики B с методом ``action_probs(df) -> (n, k)``.
+        action_col: Колонка с фактическим действием из логов A.
+        action_space: Порядок действий для столбцов ``policyB.action_probs``.
+            Если ``None``, берётся ``[0, 1, ..., k-1]``.
+
+    Returns:
+        Вектор длины ``n``: вероятность, что B выбрала бы логированное действие.
+    """
     probsB = policyB.action_probs(df)
     actions = df[action_col].to_numpy()
     if action_space is None:
@@ -249,6 +374,24 @@ def ips_value(
     *,
     action_col: str = "a_A",
 ) -> Tuple[float, float, float]:
+    """Inverse Propensity Scoring (IPS).
+
+    Оценка строится как ``mean(w_i * r_i)``, где ``w_i = pi_B(a_i|x_i)/pi_A(a_i|x_i)``.
+
+    Args:
+        df: Логи политики A.
+        piB_taken: Вектор ``pi_B(a_logged|x)``.
+        pA: Вектор ``pi_A(a_logged|x)`` (propensity score).
+        target: Целевая метрика.
+        weight_clip: Опциональный верхний порог для клиппинга весов ``w_i``.
+        action_col: Колонка логированного действия (для валидации входа).
+
+    Returns:
+        Кортеж ``(value, ess_value, clip_share)``:
+        - IPS-оценка,
+        - ESS по использованным весам,
+        - доля наблюдений, где вес был обрезан.
+    """
     logging.info("[IPS] Начинаем оценку IPS для новой политики…")
     _validate_logs(df, target, action_col)
     if len(pA) != len(df):
@@ -274,6 +417,22 @@ def snips_value(
     *,
     action_col: str = "a_A",
 ) -> Tuple[float, float, float]:
+    """Self-Normalized IPS (SNIPS).
+
+    Вариант IPS с самонормировкой весов: ``sum(w_i r_i) / sum(w_i)``.
+    Обычно снижает дисперсию, но может вносить смещение.
+
+    Args:
+        df: Логи политики A.
+        piB_taken: Вектор ``pi_B(a_logged|x)``.
+        pA: Вектор ``pi_A(a_logged|x)``.
+        target: Целевая метрика.
+        weight_clip: Опциональный клиппинг весов.
+        action_col: Колонка логированного действия (для валидации входа).
+
+    Returns:
+        Кортеж ``(value, ess_value, clip_share)`` аналогично ``ips_value``.
+    """
     logging.info("[SNIPS] Начинаем оценку SNIPS для новой политики…")
     _validate_logs(df, target, action_col)
     if len(pA) != len(df):
@@ -306,6 +465,18 @@ def dm_value(
     *,
     action_space: Optional[Sequence] = None,
 ) -> float:
+    """Direct Method (DM): модельная оценка ``E_{x,a~pi_B}[mu(x,a)]``.
+
+    Args:
+        df: Данные с признаками.
+        policyB: Политика B с ``action_probs(df)``.
+        mu_model: Модель исхода из ``train_mu_hat``.
+        target: Целевая метрика.
+        action_space: Список действий, соответствующий столбцам ``action_probs``.
+
+    Returns:
+        DM-оценка значения политики B.
+    """
     probsB = policyB.action_probs(df)
     actions = _action_values_from_probs(probsB, action_space)
     val = 0.0
@@ -329,6 +500,25 @@ def dr_value(
     action_col: str = "a_A",
     action_space: Optional[Sequence] = None,
 ) -> Tuple[float, float, float]:
+    """Doubly Robust (DR) оценка.
+
+    Совмещает DM и IPS-коррекцию:
+    ``mean( sum_a pi_B(a|x) mu(x,a) + w * (r - mu(x,a_logged)) )``.
+    Консистентна, если корректна хотя бы одна из моделей: ``pi_A`` или ``mu``.
+
+    Args:
+        df: Логи политики A.
+        policyB: Политика B.
+        mu_model: Модель исхода ``mu``.
+        pA: Вектор ``pi_A(a_logged|x)``.
+        target: Целевая метрика.
+        weight_clip: Опциональный клиппинг весов ``w``.
+        action_col: Колонка логированного действия.
+        action_space: Пространство действий для соответствия столбцов.
+
+    Returns:
+        Кортеж ``(value, ess_value, clip_share)``.
+    """
     _validate_logs(df, target, action_col)
     if len(pA) != len(df):
         raise ValueError("pA must have same length as df")
@@ -371,6 +561,24 @@ def sndr_value(
     action_col: str = "a_A",
     action_space: Optional[Sequence] = None,
 ) -> Tuple[float, float, float]:
+    """Self-Normalized Doubly Robust (SNDR).
+
+    То же, что DR, но IPS-поправка нормируется на средний вес
+    ``w / mean(w)`` для стабилизации дисперсии.
+
+    Args:
+        df: Логи политики A.
+        policyB: Политика B.
+        mu_model: Модель исхода ``mu``.
+        pA: Вектор ``pi_A(a_logged|x)``.
+        target: Целевая метрика.
+        weight_clip: Опциональный клиппинг весов.
+        action_col: Колонка логированного действия.
+        action_space: Пространство действий для соответствия столбцов.
+
+    Returns:
+        Кортеж ``(value, ess_value, clip_share)``.
+    """
     _validate_logs(df, target, action_col)
     if len(pA) != len(df):
         raise ValueError("pA must have same length as df")
@@ -413,6 +621,25 @@ def switch_dr_value(
     action_col: str = "a_A",
     action_space: Optional[Sequence] = None,
 ) -> Tuple[float, float, float]:
+    """Switch-DR: DR с отключением IPS-поправки на «тяжёлых» весах.
+
+    Для наблюдений с ``w_i > tau`` поправка зануляется, остаётся только DM-часть.
+    Это снижает дисперсию ценой дополнительного смещения.
+
+    Args:
+        df: Логи политики A.
+        policyB: Политика B.
+        mu_model: Модель исхода ``mu``.
+        pA: Вектор ``pi_A(a_logged|x)``.
+        tau: Порог switch для веса важности.
+        target: Целевая метрика.
+        action_col: Колонка логированного действия.
+        action_space: Пространство действий.
+
+    Returns:
+        Кортеж ``(value, ess_switched, switched_share)``, где ``switched_share`` —
+        доля наблюдений, в которых сработало отключение IPS-поправки.
+    """
     _validate_logs(df, target, action_col)
     if len(pA) != len(df):
         raise ValueError("pA must have same length as df")
@@ -454,7 +681,31 @@ def dr_with_bootstrap_ci(
     alpha: float = 0.05,
     weight_clip: Optional[float] = None,
 ):
-    """Оценивает DR и сразу считает CI для (V_A, V_B, Delta)."""
+    """Оценивает DR и доверительные интервалы бутстрэпом.
+
+    Внутри каждой бутстрэп-реплики переобучаются ``pi_hat`` и ``mu_hat``,
+    затем считаются:
+    - ``V_A`` — среднее значение текущей политики A,
+    - ``V_B`` — DR-оценка новой политики B,
+    - ``Delta = V_B - V_A``.
+
+    Args:
+        df: Логи.
+        policyB: Кандидатная политика B.
+        target: Целевая метрика.
+        feature_cols: Колонки признаков.
+        action_col: Колонка логированного действия.
+        action_space: Пространство действий для policyB.
+        cluster_col: Колонка для кластерного бутстрэпа (например ``user_id``).
+            Если ``None``, бутстрэп обычный по строкам.
+        n_boot: Число бутстрэп-реплик.
+        alpha: Уровень значимости (для 95% CI — ``alpha=0.05``).
+        weight_clip: Опциональный клиппинг весов в DR.
+
+    Returns:
+        Словарь вида:
+        ``{'V_A', 'V_A_CI', 'V_B', 'V_B_CI', 'Delta', 'Delta_CI', 'n_boot'}``.
+    """
     from policyscope.bootstrap import paired_bootstrap_ci
 
     def estimator_pair(df_part: pd.DataFrame):
@@ -485,4 +736,13 @@ def dr_with_bootstrap_ci(
 
 
 def ate_from_values(vB: float, vA: float) -> float:
+    """Возвращает разницу значений политик ``vB - vA``.
+
+    Args:
+        vB: Оценка значения новой политики B.
+        vA: Оценка значения текущей политики A.
+
+    Returns:
+        ATE/Delta между политиками.
+    """
     return float(vB - vA)
