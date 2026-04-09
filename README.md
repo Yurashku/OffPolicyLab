@@ -106,6 +106,7 @@ print(v_ips, v_snips, v_dm, v_dr, dr_ci)
 - `docs/ope_methods_math_guide_ru.md`
 
 В гайде разобраны: On-policy baseline, Replay, IPS, SNIPS, DM, DR, SNDR, Switch-DR и bootstrap CI.
+Формулы в гайде приведены в GitHub-совместимом markdown-формате (`$...$` и `$$...$$`) для корректного отображения.
 
 ## Быстрый синтетический запуск
 
