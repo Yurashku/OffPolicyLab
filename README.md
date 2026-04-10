@@ -5,7 +5,7 @@
 Главное в текущей версии:
 - API стал **универсальным**: названия колонок (`a_A`, `a_B`, целевая метрика, `user_id`) и список признаков задаются аргументами.
 - Туториал стал короче и практичнее: есть компактный сценарий «взял свой DataFrame → получил все OPE‑оценки».
-- Бутстрэп для DR можно вызывать одной функцией (`dr_with_bootstrap_ci`) без ручной сборки циклов.
+- Bootstrap CI считается через единый API: `OPEEvaluator(...).evaluate(method)` или `estimate_value_with_ci(..., method=...)`.
 - Все основные OPE‑оценщики снабжены подробными docstring на русском (аргументы, возвращаемые значения, интерпретация).
 
 ## Установка
@@ -50,7 +50,6 @@ from policyscope.estimators import (
     snips_value,
     dm_value,
     dr_value,
-    dr_with_bootstrap_ci,
 )
 from policyscope.ci import estimate_value_with_ci
 from policyscope.evaluator import OPEEvaluator
@@ -88,19 +87,7 @@ v_snips, ess_snips, clip_snips = snips_value(df, piB_taken, pA_taken, target=tar
 v_dm = dm_value(df, policyB, mu, target=target_col)
 v_dr, ess_dr, clip_dr = dr_value(df, policyB, mu, pA_taken, target=target_col, action_col=action_col)
 
-# 5) DR + bootstrap CI одной функцией
-dr_ci = dr_with_bootstrap_ci(
-    df,
-    policyB,
-    target=target_col,
-    feature_cols=feature_cols,
-    action_col=action_col,
-    cluster_col="user_col",   # либо None
-    n_boot=300,
-)
-print(v_ips, v_snips, v_dm, v_dr, dr_ci)
-
-# 6) Единый слой CI для любого встроенного OPE-эстиматора
+# 5) Единый слой CI для любого встроенного OPE-эстиматора
 ips_ci = estimate_value_with_ci(
     df,
     policyB,
@@ -113,7 +100,7 @@ ips_ci = estimate_value_with_ci(
 )
 print(ips_ci)
 
-# 7) Единый абстрактный объект (CI включён по умолчанию)
+# 6) Единый абстрактный объект (CI включён по умолчанию)
 evaluator = OPEEvaluator(
     df,
     policyB,
@@ -172,13 +159,12 @@ python examples/run_synthetic_experiment.py --n_users 50000 --seed 42 --policyA 
   4. проверка логов и таблица фич + `a_A` + `a_B`,
   5. компактный расчёт всех метрик,
   6. унифицированный вызов через `OPEEvaluator` (переключается только имя эстиматора),
-  7. bootstrap через `dr_with_bootstrap_ci` (backward-compatible shortcut для DR),
-  8. bootstrap CI для **всех** методов через `OPEEvaluator`,
-  9. итоговая таблица сравнения методов с колонками CI (`V_B_CI`, `Delta_CI`) для каждого метода.
+  7. bootstrap CI для **всех** методов через `OPEEvaluator`,
+  8. итоговая таблица сравнения методов с колонками CI (`V_B_CI`, `Delta_CI`) для каждого метода.
 
 Для переноса на реальный кейс в туториале отдельно показано, какие 3-4 строки обычно нужно заменить (`df/logs`, `feature_cols`, `action_col`, `target_col`).
 
-После `dr_with_bootstrap_ci` вы получите словарь:
+После `OPEEvaluator(...).evaluate("dr")` вы получите словарь:
 
 ```python
 {
