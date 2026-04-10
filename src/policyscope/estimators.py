@@ -720,6 +720,6 @@ def ate_from_values(vB: float, vA: float) -> float:
         vA: Оценка значения текущей политики A.
 
     Returns:
-        ATE/Delta между политиками.
+        Delta (policy value difference) между политиками.
     """
     return float(vB - vA)

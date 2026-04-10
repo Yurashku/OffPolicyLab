@@ -24,6 +24,12 @@ pip install -e .
 - DM (Direct Method)
 - DR / SNDR / Switch-DR
 - Кластерный и обычный бутстрэп (если `cluster_col=None`)
+- Data contract слой для логов contextual bandit (`BanditSchema`, `LoggedBanditDataset`)
+
+## Архитектура
+
+- Краткое описание архитектурных границ и доменной модели: `docs/architecture.md`.
+- Библиотека разделяет слои: `data contract -> point estimators -> inference -> diagnostics/reporting`.
 
 ## Минимальный формат данных
 
@@ -40,6 +46,7 @@ pip install -e .
 ```python
 import numpy as np
 import pandas as pd
+from policyscope.data import BanditSchema, LoggedBanditDataset
 from policyscope.estimators import (
     train_pi_hat,
     pi_hat_predict,
@@ -59,6 +66,16 @@ from policyscope.evaluator import OPEEvaluator
 # user_col, logged_action, candidate_action, reward, f1, f2, f3
 
 df = pd.read_csv("my_logs.csv")
+
+# (Опционально, но рекомендуется) валидируем контракт логов до OPE
+schema = BanditSchema(
+    action_col="logged_action",
+    reward_col="reward",
+    feature_cols=["f1", "f2", "f3"],
+    cluster_col="user_col",
+)
+logged = LoggedBanditDataset(df=df, schema=schema)
+df = logged.df
 
 feature_cols = ["f1", "f2", "f3"]
 action_col = "logged_action"
@@ -154,13 +171,14 @@ python examples/run_synthetic_experiment.py --n_users 50000 --seed 42 --policyA 
 - Основной notebook: `examples/tutorial.ipynb`
 - В нём показано:
   1. генерация синтетики,
-  2. вывод oracle ground-truth (`V_A`, `V_B`, `Delta`) сразу после генерации,
-  3. явная остановка использования синтезатора после шага ground-truth (anti data-leakage),
-  4. проверка логов и таблица фич + `a_A` + `a_B`,
-  5. компактный расчёт всех метрик,
-  6. унифицированный вызов через `OPEEvaluator` (переключается только имя эстиматора),
-  7. bootstrap CI для **всех** методов через `OPEEvaluator`,
-  8. итоговая таблица сравнения методов с колонками CI (`V_B_CI`, `Delta_CI`) для каждого метода.
+  2. валидация data contract через `BanditSchema` / `LoggedBanditDataset`,
+  3. вывод oracle ground-truth (`V_A`, `V_B`, `Delta`) сразу после генерации,
+  4. явная остановка использования синтезатора после шага ground-truth (anti data-leakage),
+  5. проверка логов и таблица фич + `a_A` + `a_B`,
+  6. компактный расчёт всех метрик,
+  7. унифицированный вызов через `OPEEvaluator` (переключается только имя эстиматора),
+  8. bootstrap CI для **всех** методов через `OPEEvaluator`,
+  9. итоговая таблица сравнения методов с колонками CI (`V_B_CI`, `Delta_CI`) для каждого метода.
 
 Для переноса на реальный кейс в туториале отдельно показано, какие 3-4 строки обычно нужно заменить (`df/logs`, `feature_cols`, `action_col`, `target_col`).
 
