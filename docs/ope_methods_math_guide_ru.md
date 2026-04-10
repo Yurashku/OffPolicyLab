@@ -15,19 +15,19 @@
 
 Есть логи политики A: `(x_i, a_i, r_i)`, где:
 - `x_i` — контекст,
-- `a_i` — действие, выбранное логирующей политикой `pi_A`,
+- `a_i` — действие, выбранное логирующей политикой `π_A`,
 - `r_i` — наблюдаемая награда.
 
-Нужно оценить ценность новой политики `pi_B`:
+Нужно оценить ценность новой политики `π_B`:
 
 ```text
-V(pi_B) = E_x [ E_{a~pi_B(.|x)} [ r(x, a) ] ]
+V(π_B) = E_x [ E_{a~π_B(·|x)} [ r(x, a) ] ]
 ```
 
 Ключевые обозначения:
-- `mu(x,a) = E[r|x,a]` — модель ожидаемой награды,
-- `p_A(a|x) = pi_A(a|x)` — propensity логирующей политики,
-- `w_i = pi_B(a_i|x_i) / p_A(a_i|x_i)` — importance weight.
+- `μ(x,a) = E[r|x,a]` — модель ожидаемой награды,
+- `p_A(a|x) = π_A(a|x)` — propensity логирующей политики,
+- `w_i = π_B(a_i|x_i) / p_A(a_i|x_i)` — importance weight.
 
 ---
 
@@ -36,7 +36,7 @@ V(pi_B) = E_x [ E_{a~pi_B(.|x)} [ r(x, a) ] ]
 ### 2.1 On-policy baseline (`value_on_policy`)
 
 ```text
-V_A_hat = (1/n) * sum_i r_i
+V̂_A = (1/n) · Σ_i r_i
 ```
 
 Это baseline текущей политики A.
@@ -45,7 +45,7 @@ V_A_hat = (1/n) * sum_i r_i
 
 ```text
 I = { i : a_i == a_i^B }
-V_replay_hat = (1/|I|) * sum_{i in I} r_i
+V̂_replay = (1/|I|) · Σ_{i∈I} r_i
 ```
 
 - Плюс: «честная» фильтрация без моделирования контрфактов.
@@ -56,8 +56,8 @@ V_replay_hat = (1/|I|) * sum_{i in I} r_i
 ### 2.3 IPS (`ips_value`)
 
 ```text
-V_IPS_hat = (1/n) * sum_i [w_i * r_i]
-where w_i = pi_B(a_i|x_i) / p_A(a_i|x_i)
+V̂_IPS = (1/n) · Σ_i [w_i · r_i]
+where w_i = π_B(a_i|x_i) / p_A(a_i|x_i)
 ```
 
 - Несмещён при корректных propensity и overlap.
@@ -68,7 +68,7 @@ where w_i = pi_B(a_i|x_i) / p_A(a_i|x_i)
 ### 2.4 SNIPS (`snips_value`)
 
 ```text
-V_SNIPS_hat = sum_i (w_i * r_i) / sum_i w_i
+V̂_SNIPS = Σ_i (w_i · r_i) / Σ_i w_i
 ```
 
 - Обычно более стабилен, чем IPS.
@@ -79,24 +79,24 @@ V_SNIPS_hat = sum_i (w_i * r_i) / sum_i w_i
 ### 2.5 DM (`dm_value`)
 
 ```text
-V_DM_hat = (1/n) * sum_i sum_a [ pi_B(a|x_i) * mu_hat(x_i,a) ]
+V̂_DM = (1/n) · Σ_i Σ_a [ π_B(a|x_i) · μ̂(x_i,a) ]
 ```
 
 - Низкая дисперсия.
-- Чувствителен к ошибкам модели `mu_hat`.
+- Чувствителен к ошибкам модели `μ̂`.
 
 Источник: https://arxiv.org/abs/1103.4601
 
 ### 2.6 DR (`dr_value`)
 
 ```text
-V_DR_hat = (1/n) * sum_i [
-  sum_a pi_B(a|x_i) * mu_hat(x_i,a)
-  + (pi_B(a_i|x_i)/p_A(a_i|x_i)) * (r_i - mu_hat(x_i,a_i))
+V̂_DR = (1/n) · Σ_i [
+  Σ_a π_B(a|x_i) · μ̂(x_i,a)
+  + (π_B(a_i|x_i)/p_A(a_i|x_i)) · (r_i - μ̂(x_i,a_i))
 ]
 ```
 
-- Doubly robust: консистентность при корректности хотя бы одной части (`p_A` или `mu_hat`).
+- Doubly robust: консистентность при корректности хотя бы одной части (`p_A` или `μ̂`).
 
 Источники:
 - https://arxiv.org/abs/1103.4601
@@ -105,10 +105,10 @@ V_DR_hat = (1/n) * sum_i [
 ### 2.7 SNDR (`sndr_value`)
 
 ```text
-w_bar = (1/n) * sum_i w_i
-V_SNDR_hat = (1/n) * sum_i [
-  sum_a pi_B(a|x_i) * mu_hat(x_i,a)
-  + (w_i/w_bar) * (r_i - mu_hat(x_i,a_i))
+w̄ = (1/n) · Σ_i w_i
+V̂_SNDR = (1/n) · Σ_i [
+  Σ_a π_B(a|x_i) · μ̂(x_i,a)
+  + (w_i/w̄) · (r_i - μ̂(x_i,a_i))
 ]
 ```
 
@@ -122,9 +122,9 @@ V_SNDR_hat = (1/n) * sum_i [
 ### 2.8 Switch-DR (`switch_dr_value`)
 
 ```text
-V_SwitchDR_hat = (1/n) * sum_i [
-  sum_a pi_B(a|x_i) * mu_hat(x_i,a)
-  + 1[w_i <= tau] * w_i * (r_i - mu_hat(x_i,a_i))
+V̂_SwitchDR = (1/n) · Σ_i [
+  Σ_a π_B(a|x_i) · μ̂(x_i,a)
+  + 1[w_i ≤ τ] · w_i · (r_i - μ̂(x_i,a_i))
 ]
 ```
 
@@ -140,7 +140,7 @@ V_SwitchDR_hat = (1/n) * sum_i [
 Он берёт **любой выбранный `V_hat`** (например DR/IPS/SNIPS) и оценивает его неопределённость:
 
 ```text
-Результат inference: [L, U] для неизвестного V(pi_B)
+Результат inference: [L, U] для неизвестного V(π_B)
 ```
 
 Поэтому корректно мыслить так:
@@ -176,8 +176,8 @@ V_SwitchDR_hat = (1/n) * sum_i [
 Идея: представить оценщик как среднее influence-like термов `psi_i`, затем:
 
 ```text
-SE_hat = sqrt( Var_hat(psi_i) / n )
-CI = V_hat +/- z_(1-alpha/2) * SE_hat
+SÊ = sqrt(Var̂(ψ_i)/n)
+CI = V̂ ± z_(1-α/2) · SÊ
 ```
 
 Плюсы:
