@@ -231,3 +231,51 @@ CI = V_hat +/- z_(1-alpha/2) * SE_hat
 Это слой статистического вывода поверх выбранного point-estimator.
 
 То, что в коде есть отдельная функция `dr_with_bootstrap_ci`, действительно может выглядеть как «ещё один метод», но математически это скорее «pipeline для инференса», а не новый `V_hat`.
+
+
+---
+
+## 7) Что используется в литературе и на практике (конкретно для OPE)
+
+Ниже — практичный список CI-подходов, которые чаще всего встречаются в OPE-работах и прикладных пайплайнах:
+
+1. **Percentile bootstrap / cluster bootstrap**  
+   Часто берут как дефолт в прикладных системах: просто, универсально, подходит для большинства оценщиков.
+
+2. **BCa / bootstrap-t (studentized) bootstrap**  
+   Используют, когда хотят более точное покрытие, чем простой percentile bootstrap, особенно при асимметрии распределения оценки.
+
+3. **Асимптотические Wald CI через influence-function (IF)**  
+   Стандартны для DR/AIPW-подобных оценщиков в больших выборках; быстры и удобны в продакшн-отчётах.
+
+4. **High-confidence lower/upper bounds (концентрационные гарантии)**  
+   Применяются для более консервативных решений «катить/не катить» (особенно когда важно не переоценить эффект).
+
+5. **Инференс для адаптивных/бандитных логов**  
+   Отдельная тема: стандартные CI могут ломаться из-за адаптивности; нужны специальные поправки/оценки.
+
+Ключевые источники:
+- Dudík, Langford, Li (DR и базис OPE): https://arxiv.org/abs/1103.4601
+- Swaminathan & Joachims (SNIPS/CRM): https://arxiv.org/abs/1502.02362
+- Thomas et al., High Confidence OPE: https://people.cs.umass.edu/~pthomas/papers/Thomas2015.pdf
+- Hadad et al., Post-Contextual-Bandit Inference (NeurIPS 2021): https://proceedings.neurips.cc/paper/2021/file/eff3058117fd4cf4d4c3af12e273a40f-Paper.pdf
+- Efron & Tibshirani (bootstrap практика): https://www.routledge.com/An-Introductionto-the-Bootstrap/Efron-Tibshirani/p/book/9780412042317
+
+---
+
+## 8) Сравнение с тем, что реализовано у нас сейчас
+
+Сейчас в репозитории реализовано:
+
+- `cluster_bootstrap_ci` — **percentile bootstrap CI** (по строкам или кластерам).  
+- `paired_bootstrap_ci` — парный percentile bootstrap для `(V_A, V_B, Delta)`.  
+- `dr_with_bootstrap_ci` — pipeline для DR + парный bootstrap CI.
+
+Что **не реализовано** (но встречается в литературе/практике):
+
+- BCa / bootstrap-t интервалы,
+- аналитические Wald/IF CI для IPS/SNIPS/DR/Switch-DR,
+- high-confidence concentration bounds,
+- специализированные CI для сильно адаптивных логов (bandit-aware inference).
+
+Практический вывод: текущая реализация покрывает рабочий baseline (percentile cluster bootstrap), но до «полного набора индустриальных/академических CI-подходов» ещё есть пространство для расширения.
