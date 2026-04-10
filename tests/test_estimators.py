@@ -13,6 +13,7 @@ from policyscope.estimators import (
     dr_value,
     sndr_value,
     switch_dr_value,
+    estimator_with_bootstrap_ci,
     take_action_probabilities,
 )
 
@@ -85,3 +86,22 @@ def test_estimators_support_custom_columns():
         action_col="action_logged",
     )
     assert np.isfinite(v_dr)
+
+
+def test_generic_estimator_with_bootstrap_ci_runs():
+    cfg = SynthConfig(n_users=120, horizon_days=20, seed=11)
+    env = SyntheticRecommenderEnv(cfg)
+    X = env.sample_users()
+    policyA = make_policy("epsilon_greedy", epsilon=0.1, seed=11)
+    logs = env.simulate_logs_A(policyA, X)
+    res = estimator_with_bootstrap_ci(
+        logs,
+        lambda part: float(part["accept"].mean()),
+        cluster_col="user_id",
+        n_boot=30,
+        alpha=0.1,
+    )
+    assert np.isfinite(res["value"])
+    low, high = res["CI"]
+    assert np.isfinite(low) and np.isfinite(high)
+    assert low <= high

@@ -267,9 +267,10 @@ CI = V_hat +/- z_(1-alpha/2) * SE_hat
 
 Сейчас в репозитории реализовано:
 
+- `estimator_with_bootstrap_ci` — универсальная обёртка «любой estimator_fn + bootstrap CI».  
 - `cluster_bootstrap_ci` — **percentile bootstrap CI** (по строкам или кластерам).  
 - `paired_bootstrap_ci` — парный percentile bootstrap для `(V_A, V_B, Delta)`.  
-- `dr_with_bootstrap_ci` — pipeline для DR + парный bootstrap CI.
+- `dr_with_bootstrap_ci` — специализированный convenience-wrapper для DR + парный bootstrap CI.
 
 Что **не реализовано** (но встречается в литературе/практике):
 

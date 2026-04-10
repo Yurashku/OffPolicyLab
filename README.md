@@ -50,6 +50,7 @@ from policyscope.estimators import (
     snips_value,
     dm_value,
     dr_value,
+    estimator_with_bootstrap_ci,
     dr_with_bootstrap_ci,
 )
 
@@ -97,6 +98,25 @@ dr_ci = dr_with_bootstrap_ci(
     n_boot=300,
 )
 print(v_ips, v_snips, v_dm, v_dr, dr_ci)
+
+# 6) Любой estimator + bootstrap CI (универсальный паттерн)
+ips_ci = estimator_with_bootstrap_ci(
+    df,
+    lambda part: ips_value(
+        part,
+        prepare_piB_taken(part, policyB, action_col=action_col),
+        take_action_probabilities(
+            pi_hat_predict(train_pi_hat(part, feature_cols=feature_cols, action_col=action_col), part),
+            part[action_col].values,
+            action_space=train_pi_hat(part, feature_cols=feature_cols, action_col=action_col).classes_,
+        ),
+        target=target_col,
+        action_col=action_col,
+    )[0],
+    cluster_col="user_col",
+    n_boot=300,
+)
+print(ips_ci)
 ```
 
 ## Теория и ссылки на статьи (RU)
@@ -109,6 +129,7 @@ print(v_ips, v_snips, v_dm, v_dr, dr_ci)
 Формулы в гайде приведены в plain-text формате (без обязательной LaTeX-разметки), чтобы корректно читаться и на GitHub, и в локальных Markdown-просмотрщиках.
 Отдельно поясняется важный момент: bootstrap CI — это не отдельный OPE-эстиматор, а inference-обёртка поверх выбранного оценщика.
 Гайд также содержит отдельное сравнение: какие CI-подходы используются в OPE-литературе/практике и что именно реализовано в текущем репозитории.
+Дополнительно в API есть универсальная функция `estimator_with_bootstrap_ci`, которая позволяет строить CI для произвольного оценщика через единый bootstrap-интерфейс.
 
 ## Постоянные инструкции для AI-агентов
 

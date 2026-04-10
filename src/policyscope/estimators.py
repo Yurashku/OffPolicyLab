@@ -41,6 +41,7 @@ __all__ = [
     "dr_value",
     "sndr_value",
     "switch_dr_value",
+    "estimator_with_bootstrap_ci",
     "dr_with_bootstrap_ci",
     "ate_from_values",
 ]
@@ -666,6 +667,50 @@ def switch_dr_value(
     mu_taken = mu_hat_predict(mu_model, df, aA, target)
     value = float(np.mean(dm_part + w_sw * (r - mu_taken)))
     return value, ess(w_sw), float((~mask).mean())
+
+
+def estimator_with_bootstrap_ci(
+    df: pd.DataFrame,
+    estimator_fn,
+    *,
+    cluster_col: Optional[str] = "user_id",
+    n_boot: int = 300,
+    alpha: float = 0.05,
+):
+    """Универсальная обёртка: point-estimator + bootstrap CI.
+
+    Эта функция отделяет две сущности:
+    1) ``estimator_fn(df_part) -> float`` — как считается точечная оценка;
+    2) bootstrap — как считается доверительный интервал для этой оценки.
+
+    Args:
+        df: Исходные логи.
+        estimator_fn: Функция, возвращающая ``float`` на переданном DataFrame.
+            Пример: ``lambda part: ips_value(part, piB_taken_part, pA_part)[0]``.
+        cluster_col: Колонка для кластерного bootstrap (например ``user_id``).
+            Если ``None`` или колонки нет, используется bootstrap по строкам.
+        n_boot: Число bootstrap-реплик.
+        alpha: Уровень значимости (0.05 => 95% CI).
+
+    Returns:
+        Словарь вида:
+        ``{'value': ..., 'CI': (low, high), 'n_boot': ..., 'alpha': ...}``.
+    """
+    from policyscope.bootstrap import cluster_bootstrap_ci
+
+    value, low, high = cluster_bootstrap_ci(
+        df,
+        estimator_fn,
+        cluster_col=cluster_col,
+        n_boot=n_boot,
+        alpha=alpha,
+    )
+    return {
+        "value": value,
+        "CI": (low, high),
+        "n_boot": n_boot,
+        "alpha": alpha,
+    }
 
 
 def dr_with_bootstrap_ci(
