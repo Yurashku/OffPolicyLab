@@ -53,6 +53,7 @@ from policyscope.estimators import (
     dr_with_bootstrap_ci,
 )
 from policyscope.ci import estimate_value_with_ci
+from policyscope.evaluator import OPEEvaluator
 
 # ваш датасет
 # df columns example:
@@ -111,6 +112,21 @@ ips_ci = estimate_value_with_ci(
     n_boot=300,
 )
 print(ips_ci)
+
+# 7) Единый абстрактный объект (CI включён по умолчанию)
+evaluator = OPEEvaluator(
+    df,
+    policyB,
+    target=target_col,
+    feature_cols=feature_cols,
+    action_col=action_col,
+    cluster_col="user_col",
+    n_boot=300,
+    alpha=0.05,
+    weight_clip=20.0,
+)
+dr_report = evaluator.evaluate("dr")  # также: "ips", "snips", "dm", "sndr", "switch_dr", ...
+print(dr_report)  # V_A, V_B, Delta + CI
 ```
 
 ## Теория и ссылки на статьи (RU)
@@ -129,6 +145,7 @@ print(ips_ci)
 Гайд также содержит отдельное сравнение: какие CI-подходы используются в OPE-литературе/практике и что именно реализовано в текущем репозитории.
 В API есть единый CI-слой `estimate_value_with_ci` для встроенных OPE-эстиматоров и совместимая низкоуровневая обёртка `estimator_with_bootstrap_ci` для произвольных `estimator_fn`.
 Нотация в формулах гайда унифицирована: `π_A`, `π_B`, `μ̂`, `V̂`, `Δ`, `τ`, `w̄` — для более читаемого и однозначного математического стиля.
+Также добавлен `OPEEvaluator` — единый абстрактный объект, который унифицированно вызывает эстиматоры по имени и возвращает CI по умолчанию.
 
 ## Постоянные инструкции для AI-агентов
 
@@ -149,11 +166,16 @@ python examples/run_synthetic_experiment.py --n_users 50000 --seed 42 --policyA 
 
 - Основной notebook: `examples/tutorial.ipynb`
 - В нём показано:
-  1. проверка логов,
-  2. таблица с фичами + `a_A` + `a_B`,
-  3. компактный расчёт всех метрик,
-  4. bootstrap через `dr_with_bootstrap_ci`,
-  5. итоговая «красивая» таблица сравнения методов на текущих данных (Replay/IPS/SNIPS/DM/DR/SNDR/Switch‑DR + ESS/clip/switch + CI для `V_A` и `V_B`).
+  1. генерация синтетики,
+  2. вывод oracle ground-truth (`V_A`, `V_B`, `Delta`) сразу после генерации,
+  3. явная остановка использования синтезатора после шага ground-truth (anti data-leakage),
+  4. проверка логов и таблица фич + `a_A` + `a_B`,
+  5. компактный расчёт всех метрик,
+  6. унифицированный вызов через `OPEEvaluator` (переключается только имя эстиматора),
+  7. bootstrap через `dr_with_bootstrap_ci`,
+  8. итоговая таблица сравнения методов на текущих данных.
+
+Для переноса на реальный кейс в туториале отдельно показано, какие 3-4 строки обычно нужно заменить (`df/logs`, `feature_cols`, `action_col`, `target_col`).
 
 После `dr_with_bootstrap_ci` вы получите словарь:
 

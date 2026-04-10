@@ -36,7 +36,7 @@ from policyscope.estimators import (
 EstimatorName = Literal["on_policy", "replay", "ips", "snips", "dm", "dr", "sndr", "switch_dr"]
 
 
-__all__ = ["estimate_value_with_ci"]
+__all__ = ["estimate_value", "estimate_value_with_ci"]
 
 
 def _resample_df(
@@ -136,6 +136,32 @@ def _estimate_point(
         return v
 
     raise ValueError(f"Unsupported method: {method}")
+
+
+def estimate_value(
+    df: pd.DataFrame,
+    policyB,
+    *,
+    method: EstimatorName,
+    target: str = "accept",
+    feature_cols: Optional[Sequence[str]] = None,
+    action_col: str = "a_A",
+    action_space: Optional[Sequence] = None,
+    weight_clip: Optional[float] = None,
+    tau: float = 20.0,
+) -> float:
+    """Считает только point-estimate для выбранного OPE-оценщика."""
+    return _estimate_point(
+        df,
+        method=method,
+        policyB=policyB,
+        target=target,
+        feature_cols=feature_cols,
+        action_col=action_col,
+        action_space=action_space,
+        weight_clip=weight_clip,
+        tau=tau,
+    )
 
 
 def estimate_value_with_ci(

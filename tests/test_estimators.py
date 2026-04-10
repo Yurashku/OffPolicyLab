@@ -17,6 +17,7 @@ from policyscope.estimators import (
     take_action_probabilities,
 )
 from policyscope.ci import estimate_value_with_ci
+from policyscope.evaluator import OPEEvaluator
 
 
 def test_estimators_run_on_synthetic():
@@ -130,3 +131,32 @@ def test_estimate_value_with_ci_for_multiple_estimators():
         assert np.isfinite(out["value"])
         lo, hi = out["CI"]
         assert np.isfinite(lo) and np.isfinite(hi)
+
+
+def test_unified_evaluator_object_with_default_ci():
+    cfg = SynthConfig(n_users=100, horizon_days=20, seed=31)
+    env = SyntheticRecommenderEnv(cfg)
+    X = env.sample_users()
+    policyA = make_policy("epsilon_greedy", epsilon=0.1, seed=31)
+    logs = env.simulate_logs_A(policyA, X)
+    policyB = make_policy("softmax", tau=0.8, seed=32)
+
+    evaluator = OPEEvaluator(
+        logs,
+        policyB,
+        target="accept",
+        feature_cols=["loyal", "age", "risk", "income"],
+        action_col="a_A",
+        cluster_col="user_id",
+        n_boot=20,
+        alpha=0.1,
+        weight_clip=20.0,
+        tau=20.0,
+    )
+    out = evaluator.evaluate("dr")
+    assert out["estimator"] == "dr"
+    assert np.isfinite(out["V_A"])
+    assert np.isfinite(out["V_B"])
+    assert np.isfinite(out["Delta"])
+    lo, hi = out["V_B_CI"]
+    assert np.isfinite(lo) and np.isfinite(hi)

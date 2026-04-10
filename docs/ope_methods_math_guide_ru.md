@@ -267,6 +267,7 @@ CI = V̂ ± z_(1-α/2) · SÊ
 
 Сейчас в репозитории реализовано:
 
+- `OPEEvaluator` — единый объект для вызова эстиматоров по имени с CI по умолчанию (`evaluate("dr")`, `evaluate("ips")`, ...).  
 - `estimate_value_with_ci` — единый CI-слой для встроенных OPE-оценщиков (`ips/snips/dm/dr/sndr/switch_dr/...`).  
 - `estimator_with_bootstrap_ci` — низкоуровневая универсальная обёртка «любой estimator_fn + bootstrap CI».  
 - `cluster_bootstrap_ci` — **percentile bootstrap CI** (по строкам или кластерам).  
