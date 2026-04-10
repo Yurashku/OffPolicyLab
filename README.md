@@ -105,8 +105,9 @@ print(v_ips, v_snips, v_dm, v_dr, dr_ci)
 
 - `docs/ope_methods_math_guide_ru.md`
 
-В гайде разобраны: On-policy baseline, Replay, IPS, SNIPS, DM, DR, SNDR, Switch-DR и bootstrap CI.
+В гайде разобраны: On-policy baseline, Replay, IPS, SNIPS, DM, DR, SNDR, Switch-DR и методы построения доверительных интервалов (CI).
 Формулы в гайде приведены в plain-text формате (без обязательной LaTeX-разметки), чтобы корректно читаться и на GitHub, и в локальных Markdown-просмотрщиках.
+Отдельно поясняется важный момент: bootstrap CI — это не отдельный OPE-эстиматор, а inference-обёртка поверх выбранного оценщика.
 
 ## Постоянные инструкции для AI-агентов
 

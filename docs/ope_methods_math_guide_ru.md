@@ -1,223 +1,233 @@
-# Методы офлайн-оценки политик в `Policyscope`: интуиция, формулы и ссылки на статьи
+# Методы офлайн-оценки политик в `Policyscope`: интуиция, формулы, доверительные интервалы
 
-> Важно про отображение: в этом документе формулы даны в **plain-text формате** (без LaTeX-разметки `$$...$$`), чтобы текст одинаково читался на GitHub и в локальных Markdown-просмотрщиках без MathJax/KaTeX.
+> Важно про отображение: формулы в документе даны в **plain-text формате** (без обязательного LaTeX `$$...$$`), чтобы всё одинаково читалось на GitHub и в локальных Markdown-просмотрщиках.
 
-Этот гайд покрывает все методы, реализованные в репозитории:
+## Что важно сразу
 
-- On-policy baseline (`value_on_policy`)
-- Replay (`replay_value`)
-- IPS (`ips_value`)
-- SNIPS (`snips_value`)
-- DM / Direct Method (`dm_value`)
-- DR / Doubly Robust (`dr_value`)
-- SNDR / Self-Normalized DR (`sndr_value`)
-- Switch-DR (`switch_dr_value`)
-- Bootstrap CI для DR (`dr_with_bootstrap_ci`)
+- `IPS/SNIPS/DM/DR/SNDR/Switch-DR/Replay` — это **оценщики значения политики** (point estimators).
+- `Bootstrap CI` — это **не отдельный OPE-оценщик**, а процедура статистического вывода (inference), которая строит доверительный интервал вокруг выбранного оценщика.
+
+Иными словами, `dr_with_bootstrap_ci` — это обёртка «оценщик + интервал», а не «ещё один метод оценки политики» наравне с IPS/DR.
 
 ---
 
 ## 1) Единая постановка задачи
 
 Есть логи политики A: `(x_i, a_i, r_i)`, где:
-
 - `x_i` — контекст,
 - `a_i` — действие, выбранное логирующей политикой `pi_A`,
 - `r_i` — наблюдаемая награда.
 
-Нужно оценить ожидаемую ценность новой политики `pi_B`:
+Нужно оценить ценность новой политики `pi_B`:
 
 ```text
 V(pi_B) = E_x [ E_{a~pi_B(.|x)} [ r(x, a) ] ]
 ```
 
 Ключевые обозначения:
-
-- `mu(x, a) = E[r | x, a]` — модель ожидаемой награды,
+- `mu(x,a) = E[r|x,a]` — модель ожидаемой награды,
 - `p_A(a|x) = pi_A(a|x)` — propensity логирующей политики,
 - `w_i = pi_B(a_i|x_i) / p_A(a_i|x_i)` — importance weight.
 
 ---
 
-## 2) On-policy baseline (`value_on_policy`)
+## 2) Point-estimators (что оценивает `V_hat`)
 
-Средняя награда на логах A:
+### 2.1 On-policy baseline (`value_on_policy`)
 
 ```text
 V_A_hat = (1/n) * sum_i r_i
 ```
 
-Это baseline для сравнения с `V_B`.
+Это baseline текущей политики A.
 
----
-
-## 3) Replay (`replay_value`)
-
-Берём только строки, где действия A и B совпали:
+### 2.2 Replay (`replay_value`)
 
 ```text
 I = { i : a_i == a_i^B }
-V_replay_hat = (1 / |I|) * sum_{i in I} r_i
+V_replay_hat = (1/|I|) * sum_{i in I} r_i
 ```
 
-Интуиция:
-- максимально «честно» (без моделирования контрфактов),
-- но может иметь высокую дисперсию при малом числе совпадений.
+- Плюс: «честная» фильтрация без моделирования контрфактов.
+- Минус: может иметь большую дисперсию, если совпадений мало.
 
-Литература:
-- Li et al. (unbiased offline evaluation / replay): https://arxiv.org/abs/1003.5956
+Источник: Li et al. (unbiased offline evaluation) — https://arxiv.org/abs/1003.5956
 
----
-
-## 4) IPS (`ips_value`)
+### 2.3 IPS (`ips_value`)
 
 ```text
-V_IPS_hat = (1/n) * sum_i (w_i * r_i)
+V_IPS_hat = (1/n) * sum_i [w_i * r_i]
 where w_i = pi_B(a_i|x_i) / p_A(a_i|x_i)
 ```
 
-Интуиция:
-- корректно перевзвешивает логи A «под» политику B,
-- несмещён при корректных propensity и overlap,
-- чувствителен к большим весам.
+- Несмещён при корректных propensity и overlap.
+- Нестабилен при тяжёлом хвосте весов.
 
-Литература:
-- Dudík, Langford, Li: https://arxiv.org/abs/1103.4601
-- Практический контекст bandits: https://arxiv.org/abs/1003.5956
+Источник: Dudík, Langford, Li — https://arxiv.org/abs/1103.4601
 
----
-
-## 5) SNIPS (`snips_value`)
+### 2.4 SNIPS (`snips_value`)
 
 ```text
 V_SNIPS_hat = sum_i (w_i * r_i) / sum_i w_i
 ```
 
-Интуиция:
-- нормировка стабилизирует оценки,
-- обычно снижает дисперсию,
-- может добавлять смещение.
+- Обычно более стабилен, чем IPS.
+- Может вносить смещение.
 
-Литература:
-- Swaminathan & Joachims: https://arxiv.org/abs/1502.02362
-- JMLR version: https://jmlr.org/papers/v16/swaminathan15a.html
+Источник: Swaminathan & Joachims — https://arxiv.org/abs/1502.02362
 
----
-
-## 6) DM / Direct Method (`dm_value`)
-
-Сначала строится модель `mu_hat(x,a)`, затем:
+### 2.5 DM (`dm_value`)
 
 ```text
-V_DM_hat = (1/n) * sum_i sum_a [ pi_B(a|x_i) * mu_hat(x_i, a) ]
+V_DM_hat = (1/n) * sum_i sum_a [ pi_B(a|x_i) * mu_hat(x_i,a) ]
 ```
 
-Интуиция:
-- низкая дисперсия,
-- зависит от качества модели награды.
+- Низкая дисперсия.
+- Чувствителен к ошибкам модели `mu_hat`.
 
-Литература:
-- Dudík et al. (DM/IPS/DR): https://arxiv.org/abs/1103.4601
+Источник: https://arxiv.org/abs/1103.4601
 
----
-
-## 7) DR / Doubly Robust (`dr_value`)
+### 2.6 DR (`dr_value`)
 
 ```text
 V_DR_hat = (1/n) * sum_i [
-    sum_a pi_B(a|x_i) * mu_hat(x_i, a)
-    + (pi_B(a_i|x_i)/p_A(a_i|x_i)) * (r_i - mu_hat(x_i, a_i))
+  sum_a pi_B(a|x_i) * mu_hat(x_i,a)
+  + (pi_B(a_i|x_i)/p_A(a_i|x_i)) * (r_i - mu_hat(x_i,a_i))
 ]
 ```
 
-Интуиция:
-- сочетает DM + IPS-коррекцию,
-- консистентен, если корректна хотя бы одна часть: propensity или `mu_hat`.
+- Doubly robust: консистентность при корректности хотя бы одной части (`p_A` или `mu_hat`).
 
-Литература:
-- Классика DR: https://arxiv.org/abs/1103.4601
-- Доп. анализ DR: https://arxiv.org/abs/1503.02834
+Источники:
+- https://arxiv.org/abs/1103.4601
+- https://arxiv.org/abs/1503.02834
 
----
-
-## 8) SNDR / Self-Normalized DR (`sndr_value`)
-
-В реализации `Policyscope` нормируется коррекционный член DR:
+### 2.7 SNDR (`sndr_value`)
 
 ```text
 w_bar = (1/n) * sum_i w_i
 V_SNDR_hat = (1/n) * sum_i [
-    sum_a pi_B(a|x_i) * mu_hat(x_i, a)
-    + (w_i / w_bar) * (r_i - mu_hat(x_i, a_i))
+  sum_a pi_B(a|x_i) * mu_hat(x_i,a)
+  + (w_i/w_bar) * (r_i - mu_hat(x_i,a_i))
 ]
 ```
 
-Интуиция:
-- меньше вариативность при «тяжёлых» весах,
-- ценой некоторого смещения.
+- Стабилизирует DR при тяжёлых весах.
+- Может увеличить смещение.
 
-Литература:
-- Self-normalization: https://arxiv.org/abs/1502.02362
-- DR фундамент: https://arxiv.org/abs/1103.4601
+Основано на идеях self-normalization + DR:
+- https://arxiv.org/abs/1502.02362
+- https://arxiv.org/abs/1103.4601
 
----
-
-## 9) Switch-DR (`switch_dr_value`)
-
-Для весов выше порога `tau` IPS-поправка выключается:
+### 2.8 Switch-DR (`switch_dr_value`)
 
 ```text
 V_SwitchDR_hat = (1/n) * sum_i [
-    sum_a pi_B(a|x_i) * mu_hat(x_i, a)
-    + 1[w_i <= tau] * w_i * (r_i - mu_hat(x_i, a_i))
+  sum_a pi_B(a|x_i) * mu_hat(x_i,a)
+  + 1[w_i <= tau] * w_i * (r_i - mu_hat(x_i,a_i))
 ]
 ```
 
-Интуиция:
-- снижает дисперсию за счёт контролируемого bias-variance trade-off.
+- Контролирует variance через отключение опасно больших весов.
 
-Литература:
-- SWITCH estimator: https://proceedings.mlr.press/v70/wang17a.html
-- arXiv: https://arxiv.org/abs/1612.01205
+Источник: https://arxiv.org/abs/1612.01205
 
 ---
 
-## 10) Bootstrap CI для DR (`dr_with_bootstrap_ci`)
+## 3) Почему `Bootstrap CI` — не отдельный OPE-оценщик
 
-Интервалы строятся бутстрэпом (по строкам или по кластерам `user_id`).
+`Bootstrap CI` не задаёт новую формулу `V_hat`.
+Он берёт **любой выбранный `V_hat`** (например DR/IPS/SNIPS) и оценивает его неопределённость:
 
-Интуиция:
-- эмпирически оцениваем распределение оценки,
-- учитываем зависимость внутри кластера при cluster bootstrap.
+```text
+Результат inference: [L, U] для неизвестного V(pi_B)
+```
 
-Литература:
-- Efron & Tibshirani: https://www.routledge.com/An-Introductionto-the-Bootstrap/Efron-Tibshirani/p/book/9780412042317
-- Cluster bootstrap: https://direct.mit.edu/rest/article/90/3/414/57731/Bootstrap-Based-Improvements-for-Inference-with
-
----
-
-## 11) Практический чек-лист
-
-1. Проверяйте overlap: нет ли зон, где `p_A(a|x)` очень мал, а `pi_B(a|x)` велик.
-2. Контролируйте ESS: низкий ESS = мало эффективных наблюдений.
-3. Сравнивайте IPS/SNIPS/DR/Switch-DR, а не одну точечную оценку.
-4. Всегда смотрите доверительные интервалы.
-5. Решение о выкладке делайте по `V_B` и `Delta = V_B - V_A`.
+Поэтому корректно мыслить так:
+- «Estimator» отвечает на вопрос: *какая точечная оценка?*
+- «CI method» отвечает на вопрос: *насколько эта оценка статистически неопределённа?*
 
 ---
 
-## 12) Важные допущения
+## 4) Как считать CI для остальных OPE-оценщиков
 
-- Positivity (overlap): действия B должны иметь поддержку в логах A.
-- Корректное логирование действий и propensity.
-- Стабильность определения награды.
+Ниже — основные подходы, которые используются в литературе.
 
-Нарушение допущений обычно критичнее, чем выбор конкретного OPE-оценщика.
+### 4.1 Nonparametric bootstrap (универсальный практический baseline)
+
+Подходит почти для любого point-estimator (Replay/IPS/SNIPS/DM/DR/SNDR/Switch-DR):
+
+1. `b=1..B`: ресемплируем строки (или кластеры `user_id`) с возвращением.
+2. Считаем `V_hat^(b)` тем же оценщиком.
+3. CI берём по квантилям `alpha/2` и `1-alpha/2`.
+
+Плюсы:
+- просто,
+- единая процедура для разных оценщиков.
+
+Минусы:
+- чувствителен к тяжёлым хвостам,
+- в адаптивных данных (bandit logs) может давать некорректное покрытие без доп. поправок.
+
+Классика bootstrap: Efron & Tibshirani (книга).
+
+### 4.2 Асимптотические Wald/IF-интервалы (для IPS/DR и их вариантов)
+
+Идея: представить оценщик как среднее influence-like термов `psi_i`, затем:
+
+```text
+SE_hat = sqrt( Var_hat(psi_i) / n )
+CI = V_hat +/- z_(1-alpha/2) * SE_hat
+```
+
+Плюсы:
+- дешево по вычислениям,
+- удобно для онлайн-отчётности.
+
+Минусы:
+- требуют условий асимптотики,
+- плохи при малом `n` и тяжелых весах.
+
+Связанные источники:
+- DR/OPE базис: https://arxiv.org/abs/1103.4601
+- Пост-bandit inference и корректность интервалов в адаптивных дизайнах:
+  https://proceedings.neurips.cc/paper/2021/file/eff3058117fd4cf4d4c3af12e273a40f-Paper.pdf
+
+### 4.3 High-confidence bounds (концентрационные, «гарантийные»)
+
+Вместо симметричного CI строят нижнюю/верхнюю границу с гарантиями вероятности.
+Часто используют эмпирические Bernstein/концентрационные подходы и клиппинг.
+
+Подходит для risk-averse запуска, когда важнее «не переоценить» качество.
+
+Источник: High Confidence OPE (Thomas et al., AAAI 2015):
+- PDF: https://people.cs.umass.edu/~pthomas/papers/Thomas2015.pdf
+
+### 4.4 Cluster bootstrap (когда есть зависимость внутри пользователя)
+
+Если на одного `user_id` приходится много наблюдений, стандартный row-bootstrap занижает неопределённость.
+Нужно ресемплировать кластеры целиком.
+
+Источник: Cameron, Gelbach, Miller (cluster bootstrap):
+- https://direct.mit.edu/rest/article/90/3/414/57731/Bootstrap-Based-Improvements-for-Inference-with
 
 ---
 
-## 13) Что использовать первым
+## 5) Практическая рекомендация для `Policyscope`
 
-- Нужен прозрачный baseline: **IPS**.
-- Нужна устойчивая практика: **DR**.
-- Тяжёлые веса/нестабильность: **SNDR** или **Switch-DR**.
-- Обязательный слой для принятия решения: **bootstrap CI**.
+1. Для всех OPE-оценщиков начните с **cluster bootstrap CI** (если есть повторные наблюдения на пользователя).
+2. Для отчёта держите и point-estimate, и CI.
+3. Если веса тяжёлые (низкий ESS), добавляйте диагностику стабильности:
+   - IPS vs SNIPS,
+   - DR vs Switch-DR,
+   - sensitivity по `weight_clip` / `tau`.
+4. Для критичных решений используйте high-confidence lower bound как дополнительный guardrail.
+
+---
+
+## 6) Мини-ответ на ваш ключевой вопрос
+
+**Нет, `Bootstrap CI для DR` не является отдельным OPE-эстиматором наравне с IPS/DR.**
+Это слой статистического вывода поверх выбранного point-estimator.
+
+То, что в коде есть отдельная функция `dr_with_bootstrap_ci`, действительно может выглядеть как «ещё один метод», но математически это скорее «pipeline для инференса», а не новый `V_hat`.
