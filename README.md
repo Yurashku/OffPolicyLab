@@ -172,8 +172,9 @@ python examples/run_synthetic_experiment.py --n_users 50000 --seed 42 --policyA 
   4. проверка логов и таблица фич + `a_A` + `a_B`,
   5. компактный расчёт всех метрик,
   6. унифицированный вызов через `OPEEvaluator` (переключается только имя эстиматора),
-  7. bootstrap через `dr_with_bootstrap_ci`,
-  8. итоговая таблица сравнения методов на текущих данных.
+  7. bootstrap через `dr_with_bootstrap_ci` (backward-compatible shortcut для DR),
+  8. bootstrap CI для **всех** методов через `OPEEvaluator`,
+  9. итоговая таблица сравнения методов с колонками CI (`V_B_CI`, `Delta_CI`) для каждого метода.
 
 Для переноса на реальный кейс в туториале отдельно показано, какие 3-4 строки обычно нужно заменить (`df/logs`, `feature_cols`, `action_col`, `target_col`).
 
