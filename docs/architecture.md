@@ -6,7 +6,7 @@
 
 - есть логи поведения политики `A` (behavior/logging policy),
 - нужно оценить значение политики `B` (target/candidate policy),
-- целевые артефакты: `policy value`, `delta = value(B) - value(A)`, CI и диагностика.
+- целевые артефакты: `policy value`, `delta = value(B) - value(A)`, CI, `p-value` и диагностика.
 
 ## 2) Доменная модель (phase 1)
 
@@ -25,13 +25,17 @@
    Оценщики значения политики (`replay`, `ips`, `snips`, `dm`, `dr`, `sndr`, `switch_dr`).
 
 5. **Inference**  
-   Слой построения CI (bootstrap row/cluster/paired), независимо от point-estimator.
+   Слой построения CI, `p-value` и inference metadata (bootstrap row/cluster/paired), независимо от point-estimator.
 
 6. **Diagnostics**  
    ESS, clipping/share, устойчивость и sanity-check метрики.
+   Диагностика обязательна рядом с инференсом, но не заменяет CI/p-value.
 
 7. **Comparison result**  
-   Сводка по `V_A`, `V_B`, `delta`, CI и диагностике для сравнения A vs B.
+   Сводка по `V_A`, `V_B`, `delta`, CI, `p-value` и диагностике для сравнения A vs B.
+
+8. **Scalar target metric (core abstraction)**  
+   Базовая единица оценки — одна скалярная метрика награды. Несколько метрик поддерживаются как повторные запуски оценки для разных target-колонок, а не как native vector-valued reward.
 
 ## 3) Границы слоёв
 

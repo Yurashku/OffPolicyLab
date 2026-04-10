@@ -11,8 +11,8 @@ from typing import Optional, Sequence
 
 import pandas as pd
 
-from policyscope.bootstrap import paired_bootstrap_ci
 from policyscope.ci import estimate_value
+from policyscope.inference import infer_policy_comparison_bootstrap
 from policyscope.estimators import value_on_policy
 
 
@@ -81,18 +81,21 @@ class OPEEvaluator:
             b = point_on(part)
             return a, b, b - a
 
-        ci = paired_bootstrap_ci(
+        comp = infer_policy_comparison_bootstrap(
             self.df,
             estimator_pair,
             cluster_col=self.cluster_col,
             n_boot=self.n_boot,
             alpha=self.alpha,
-        )
+        ).to_dict()
         base.update({
-            "V_A_CI": ci["V_A_CI"],
-            "V_B_CI": ci["V_B_CI"],
-            "Delta_CI": ci["Delta_CI"],
-            "n_boot": ci["n_boot"],
-            "alpha": self.alpha,
+            "V_A_CI": comp["V_A_CI"],
+            "V_B_CI": comp["V_B_CI"],
+            "Delta_CI": comp["Delta_CI"],
+            "p_value": comp["p_value"],
+            "n_boot": comp["n_boot"],
+            "alpha": comp["alpha"],
+            "inference_method": comp["inference_method"],
+            "inference_warnings": comp["inference_warnings"],
         })
         return base

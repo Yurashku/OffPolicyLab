@@ -41,7 +41,7 @@ def test_paired_bootstrap_ci_basic():
         return va, vb, vb - va
 
     res = paired_bootstrap_ci(
-        df, estimator_pair, cluster_col="user_id", n_boot=200, rng_seed=1
+        df, estimator_pair, cluster_col="user_id", n_boot=200, alpha=0.1, rng_seed=1
     )
     mean_a = df["val_a"].mean()
     mean_b = df["val_b"].mean()
@@ -58,6 +58,30 @@ def test_paired_bootstrap_ci_basic():
     lo, hi = res["Delta_CI"]
     assert lo <= delta <= hi
     assert res["n_boot"] == 200
+    assert res["alpha"] == 0.1
+    assert 0.0 <= res["p_value"] <= 1.0
+    assert res["inference_method"] == "paired_percentile_bootstrap"
+
+
+def test_paired_bootstrap_ci_respects_alpha_width():
+    df = pd.DataFrame(
+        {
+            "user_id": [1, 1, 2, 2, 3, 3, 4, 4],
+            "val_a": [0.0, 0.1, 0.2, 0.3, 0.0, 0.1, 0.2, 0.3],
+            "val_b": [0.1, 0.2, 0.3, 0.4, 0.1, 0.2, 0.3, 0.4],
+        }
+    )
+
+    def estimator_pair(d):
+        va = d["val_a"].mean()
+        vb = d["val_b"].mean()
+        return va, vb, vb - va
+
+    res_95 = paired_bootstrap_ci(df, estimator_pair, cluster_col="user_id", n_boot=400, alpha=0.05, rng_seed=2)
+    res_80 = paired_bootstrap_ci(df, estimator_pair, cluster_col="user_id", n_boot=400, alpha=0.20, rng_seed=2)
+    w95 = res_95["Delta_CI"][1] - res_95["Delta_CI"][0]
+    w80 = res_80["Delta_CI"][1] - res_80["Delta_CI"][0]
+    assert w80 <= w95
 
 
 def test_decision_summary_outcomes():

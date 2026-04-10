@@ -5,7 +5,8 @@
 Главное в текущей версии:
 - API стал **универсальным**: названия колонок (`a_A`, `a_B`, целевая метрика, `user_id`) и список признаков задаются аргументами.
 - Туториал стал короче и практичнее: есть компактный сценарий «взял свой DataFrame → получил все OPE‑оценки».
-- Bootstrap CI считается через единый API: `OPEEvaluator(...).evaluate(method)` или `estimate_value_with_ci(..., method=...)`.
+- Bootstrap-инференс считается через единый API: `OPEEvaluator(...).evaluate(method)` или `estimate_value_with_ci(..., method=...)`.
+- Для сравнения A vs B в `OPEEvaluator` доступны `Delta_CI` и bootstrap `p_value` для гипотезы `delta = 0`.
 - Все основные OPE‑оценщики снабжены подробными docstring на русском (аргументы, возвращаемые значения, интерпретация).
 
 ## Установка
@@ -130,7 +131,7 @@ evaluator = OPEEvaluator(
     weight_clip=20.0,
 )
 dr_report = evaluator.evaluate("dr")  # также: "ips", "snips", "dm", "sndr", "switch_dr", ...
-print(dr_report)  # V_A, V_B, Delta + CI
+print(dr_report)  # V_A, V_B, Delta + CI + p_value + inference metadata
 ```
 
 ## Теория и ссылки на статьи (RU)
@@ -177,7 +178,7 @@ python examples/run_synthetic_experiment.py --n_users 50000 --seed 42 --policyA 
   5. проверка логов и таблица фич + `a_A` + `a_B`,
   6. компактный расчёт всех метрик,
   7. унифицированный вызов через `OPEEvaluator` (переключается только имя эстиматора),
-  8. bootstrap CI для **всех** методов через `OPEEvaluator`,
+  8. bootstrap CI и `p_value` для **всех** методов через `OPEEvaluator`,
   9. итоговая таблица сравнения методов с колонками CI (`V_B_CI`, `Delta_CI`) для каждого метода.
 
 Для переноса на реальный кейс в туториале отдельно показано, какие 3-4 строки обычно нужно заменить (`df/logs`, `feature_cols`, `action_col`, `target_col`).
@@ -192,7 +193,9 @@ python examples/run_synthetic_experiment.py --n_users 50000 --seed 42 --policyA 
   'V_B_CI': (..., ...),
   'Delta': ...,
   'Delta_CI': (..., ...),
-  'n_boot': ...
+  'p_value': ...,
+  'n_boot': ...,
+  'inference_method': ...
 }
 ```
 
@@ -203,3 +206,11 @@ python -m flake8 src tests
 pytest
 jupyter nbconvert --to notebook --execute examples/tutorial.ipynb --inplace
 ```
+
+## Migration note (inference)
+
+- Публичные имена функций не менялись.
+- В выходах сравнения политик (`paired_bootstrap_ci`, `OPEEvaluator.evaluate`) добавлены поля:
+  - `p_value` (bootstrap, H0: `delta = 0`),
+  - `inference_method`,
+  - `alpha`.

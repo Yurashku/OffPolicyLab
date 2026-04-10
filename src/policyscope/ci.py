@@ -17,6 +17,7 @@ from typing import Optional, Sequence, Literal
 import numpy as np
 import pandas as pd
 
+from policyscope.inference import infer_scalar_bootstrap
 from policyscope.estimators import (
     train_pi_hat,
     pi_hat_predict,
@@ -37,20 +38,6 @@ EstimatorName = Literal["on_policy", "replay", "ips", "snips", "dm", "dr", "sndr
 
 
 __all__ = ["estimate_value", "estimate_value_with_ci"]
-
-
-def _resample_df(
-    df: pd.DataFrame,
-    *,
-    cluster_col: Optional[str],
-    rng: np.random.Generator,
-) -> pd.DataFrame:
-    if cluster_col is None or cluster_col not in df.columns:
-        idx = rng.integers(0, len(df), size=len(df))
-        return df.iloc[idx].copy()
-    clusters = df[cluster_col].unique()
-    sampled = rng.choice(clusters, size=len(clusters), replace=True)
-    return pd.concat([df[df[cluster_col] == c] for c in sampled], ignore_index=True)
 
 
 def _estimate_point(
@@ -184,23 +171,9 @@ def estimate_value_with_ci(
 
     По умолчанию используется percentile bootstrap (row/cluster).
     """
-    rng = np.random.default_rng(rng_seed)
-    point = _estimate_point(
+    out = infer_scalar_bootstrap(
         df,
-        method=method,
-        policyB=policyB,
-        target=target,
-        feature_cols=feature_cols,
-        action_col=action_col,
-        action_space=action_space,
-        weight_clip=weight_clip,
-        tau=tau,
-    )
-
-    boots: list[float] = []
-    for _ in range(n_boot):
-        part = _resample_df(df, cluster_col=cluster_col, rng=rng)
-        v = _estimate_point(
+        lambda part: _estimate_point(
             part,
             method=method,
             policyB=policyB,
@@ -210,16 +183,19 @@ def estimate_value_with_ci(
             action_space=action_space,
             weight_clip=weight_clip,
             tau=tau,
-        )
-        boots.append(float(v))
-
-    low = float(np.percentile(boots, 100 * alpha / 2))
-    high = float(np.percentile(boots, 100 * (1 - alpha / 2)))
+        ),
+        cluster_col=cluster_col,
+        n_boot=n_boot,
+        alpha=alpha,
+        rng_seed=rng_seed,
+    )
+    low, high = out["CI"]
     return {
         "method": method,
-        "value": float(point),
+        "value": float(out["value"]),
         "CI": (low, high),
         "n_boot": n_boot,
         "alpha": alpha,
         "cluster_col": cluster_col,
+        "inference_method": out["inference_method"],
     }

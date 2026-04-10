@@ -7,6 +7,8 @@ def test_architecture_doc_exists_and_mentions_domain_model():
     assert "LoggedBanditDataset" in text
     assert "contextual bandit" in text.lower()
     assert "non-goals" in text.lower()
+    assert "p-value" in text.lower()
+    assert "scalar" in text.lower()
 
 
 def test_agents_contains_stable_sections():
@@ -15,3 +17,5 @@ def test_agents_contains_stable_sections():
     assert "Терминология" in text
     assert "Архитектурные принципы" in text
     assert "Анти-паттерны для Codex" in text
+    assert "delta = V_B - V_A" in text
+    assert "CI + p-values" in text

@@ -18,6 +18,14 @@ from policyscope.estimators import (
 )
 from policyscope.ci import estimate_value_with_ci
 from policyscope.evaluator import OPEEvaluator
+from policyscope.inference import (
+    ComparisonInferenceResult,
+    IntervalResult,
+    PolicyComparisonResult,
+    infer_policy_comparison_bootstrap,
+)
+from policyscope.ci import estimate_value
+from policyscope.estimators import value_on_policy
 
 
 def test_estimators_run_on_synthetic():
@@ -160,3 +168,44 @@ def test_unified_evaluator_object_with_default_ci():
     assert np.isfinite(out["Delta"])
     lo, hi = out["V_B_CI"]
     assert np.isfinite(lo) and np.isfinite(hi)
+    assert 0.0 <= out["p_value"] <= 1.0
+    assert out["inference_method"] == "paired_percentile_bootstrap"
+
+
+def test_structured_inference_result_shape():
+    cfg = SynthConfig(n_users=90, horizon_days=20, seed=41)
+    env = SyntheticRecommenderEnv(cfg)
+    X = env.sample_users()
+    policyA = make_policy("epsilon_greedy", epsilon=0.1, seed=41)
+    logs = env.simulate_logs_A(policyA, X)
+    policyB = make_policy("softmax", tau=0.8, seed=42)
+    evaluator = OPEEvaluator(
+        logs,
+        policyB,
+        target="accept",
+        feature_cols=["loyal", "age", "risk", "income"],
+        action_col="a_A",
+        cluster_col="user_id",
+        n_boot=20,
+        alpha=0.1,
+    )
+
+    def estimator_pair(part):
+        v_a = value_on_policy(part, target="accept")
+        v_b = estimate_value(
+            part,
+            policyB,
+            method="dr",
+            target="accept",
+            feature_cols=["loyal", "age", "risk", "income"],
+            action_col="a_A",
+        )
+        return v_a, v_b, v_b - v_a
+
+    res = infer_policy_comparison_bootstrap(logs, estimator_pair, cluster_col="user_id", n_boot=20, alpha=0.1)
+    assert isinstance(res, PolicyComparisonResult)
+    assert isinstance(res.inference, ComparisonInferenceResult)
+    assert isinstance(res.inference.delta_ci, IntervalResult)
+    assert 0.0 <= res.inference.p_value <= 1.0
+    out = res.to_dict()
+    assert "Delta_CI" in out and "p_value" in out

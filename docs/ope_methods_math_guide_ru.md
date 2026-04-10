@@ -272,6 +272,7 @@ CI = V̂ ± z_(1-α/2) · SÊ
 - `estimator_with_bootstrap_ci` — низкоуровневая универсальная обёртка «любой estimator_fn + bootstrap CI».  
 - `cluster_bootstrap_ci` — **percentile bootstrap CI** (по строкам или кластерам).  
 - `paired_bootstrap_ci` — парный percentile bootstrap для `(V_A, V_B, Delta)`.  
+- В парном инференсе дополнительно возвращается bootstrap `p-value` для `H0: Delta = 0`.
 
 Что **не реализовано** (но встречается в литературе/практике):
 
