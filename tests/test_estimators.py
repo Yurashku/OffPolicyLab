@@ -16,6 +16,7 @@ from policyscope.estimators import (
     estimator_with_bootstrap_ci,
     take_action_probabilities,
 )
+from policyscope.ci import estimate_value_with_ci
 
 
 def test_estimators_run_on_synthetic():
@@ -105,3 +106,27 @@ def test_generic_estimator_with_bootstrap_ci_runs():
     low, high = res["CI"]
     assert np.isfinite(low) and np.isfinite(high)
     assert low <= high
+
+
+def test_estimate_value_with_ci_for_multiple_estimators():
+    cfg = SynthConfig(n_users=110, horizon_days=25, seed=21)
+    env = SyntheticRecommenderEnv(cfg)
+    X = env.sample_users()
+    policyA = make_policy("epsilon_greedy", epsilon=0.1, seed=21)
+    logs = env.simulate_logs_A(policyA, X)
+    policyB = make_policy("softmax", tau=0.9, seed=22)
+
+    for method in ("ips", "snips", "dm", "dr", "sndr", "switch_dr"):
+        out = estimate_value_with_ci(
+            logs,
+            policyB,
+            method=method,
+            target="accept",
+            cluster_col="user_id",
+            n_boot=20,
+            alpha=0.1,
+        )
+        assert out["method"] == method
+        assert np.isfinite(out["value"])
+        lo, hi = out["CI"]
+        assert np.isfinite(lo) and np.isfinite(hi)

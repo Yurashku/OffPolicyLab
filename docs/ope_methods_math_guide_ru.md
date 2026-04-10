@@ -267,10 +267,11 @@ CI = V_hat +/- z_(1-alpha/2) * SE_hat
 
 Сейчас в репозитории реализовано:
 
-- `estimator_with_bootstrap_ci` — универсальная обёртка «любой estimator_fn + bootstrap CI».  
+- `estimate_value_with_ci` — единый CI-слой для встроенных OPE-оценщиков (`ips/snips/dm/dr/sndr/switch_dr/...`).  
+- `estimator_with_bootstrap_ci` — низкоуровневая универсальная обёртка «любой estimator_fn + bootstrap CI».  
 - `cluster_bootstrap_ci` — **percentile bootstrap CI** (по строкам или кластерам).  
 - `paired_bootstrap_ci` — парный percentile bootstrap для `(V_A, V_B, Delta)`.  
-- `dr_with_bootstrap_ci` — специализированный convenience-wrapper для DR + парный bootstrap CI.
+- `dr_with_bootstrap_ci` — специализированный convenience-wrapper для DR + парный bootstrap CI (backward-compatible API).
 
 Что **не реализовано** (но встречается в литературе/практике):
 
@@ -280,3 +281,7 @@ CI = V_hat +/- z_(1-alpha/2) * SE_hat
 - специализированные CI для сильно адаптивных логов (bandit-aware inference).
 
 Практический вывод: текущая реализация покрывает рабочий baseline (percentile cluster bootstrap), но до «полного набора индустриальных/академических CI-подходов» ещё есть пространство для расширения.
+
+
+Рекомендация по API: **не удалять `dr_with_bootstrap_ci` прямо сейчас**.
+Лучше оставить его как совместимый shortcut для DR, а единый слой развивать через `estimate_value_with_ci`.
