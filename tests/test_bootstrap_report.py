@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 
 from policyscope.bootstrap import cluster_bootstrap_ci, paired_bootstrap_ci
+from policyscope.inference import infer_policy_comparison_bootstrap
 from policyscope.report import decision_summary
 
 
@@ -41,7 +42,7 @@ def test_paired_bootstrap_ci_basic():
         return va, vb, vb - va
 
     res = paired_bootstrap_ci(
-        df, estimator_pair, cluster_col="user_id", n_boot=200, rng_seed=1
+        df, estimator_pair, cluster_col="user_id", n_boot=200, alpha=0.1, rng_seed=1
     )
     mean_a = df["val_a"].mean()
     mean_b = df["val_b"].mean()
@@ -58,6 +59,54 @@ def test_paired_bootstrap_ci_basic():
     lo, hi = res["Delta_CI"]
     assert lo <= delta <= hi
     assert res["n_boot"] == 200
+    assert res["alpha"] == 0.1
+    assert res["p_value"] is None
+    assert isinstance(res["is_significant"], bool)
+    assert res["significance_rule"] == "delta_ci_excludes_zero"
+    assert res["inference_method"] == "paired_percentile_bootstrap"
+
+
+def test_paired_bootstrap_ci_respects_alpha_width():
+    df = pd.DataFrame(
+        {
+            "user_id": [1, 1, 2, 2, 3, 3, 4, 4],
+            "val_a": [0.0, 0.1, 0.2, 0.3, 0.0, 0.1, 0.2, 0.3],
+            "val_b": [0.1, 0.2, 0.3, 0.4, 0.1, 0.2, 0.3, 0.4],
+        }
+    )
+
+    def estimator_pair(d):
+        va = d["val_a"].mean()
+        vb = d["val_b"].mean()
+        return va, vb, vb - va
+
+    res_95 = paired_bootstrap_ci(df, estimator_pair, cluster_col="user_id", n_boot=400, alpha=0.05, rng_seed=2)
+    res_80 = paired_bootstrap_ci(df, estimator_pair, cluster_col="user_id", n_boot=400, alpha=0.20, rng_seed=2)
+    w95 = res_95["Delta_CI"][1] - res_95["Delta_CI"][0]
+    w80 = res_80["Delta_CI"][1] - res_80["Delta_CI"][0]
+    assert w80 <= w95
+
+
+def test_paired_bootstrap_ci_matches_official_inference_wrapper():
+    df = pd.DataFrame(
+        {
+            "user_id": [1, 1, 2, 2],
+            "val_a": [1.0, 1.0, 2.0, 2.0],
+            "val_b": [2.0, 2.0, 3.0, 3.0],
+        }
+    )
+
+    def estimator_pair(d):
+        va = d["val_a"].mean()
+        vb = d["val_b"].mean()
+        return va, vb, vb - va
+
+    legacy = paired_bootstrap_ci(df, estimator_pair, cluster_col="user_id", n_boot=100, alpha=0.1, rng_seed=9)
+    official = infer_policy_comparison_bootstrap(
+        df, estimator_pair, cluster_col="user_id", n_boot=100, alpha=0.1, rng_seed=9
+    ).to_dict()
+    assert legacy["Delta_CI"] == official["Delta_CI"]
+    assert legacy["is_significant"] == official["is_significant"]
 
 
 def test_decision_summary_outcomes():

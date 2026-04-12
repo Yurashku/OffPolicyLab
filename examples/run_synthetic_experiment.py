@@ -38,8 +38,8 @@ from policyscope.estimators import (
     train_pi_hat,
     pi_hat_predict,
     take_action_probabilities,
-    dr_with_bootstrap_ci,
 )
+from policyscope.evaluator import OPEEvaluator
 from policyscope.report import decision_summary, dump_json
 
 
@@ -130,27 +130,32 @@ def main() -> None:
     dr_abs_error_accept = abs(vB_dr_accept - vB_accept_true)
     dr_abs_error_cltv = abs(vB_dr_cltv - vB_cltv_true)
 
-    # Paired bootstrap for DR (внутренняя обёртка)
-    res_accept = dr_with_bootstrap_ci(
+    # Paired bootstrap CI для DR через единый high-level API
+    eval_accept = OPEEvaluator(
         logsA,
         policyB,
         target="accept",
         feature_cols=["loyal", "age", "risk", "income"],
         action_col="a_A",
+        cluster_col="user_id",
         n_boot=300,
         alpha=0.05,
         weight_clip=args.weight_clip,
     )
-    res_cltv = dr_with_bootstrap_ci(
+    res_accept = eval_accept.evaluate("dr")
+
+    eval_cltv = OPEEvaluator(
         logsA,
         policyB,
         target="cltv",
         feature_cols=["loyal", "age", "risk", "income"],
         action_col="a_A",
+        cluster_col="user_id",
         n_boot=300,
         alpha=0.05,
         weight_clip=args.weight_clip,
     )
+    res_cltv = eval_cltv.evaluate("dr")
 
     # Диагностика весов
     diagnostics = {

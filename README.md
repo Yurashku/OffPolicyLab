@@ -5,7 +5,10 @@
 Главное в текущей версии:
 - API стал **универсальным**: названия колонок (`a_A`, `a_B`, целевая метрика, `user_id`) и список признаков задаются аргументами.
 - Туториал стал короче и практичнее: есть компактный сценарий «взял свой DataFrame → получил все OPE‑оценки».
-- Бутстрэп для DR можно вызывать одной функцией (`dr_with_bootstrap_ci`) без ручной сборки циклов.
+- Bootstrap-инференс считается через единый API: `OPEEvaluator(...).evaluate(method)` или `estimate_value_with_ci(..., method=...)`.
+- Для сравнения A vs B в `OPEEvaluator` доступны `Delta_CI` и честная significance metadata:
+  - `is_significant` + `significance_rule="delta_ci_excludes_zero"`,
+  - `p_value` в MVP-режиме явно не репортится (`None`), чтобы не вводить в заблуждение.
 - Все основные OPE‑оценщики снабжены подробными docstring на русском (аргументы, возвращаемые значения, интерпретация).
 
 ## Установка
@@ -24,6 +27,12 @@ pip install -e .
 - DM (Direct Method)
 - DR / SNDR / Switch-DR
 - Кластерный и обычный бутстрэп (если `cluster_col=None`)
+- Data contract слой для логов contextual bandit (`BanditSchema`, `LoggedBanditDataset`)
+
+## Архитектура
+
+- Краткое описание архитектурных границ и доменной модели: `docs/architecture.md`.
+- Библиотека разделяет слои: `data contract -> point estimators -> inference -> diagnostics/reporting`.
 
 ## Минимальный формат данных
 
@@ -40,6 +49,7 @@ pip install -e .
 ```python
 import numpy as np
 import pandas as pd
+from policyscope.data import BanditSchema, LoggedBanditDataset
 from policyscope.estimators import (
     train_pi_hat,
     pi_hat_predict,
@@ -50,14 +60,25 @@ from policyscope.estimators import (
     snips_value,
     dm_value,
     dr_value,
-    dr_with_bootstrap_ci,
 )
+from policyscope.ci import estimate_value_with_ci
+from policyscope.evaluator import OPEEvaluator
 
 # ваш датасет
 # df columns example:
 # user_col, logged_action, candidate_action, reward, f1, f2, f3
 
 df = pd.read_csv("my_logs.csv")
+
+# (Опционально, но рекомендуется) валидируем контракт логов до OPE
+schema = BanditSchema(
+    action_col="logged_action",
+    reward_col="reward",
+    feature_cols=["f1", "f2", "f3"],
+    cluster_col="user_col",
+)
+logged = LoggedBanditDataset(df=df, schema=schema)
+df = logged.df
 
 feature_cols = ["f1", "f2", "f3"]
 action_col = "logged_action"
@@ -86,18 +107,59 @@ v_snips, ess_snips, clip_snips = snips_value(df, piB_taken, pA_taken, target=tar
 v_dm = dm_value(df, policyB, mu, target=target_col)
 v_dr, ess_dr, clip_dr = dr_value(df, policyB, mu, pA_taken, target=target_col, action_col=action_col)
 
-# 5) DR + bootstrap CI одной функцией
-dr_ci = dr_with_bootstrap_ci(
+# 5) Единый слой CI для любого встроенного OPE-эстиматора
+ips_ci = estimate_value_with_ci(
+    df,
+    policyB,
+    method="ips",          # "snips", "dm", "dr", "sndr", "switch_dr", ...
+    target=target_col,
+    action_col=action_col,
+    feature_cols=feature_cols,
+    cluster_col="user_col",
+    n_boot=300,
+)
+print(ips_ci)
+
+# 6) Единый абстрактный объект (CI включён по умолчанию)
+evaluator = OPEEvaluator(
     df,
     policyB,
     target=target_col,
     feature_cols=feature_cols,
     action_col=action_col,
-    cluster_col="user_col",   # либо None
+    cluster_col="user_col",
     n_boot=300,
+    alpha=0.05,
+    weight_clip=20.0,
 )
-print(v_ips, v_snips, v_dm, v_dr, dr_ci)
+dr_report = evaluator.evaluate("dr")  # также: "ips", "snips", "dm", "sndr", "switch_dr", ...
+print(dr_report)  # V_A, V_B, Delta + CI + significance metadata
 ```
+
+## Теория и ссылки на статьи (RU)
+
+### Нотация в формулах
+
+Используем единый набор обозначений: `π_A`, `π_B`, `μ̂`, `V̂`, `Δ`, `τ`, `w̄`.
+
+Добавлен отдельный подробный гайд по математической интуиции и строгим источникам для всех реализованных OPE-методов:
+
+- `docs/ope_methods_math_guide_ru.md`
+
+В гайде разобраны: On-policy baseline, Replay, IPS, SNIPS, DM, DR, SNDR, Switch-DR и методы построения доверительных интервалов (CI).
+Формулы в гайде приведены в plain-text формате (без обязательной LaTeX-разметки), чтобы корректно читаться и на GitHub, и в локальных Markdown-просмотрщиках.
+Отдельно поясняется важный момент: bootstrap CI — это не отдельный OPE-эстиматор, а inference-обёртка поверх выбранного оценщика.
+Гайд также содержит отдельное сравнение: какие CI-подходы используются в OPE-литературе/практике и что именно реализовано в текущем репозитории.
+В API есть единый CI-слой `estimate_value_with_ci` для встроенных OPE-эстиматоров и совместимая низкоуровневая обёртка `estimator_with_bootstrap_ci` для произвольных `estimator_fn`.
+Нотация в формулах гайда унифицирована: `π_A`, `π_B`, `μ̂`, `V̂`, `Δ`, `τ`, `w̄` — для более читаемого и однозначного математического стиля.
+Также добавлен `OPEEvaluator` — единый абстрактный объект, который унифицированно вызывает эстиматоры по имени и возвращает CI по умолчанию.
+
+## Постоянные инструкции для AI-агентов
+
+В репозиторий добавлены постоянные инструкции для агентных инструментов (в т.ч. Codex):
+
+- `AGENTS.md` — каноничный набор постоянных правил и workflow для Codex/агентов.
+
 
 ## Быстрый синтетический запуск
 
@@ -111,13 +173,19 @@ python examples/run_synthetic_experiment.py --n_users 50000 --seed 42 --policyA 
 
 - Основной notebook: `examples/tutorial.ipynb`
 - В нём показано:
-  1. проверка логов,
-  2. таблица с фичами + `a_A` + `a_B`,
-  3. компактный расчёт всех метрик,
-  4. bootstrap через `dr_with_bootstrap_ci`,
-  5. итоговая «красивая» таблица сравнения методов на текущих данных (Replay/IPS/SNIPS/DM/DR/SNDR/Switch‑DR + ESS/clip/switch + CI для `V_A` и `V_B`).
+  1. генерация синтетики,
+  2. валидация data contract через `BanditSchema` / `LoggedBanditDataset`,
+  3. вывод oracle ground-truth (`V_A`, `V_B`, `Delta`) сразу после генерации,
+  4. явная остановка использования синтезатора после шага ground-truth (anti data-leakage),
+  5. проверка логов и таблица фич + `a_A` + `a_B`,
+  6. компактный расчёт всех метрик,
+  7. унифицированный вызов через `OPEEvaluator` (переключается только имя эстиматора),
+  8. bootstrap CI и significance metadata для **всех** методов через `OPEEvaluator`,
+  9. итоговая таблица сравнения методов с колонками CI (`V_B_CI`, `Delta_CI`) для каждого метода.
 
-После `dr_with_bootstrap_ci` вы получите словарь:
+Для переноса на реальный кейс в туториале отдельно показано, какие 3-4 строки обычно нужно заменить (`df/logs`, `feature_cols`, `action_col`, `target_col`).
+
+После `OPEEvaluator(...).evaluate("dr")` вы получите словарь:
 
 ```python
 {
@@ -127,7 +195,11 @@ python examples/run_synthetic_experiment.py --n_users 50000 --seed 42 --policyA 
   'V_B_CI': (..., ...),
   'Delta': ...,
   'Delta_CI': (..., ...),
-  'n_boot': ...
+  'p_value': None,  # в MVP-режиме не репортится
+  'is_significant': ...,
+  'significance_rule': 'delta_ci_excludes_zero',
+  'n_boot': ...,
+  'inference_method': ...
 }
 ```
 
@@ -138,3 +210,12 @@ python -m flake8 src tests
 pytest
 jupyter nbconvert --to notebook --execute examples/tutorial.ipynb --inplace
 ```
+
+## Migration note (inference)
+
+- Публичные имена функций не менялись.
+- В выходах сравнения политик (`paired_bootstrap_ci`, `OPEEvaluator.evaluate`) добавлены поля:
+  - `is_significant` и `significance_rule`,
+  - `p_value` (в текущем MVP — `None`, см. CI-based significance rule),
+  - `inference_method`,
+  - `alpha`.
