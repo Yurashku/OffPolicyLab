@@ -6,7 +6,7 @@
 
 - есть логи поведения политики `A` (behavior/logging policy),
 - нужно оценить значение политики `B` (target/candidate policy),
-- целевые артефакты: `policy value`, `delta = value(B) - value(A)`, CI, `p-value` и диагностика.
+- целевые артефакты: `policy value`, `delta = value(B) - value(A)`, CI, significance metadata (`p-value` или CI-based decision) и диагностика.
 
 ## 2) Доменная модель (phase 1)
 
@@ -25,7 +25,7 @@
    Оценщики значения политики (`replay`, `ips`, `snips`, `dm`, `dr`, `sndr`, `switch_dr`).
 
 5. **Inference**  
-   Слой построения CI, `p-value` и inference metadata (bootstrap row/cluster/paired), независимо от point-estimator.
+   Слой построения CI и significance metadata (bootstrap row/cluster/paired), независимо от point-estimator.
 
 6. **Diagnostics**  
    ESS, clipping/share, устойчивость и sanity-check метрики.

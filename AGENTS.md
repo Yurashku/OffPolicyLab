@@ -7,7 +7,7 @@
 - Репозиторий — библиотека для **contextual bandit off-policy evaluation (OPE)**.
 - Основной сценарий: по логам поведения политики **A** (behavior/logging policy) оценить кандидата **B** (target/candidate policy).
 - Ключевые выходы: `policy value` и `policy value difference (delta)` с диагностикой и инференсом.
-- Ключевые inferential outputs: доверительные интервалы (CI) и `p-value`; основной сравнительный объект инференса — `delta = V_B - V_A`.
+- Ключевые inferential outputs: доверительные интервалы (CI) и significance metadata (`p-value` или честное CI-based decision); основной сравнительный объект инференса — `delta = V_B - V_A`.
 
 ## 2) Терминология (использовать в коде/доках)
 

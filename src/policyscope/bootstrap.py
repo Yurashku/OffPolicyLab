@@ -12,7 +12,6 @@ policyscope.bootstrap
 
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 from typing import Callable, Tuple, Dict, Any
 
@@ -98,6 +97,8 @@ def paired_bootstrap_ci(
         "Delta": comp["Delta"],
         "Delta_CI": comp["Delta_CI"],
         "p_value": comp["p_value"],
+        "is_significant": comp["is_significant"],
+        "significance_rule": comp["significance_rule"],
         "alpha": comp["alpha"],
         "n_boot": comp["n_boot"],
         "inference_method": comp["inference_method"],

@@ -6,7 +6,9 @@
 - API стал **универсальным**: названия колонок (`a_A`, `a_B`, целевая метрика, `user_id`) и список признаков задаются аргументами.
 - Туториал стал короче и практичнее: есть компактный сценарий «взял свой DataFrame → получил все OPE‑оценки».
 - Bootstrap-инференс считается через единый API: `OPEEvaluator(...).evaluate(method)` или `estimate_value_with_ci(..., method=...)`.
-- Для сравнения A vs B в `OPEEvaluator` доступны `Delta_CI` и bootstrap `p_value` для гипотезы `delta = 0`.
+- Для сравнения A vs B в `OPEEvaluator` доступны `Delta_CI` и честная significance metadata:
+  - `is_significant` + `significance_rule="delta_ci_excludes_zero"`,
+  - `p_value` в MVP-режиме явно не репортится (`None`), чтобы не вводить в заблуждение.
 - Все основные OPE‑оценщики снабжены подробными docstring на русском (аргументы, возвращаемые значения, интерпретация).
 
 ## Установка
@@ -131,7 +133,7 @@ evaluator = OPEEvaluator(
     weight_clip=20.0,
 )
 dr_report = evaluator.evaluate("dr")  # также: "ips", "snips", "dm", "sndr", "switch_dr", ...
-print(dr_report)  # V_A, V_B, Delta + CI + p_value + inference metadata
+print(dr_report)  # V_A, V_B, Delta + CI + significance metadata
 ```
 
 ## Теория и ссылки на статьи (RU)
@@ -178,7 +180,7 @@ python examples/run_synthetic_experiment.py --n_users 50000 --seed 42 --policyA 
   5. проверка логов и таблица фич + `a_A` + `a_B`,
   6. компактный расчёт всех метрик,
   7. унифицированный вызов через `OPEEvaluator` (переключается только имя эстиматора),
-  8. bootstrap CI и `p_value` для **всех** методов через `OPEEvaluator`,
+  8. bootstrap CI и significance metadata для **всех** методов через `OPEEvaluator`,
   9. итоговая таблица сравнения методов с колонками CI (`V_B_CI`, `Delta_CI`) для каждого метода.
 
 Для переноса на реальный кейс в туториале отдельно показано, какие 3-4 строки обычно нужно заменить (`df/logs`, `feature_cols`, `action_col`, `target_col`).
@@ -193,7 +195,9 @@ python examples/run_synthetic_experiment.py --n_users 50000 --seed 42 --policyA 
   'V_B_CI': (..., ...),
   'Delta': ...,
   'Delta_CI': (..., ...),
-  'p_value': ...,
+  'p_value': None,  # в MVP-режиме не репортится
+  'is_significant': ...,
+  'significance_rule': 'delta_ci_excludes_zero',
   'n_boot': ...,
   'inference_method': ...
 }
@@ -211,6 +215,7 @@ jupyter nbconvert --to notebook --execute examples/tutorial.ipynb --inplace
 
 - Публичные имена функций не менялись.
 - В выходах сравнения политик (`paired_bootstrap_ci`, `OPEEvaluator.evaluate`) добавлены поля:
-  - `p_value` (bootstrap, H0: `delta = 0`),
+  - `is_significant` и `significance_rule`,
+  - `p_value` (в текущем MVP — `None`, см. CI-based significance rule),
   - `inference_method`,
   - `alpha`.

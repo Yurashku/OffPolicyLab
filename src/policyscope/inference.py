@@ -20,7 +20,11 @@ class ComparisonInferenceResult:
     v_a_ci: IntervalResult
     v_b_ci: IntervalResult
     delta_ci: IntervalResult
-    p_value: float
+    # MVP policy: we do not report a numeric p-value yet to avoid misleading inference.
+    # Significance is derived conservatively from whether delta CI excludes zero.
+    p_value: Optional[float]
+    is_significant: bool
+    significance_rule: str
     alpha: float
     n_boot: int
     method: str = "paired_percentile_bootstrap"
@@ -44,6 +48,8 @@ class PolicyComparisonResult:
             "Delta": self.delta,
             "Delta_CI": (self.inference.delta_ci.low, self.inference.delta_ci.high),
             "p_value": self.inference.p_value,
+            "is_significant": self.inference.is_significant,
+            "significance_rule": self.inference.significance_rule,
             "alpha": self.inference.alpha,
             "n_boot": self.inference.n_boot,
             "inference_method": self.inference.method,
@@ -72,13 +78,8 @@ def _percentile_interval(samples: list[float], alpha: float) -> IntervalResult:
     return IntervalResult(low=low, high=high)
 
 
-def _paired_bootstrap_pvalue(delta_boot: list[float], observed_delta: float) -> float:
-    # Two-sided p-value for H0: delta = 0 using paired bootstrap distribution.
-    arr = np.asarray(delta_boot, dtype=float)
-    extreme = np.mean(np.abs(arr) >= abs(observed_delta))
-    # Small-sample correction keeps p-value in (0, 1].
-    p = (extreme * len(arr) + 1.0) / (len(arr) + 1.0)
-    return float(min(max(p, 0.0), 1.0))
+def _is_significant_from_ci(delta_ci: IntervalResult) -> bool:
+    return bool(delta_ci.low > 0.0 or delta_ci.high < 0.0)
 
 
 def infer_scalar_bootstrap(
@@ -119,7 +120,14 @@ def infer_policy_comparison_bootstrap(
     rng_seed: int = 4321,
     method: str = "paired_percentile_bootstrap",
 ) -> PolicyComparisonResult:
-    """Official paired comparison inference entrypoint for (V_A, V_B, delta)."""
+    """Official paired comparison inference entrypoint for (V_A, V_B, delta).
+
+    Notes
+    -----
+    In the current MVP, significance is reported via a CI-based decision rule
+    (`delta_ci_excludes_zero`). Numeric p-values are intentionally omitted
+    (`p_value=None`) to avoid exposing potentially misleading values.
+    """
     rng = np.random.default_rng(rng_seed)
     v_a, v_b, delta = estimator_pair(df)
     b_a: list[float] = []
@@ -132,13 +140,17 @@ def infer_policy_comparison_bootstrap(
         b_b.append(float(b))
         b_d.append(float(d))
 
+    delta_ci = _percentile_interval(b_d, alpha=alpha)
     inference = ComparisonInferenceResult(
         v_a_ci=_percentile_interval(b_a, alpha=alpha),
         v_b_ci=_percentile_interval(b_b, alpha=alpha),
-        delta_ci=_percentile_interval(b_d, alpha=alpha),
-        p_value=_paired_bootstrap_pvalue(b_d, float(delta)),
+        delta_ci=delta_ci,
+        p_value=None,
+        is_significant=_is_significant_from_ci(delta_ci),
+        significance_rule="delta_ci_excludes_zero",
         alpha=alpha,
         n_boot=n_boot,
         method=method,
+        warnings=("p_value_not_reported_use_ci_rule",),
     )
     return PolicyComparisonResult(v_a=float(v_a), v_b=float(v_b), delta=float(delta), inference=inference)

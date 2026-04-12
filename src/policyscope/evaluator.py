@@ -93,6 +93,8 @@ class OPEEvaluator:
             "V_B_CI": comp["V_B_CI"],
             "Delta_CI": comp["Delta_CI"],
             "p_value": comp["p_value"],
+            "is_significant": comp["is_significant"],
+            "significance_rule": comp["significance_rule"],
             "n_boot": comp["n_boot"],
             "alpha": comp["alpha"],
             "inference_method": comp["inference_method"],

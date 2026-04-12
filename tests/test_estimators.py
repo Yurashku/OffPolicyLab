@@ -168,7 +168,9 @@ def test_unified_evaluator_object_with_default_ci():
     assert np.isfinite(out["Delta"])
     lo, hi = out["V_B_CI"]
     assert np.isfinite(lo) and np.isfinite(hi)
-    assert 0.0 <= out["p_value"] <= 1.0
+    assert out["p_value"] is None
+    assert isinstance(out["is_significant"], bool)
+    assert out["significance_rule"] == "delta_ci_excludes_zero"
     assert out["inference_method"] == "paired_percentile_bootstrap"
 
 
@@ -206,6 +208,8 @@ def test_structured_inference_result_shape():
     assert isinstance(res, PolicyComparisonResult)
     assert isinstance(res.inference, ComparisonInferenceResult)
     assert isinstance(res.inference.delta_ci, IntervalResult)
-    assert 0.0 <= res.inference.p_value <= 1.0
+    assert res.inference.p_value is None
+    assert isinstance(res.inference.is_significant, bool)
+    assert res.inference.significance_rule == "delta_ci_excludes_zero"
     out = res.to_dict()
-    assert "Delta_CI" in out and "p_value" in out
+    assert "Delta_CI" in out and "is_significant" in out
