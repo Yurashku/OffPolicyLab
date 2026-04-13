@@ -30,6 +30,7 @@
 6. **Diagnostics**  
    ESS, clipping/share, устойчивость и sanity-check метрики.
    Диагностика обязательна рядом с инференсом, но не заменяет CI/p-value.
+   Базовые trust/stability diagnostics включают: `ESS`, `ESS/N`, replay overlap, max/p95/p99 importance weights, clip/switch share и простые warning rules.
 
 7. **Comparison result**  
    Сводка по `V_A`, `V_B`, `delta`, CI, `p-value` и диагностике для сравнения A vs B.

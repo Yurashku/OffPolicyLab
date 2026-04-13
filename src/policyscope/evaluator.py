@@ -12,6 +12,7 @@ from typing import Optional, Sequence
 import pandas as pd
 
 from policyscope.ci import estimate_value
+from policyscope.diagnostics import compute_policy_diagnostics
 from policyscope.inference import infer_policy_comparison_bootstrap
 from policyscope.estimators import value_on_policy
 
@@ -72,6 +73,17 @@ class OPEEvaluator:
             "V_A": vA,
             "V_B": vB,
             "Delta": float(vB - vA),
+            "diagnostics": compute_policy_diagnostics(
+                self.df,
+                self.policyB,
+                method=estimator,
+                target=self.target,
+                feature_cols=self.feature_cols,
+                action_col=self.action_col,
+                action_space=self.action_space,
+                weight_clip=self.weight_clip,
+                tau=self.tau,
+            ).to_dict(),
         }
         if not with_ci:
             return base

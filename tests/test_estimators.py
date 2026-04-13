@@ -172,6 +172,9 @@ def test_unified_evaluator_object_with_default_ci():
     assert isinstance(out["is_significant"], bool)
     assert out["significance_rule"] == "centered_paired_bootstrap_p_value_lt_alpha"
     assert "paired_percentile_bootstrap" in out["inference_method"]
+    assert "diagnostics" in out
+    assert "replay_overlap" in out["diagnostics"]
+    assert "weight_ess_ratio" in out["diagnostics"]
 
 
 def test_structured_inference_result_shape():

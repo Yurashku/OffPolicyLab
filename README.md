@@ -9,6 +9,7 @@
 - Для сравнения A vs B в `OPEEvaluator` доступны `Delta_CI` и честная significance metadata:
   - `p_value` (двусторонний centered paired bootstrap test для `H0: delta = 0`),
   - `is_significant` + `significance_rule="centered_paired_bootstrap_p_value_lt_alpha"`.
+- В comparison output также включены trust/stability diagnostics (`ESS`, `ESS/N`, replay overlap, weight tails, clip/switch share, warning flags).
 - Все основные OPE‑оценщики снабжены подробными docstring на русском (аргументы, возвращаемые значения, интерпретация).
 
 ## Установка
@@ -199,9 +200,22 @@ python examples/run_synthetic_experiment.py --n_users 50000 --seed 42 --policyA 
   'is_significant': ...,
   'significance_rule': 'centered_paired_bootstrap_p_value_lt_alpha',
   'n_boot': ...,
-  'inference_method': ...
+  'inference_method': ...,
+  'diagnostics': {
+    'weight_ess': ...,
+    'weight_ess_ratio': ...,
+    'replay_overlap': ...,
+    'weight_max': ...,
+    'weight_p95': ...,
+    'weight_p99': ...,
+    'clip_share': ...,
+    'switch_share': ...,
+    'warnings': [...],
+  }
 }
 ```
+
+Интерпретация: статистическая значимость (`p_value`, `is_significant`) **не достаточна сама по себе** — проверяйте diagnostics на поддержку/стабильность весов.
 
 ## Проверки перед коммитом
 
