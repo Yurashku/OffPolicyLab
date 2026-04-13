@@ -7,14 +7,15 @@ policyscope.bootstrap
 Используется кластеризация по пользователям (или другим единицам), чтобы
 учитывать зависимость внутри кластера. Для сравнения двух политик
 предусмотрена парная процедура, оценивающая интервалы одновременно для
-значения A, значения B и их разности (ATE).
+значения A, значения B и их разности (delta).
 """
 
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 from typing import Callable, Tuple, Dict, Any
+
+from policyscope.inference import infer_policy_comparison_bootstrap, infer_scalar_bootstrap
 
 __all__ = ["cluster_bootstrap_ci", "paired_bootstrap_ci"]
 
@@ -49,26 +50,16 @@ def cluster_bootstrap_ci(
     (theta_hat, low, high)
         Оценка метрики и нижняя/верхняя границы CI.
     """
-    rng = np.random.default_rng(rng_seed)
-    theta_hat = float(estimator(df))
-    if cluster_col is None or cluster_col not in df.columns:
-        clusters = np.arange(len(df))
-        use_rows = True
-    else:
-        clusters = df[cluster_col].unique()
-        use_rows = False
-    B = []
-    for _ in range(n_boot):
-        sampled = rng.choice(clusters, size=len(clusters), replace=True)
-        if use_rows:
-            part = df.iloc[sampled].copy()
-        else:
-            parts = [df[df[cluster_col] == c] for c in sampled]
-            part = pd.concat(parts, ignore_index=True)
-        B.append(float(estimator(part)))
-    low = np.percentile(B, 100 * alpha / 2)
-    high = np.percentile(B, 100 * (1 - alpha / 2))
-    return theta_hat, float(low), float(high)
+    out = infer_scalar_bootstrap(
+        df,
+        estimator,
+        cluster_col=cluster_col,
+        n_boot=n_boot,
+        alpha=alpha,
+        rng_seed=rng_seed,
+    )
+    low, high = out["CI"]
+    return float(out["value"]), float(low), float(high)
 
 
 def paired_bootstrap_ci(
@@ -90,38 +81,26 @@ def paired_bootstrap_ci(
     dict
         Содержит оценки V_A, V_B, Δ и 95% CI для каждой величины.
     """
-    rng = np.random.default_rng(rng_seed)
-    if cluster_col is None or cluster_col not in df.columns:
-        clusters = np.arange(len(df))
-        use_rows = True
-    else:
-        clusters = df[cluster_col].unique()
-        use_rows = False
-    vA, vB, dlt = estimator_pair(df)
-    BA: list[float] = []
-    BB: list[float] = []
-    BD: list[float] = []
-    for _ in range(n_boot):
-        sampled = rng.choice(clusters, size=len(clusters), replace=True)
-        if use_rows:
-            part = df.iloc[sampled].copy()
-        else:
-            parts = [df[df[cluster_col] == c] for c in sampled]
-            part = pd.concat(parts, ignore_index=True)
-        a, b, d = estimator_pair(part)
-        BA.append(a)
-        BB.append(b)
-        BD.append(d)
-
-    def ci(arr):
-        return (float(np.percentile(arr, 2.5)), float(np.percentile(arr, 97.5)))
-
+    comp = infer_policy_comparison_bootstrap(
+        df,
+        estimator_pair,
+        cluster_col=cluster_col,
+        n_boot=n_boot,
+        alpha=alpha,
+        rng_seed=rng_seed,
+    ).to_dict()
     return {
-        "V_A": vA,
-        "V_A_CI": ci(BA),
-        "V_B": vB,
-        "V_B_CI": ci(BB),
-        "Delta": dlt,
-        "Delta_CI": ci(BD),
-        "n_boot": n_boot,
+        "V_A": comp["V_A"],
+        "V_A_CI": comp["V_A_CI"],
+        "V_B": comp["V_B"],
+        "V_B_CI": comp["V_B_CI"],
+        "Delta": comp["Delta"],
+        "Delta_CI": comp["Delta_CI"],
+        "p_value": comp["p_value"],
+        "is_significant": comp["is_significant"],
+        "significance_rule": comp["significance_rule"],
+        "alpha": comp["alpha"],
+        "n_boot": comp["n_boot"],
+        "inference_method": comp["inference_method"],
+        "inference_warnings": comp["inference_warnings"],
     }

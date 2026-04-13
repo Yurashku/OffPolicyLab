@@ -4,7 +4,7 @@ policyscope.report
 
 Функции для формирования текстового отчёта по результатам off‑policy оценки
 и для записи JSON‑файлов. В отчёте указывается значение политики A,
-значение политики B, оценка ATE (разности) и доверительные интервалы, а
+значение политики B, оценка delta (разности политик) и доверительные интервалы, а
 также делается заключение относительно превосходства одной политики над
 другой при заданном бизнес‑пороге.
 """
@@ -42,6 +42,9 @@ def decision_summary(res: Dict, metric_name: str, business_threshold: float = 0.
     str
         Сформированный отчёт.
     """
+    if hasattr(res, "to_dict"):
+        res = res.to_dict()
+
     V_A = res["V_A"]
     V_B = res["V_B"]
     D = res["Delta"]
@@ -53,7 +56,7 @@ def decision_summary(res: Dict, metric_name: str, business_threshold: float = 0.
     lines.append(f"Метрика: {metric_name}")
     lines.append(f"V(A) = {V_A:.6f} (95% CI: {A_lo:.6f} .. {A_hi:.6f})")
     lines.append(f"V(B) = {V_B:.6f} (95% CI: {B_lo:.6f} .. {B_hi:.6f})")
-    lines.append(f"ATE (B−A) = {D:.6f} (95% CI: {D_lo:.6f} .. {D_hi:.6f})")
+    lines.append(f"Delta (B−A) = {D:.6f} (95% CI: {D_lo:.6f} .. {D_hi:.6f})")
 
     if D_lo > business_threshold:
         lines.append(f"Решение: модель B лучше A, поскольку нижняя граница CI превышает порог {business_threshold}.")

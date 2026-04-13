@@ -41,7 +41,7 @@ __all__ = [
     "dr_value",
     "sndr_value",
     "switch_dr_value",
-    "dr_with_bootstrap_ci",
+    "estimator_with_bootstrap_ci",
     "ate_from_values",
 ]
 
@@ -668,71 +668,48 @@ def switch_dr_value(
     return value, ess(w_sw), float((~mask).mean())
 
 
-def dr_with_bootstrap_ci(
+def estimator_with_bootstrap_ci(
     df: pd.DataFrame,
-    policyB,
+    estimator_fn,
     *,
-    target: str = "accept",
-    feature_cols: Optional[Sequence[str]] = None,
-    action_col: str = "a_A",
-    action_space: Optional[Sequence] = None,
     cluster_col: Optional[str] = "user_id",
     n_boot: int = 300,
     alpha: float = 0.05,
-    weight_clip: Optional[float] = None,
 ):
-    """Оценивает DR и доверительные интервалы бутстрэпом.
+    """Универсальная обёртка: point-estimator + bootstrap CI.
 
-    Внутри каждой бутстрэп-реплики переобучаются ``pi_hat`` и ``mu_hat``,
-    затем считаются:
-    - ``V_A`` — среднее значение текущей политики A,
-    - ``V_B`` — DR-оценка новой политики B,
-    - ``Delta = V_B - V_A``.
+    Эта функция отделяет две сущности:
+    1) ``estimator_fn(df_part) -> float`` — как считается точечная оценка;
+    2) bootstrap — как считается доверительный интервал для этой оценки.
 
     Args:
-        df: Логи.
-        policyB: Кандидатная политика B.
-        target: Целевая метрика.
-        feature_cols: Колонки признаков.
-        action_col: Колонка логированного действия.
-        action_space: Пространство действий для policyB.
-        cluster_col: Колонка для кластерного бутстрэпа (например ``user_id``).
-            Если ``None``, бутстрэп обычный по строкам.
-        n_boot: Число бутстрэп-реплик.
-        alpha: Уровень значимости (для 95% CI — ``alpha=0.05``).
-        weight_clip: Опциональный клиппинг весов в DR.
+        df: Исходные логи.
+        estimator_fn: Функция, возвращающая ``float`` на переданном DataFrame.
+            Пример: ``lambda part: ips_value(part, piB_taken_part, pA_part)[0]``.
+        cluster_col: Колонка для кластерного bootstrap (например ``user_id``).
+            Если ``None`` или колонки нет, используется bootstrap по строкам.
+        n_boot: Число bootstrap-реплик.
+        alpha: Уровень значимости (0.05 => 95% CI).
 
     Returns:
         Словарь вида:
-        ``{'V_A', 'V_A_CI', 'V_B', 'V_B_CI', 'Delta', 'Delta_CI', 'n_boot'}``.
+        ``{'value': ..., 'CI': (low, high), 'n_boot': ..., 'alpha': ...}``.
     """
-    from policyscope.bootstrap import paired_bootstrap_ci
+    from policyscope.bootstrap import cluster_bootstrap_ci
 
-    def estimator_pair(df_part: pd.DataFrame):
-        mu = train_mu_hat(df_part, target=target, feature_cols=feature_cols, action_col=action_col)
-        pi_model = train_pi_hat(df_part, feature_cols=feature_cols, action_col=action_col)
-        pA_all = pi_hat_predict(pi_model, df_part)
-        pA_taken = take_action_probabilities(pA_all, df_part[action_col].to_numpy(), action_space=pi_model.classes_)
-        vA = value_on_policy(df_part, target=target)
-        vB, _, _ = dr_value(
-            df_part,
-            policyB,
-            mu,
-            pA_taken,
-            target=target,
-            weight_clip=weight_clip,
-            action_col=action_col,
-            action_space=action_space,
-        )
-        return vA, vB, vB - vA
-
-    return paired_bootstrap_ci(
+    value, low, high = cluster_bootstrap_ci(
         df,
-        estimator_pair,
+        estimator_fn,
         cluster_col=cluster_col,
         n_boot=n_boot,
         alpha=alpha,
     )
+    return {
+        "value": value,
+        "CI": (low, high),
+        "n_boot": n_boot,
+        "alpha": alpha,
+    }
 
 
 def ate_from_values(vB: float, vA: float) -> float:
@@ -743,6 +720,6 @@ def ate_from_values(vB: float, vA: float) -> float:
         vA: Оценка значения текущей политики A.
 
     Returns:
-        ATE/Delta между политиками.
+        Delta (policy value difference) между политиками.
     """
     return float(vB - vA)
