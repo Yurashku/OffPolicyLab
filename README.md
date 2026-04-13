@@ -64,6 +64,7 @@ from policyscope.estimators import (
 )
 from policyscope.ci import estimate_value_with_ci
 from policyscope.evaluator import OPEEvaluator
+from policyscope.comparison import compare_policies, compare_policies_multi_target
 
 # ваш датасет
 # df columns example:
@@ -135,6 +136,34 @@ evaluator = OPEEvaluator(
 )
 dr_report = evaluator.evaluate("dr")  # также: "ips", "snips", "dm", "sndr", "switch_dr", ...
 print(dr_report)  # V_A, V_B, Delta + CI + significance metadata
+
+# 7) Официальный orchestration entrypoint (структурированный результат)
+summary = compare_policies(
+    df,
+    policyB,
+    estimator="dr",
+    target=target_col,
+    feature_cols=feature_cols,
+    action_col=action_col,
+    cluster_col="user_col",
+    n_boot=300,
+    alpha=0.05,
+)
+print(summary.to_dict())
+
+# 8) Multi-target режим: повторная scalar-оценка для каждого target
+multi = compare_policies_multi_target(
+    df,
+    policyB,
+    estimator="dr",
+    targets=["reward", "reward_2"],
+    feature_cols=feature_cols,
+    action_col=action_col,
+    cluster_col="user_col",
+    n_boot=300,
+    alpha=0.05,
+)
+print(multi.to_dict())
 ```
 
 ## Теория и ссылки на статьи (RU)

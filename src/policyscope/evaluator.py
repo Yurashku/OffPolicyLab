@@ -11,10 +11,7 @@ from typing import Optional, Sequence
 
 import pandas as pd
 
-from policyscope.ci import estimate_value
-from policyscope.diagnostics import compute_policy_diagnostics
-from policyscope.inference import infer_policy_comparison_bootstrap
-from policyscope.estimators import value_on_policy
+from policyscope.comparison import PolicyComparisonSummary, compare_policies
 
 
 @dataclass
@@ -52,64 +49,22 @@ class OPEEvaluator:
 
         По умолчанию возвращает CI (bootstrap).
         """
+        return self.evaluate_summary(estimator=estimator, with_ci=with_ci).to_dict()
 
-        def point_on(part: pd.DataFrame) -> float:
-            return estimate_value(
-                part,
-                self.policyB,
-                method=estimator,  # type: ignore[arg-type]
-                target=self.target,
-                feature_cols=self.feature_cols,
-                action_col=self.action_col,
-                action_space=self.action_space,
-                weight_clip=self.weight_clip,
-                tau=self.tau,
-            )
-
-        vA = value_on_policy(self.df, target=self.target)
-        vB = point_on(self.df)
-        base = {
-            "estimator": estimator,
-            "V_A": vA,
-            "V_B": vB,
-            "Delta": float(vB - vA),
-            "diagnostics": compute_policy_diagnostics(
-                self.df,
-                self.policyB,
-                method=estimator,
-                target=self.target,
-                feature_cols=self.feature_cols,
-                action_col=self.action_col,
-                action_space=self.action_space,
-                weight_clip=self.weight_clip,
-                tau=self.tau,
-            ).to_dict(),
-        }
-        if not with_ci:
-            return base
-
-        def estimator_pair(part: pd.DataFrame):
-            a = value_on_policy(part, target=self.target)
-            b = point_on(part)
-            return a, b, b - a
-
-        comp = infer_policy_comparison_bootstrap(
+    def evaluate_summary(self, estimator: str = "dr", *, with_ci: bool = True) -> PolicyComparisonSummary:
+        """Официальный структурированный результат сравнения A vs B."""
+        return compare_policies(
             self.df,
-            estimator_pair,
+            self.policyB,
+            estimator=estimator,
+            target=self.target,
+            feature_cols=self.feature_cols,
+            action_col=self.action_col,
+            action_space=self.action_space,
             cluster_col=self.cluster_col,
             n_boot=self.n_boot,
             alpha=self.alpha,
-        ).to_dict()
-        base.update({
-            "V_A_CI": comp["V_A_CI"],
-            "V_B_CI": comp["V_B_CI"],
-            "Delta_CI": comp["Delta_CI"],
-            "p_value": comp["p_value"],
-            "is_significant": comp["is_significant"],
-            "significance_rule": comp["significance_rule"],
-            "n_boot": comp["n_boot"],
-            "alpha": comp["alpha"],
-            "inference_method": comp["inference_method"],
-            "inference_warnings": comp["inference_warnings"],
-        })
-        return base
+            weight_clip=self.weight_clip,
+            tau=self.tau,
+            with_ci=with_ci,
+        )

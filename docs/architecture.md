@@ -34,9 +34,11 @@
 
 7. **Comparison result**  
    Сводка по `V_A`, `V_B`, `delta`, CI, `p-value` и диагностике для сравнения A vs B.
+   Официальный orchestration path: `policyscope.comparison.compare_policies(...)`.
 
 8. **Scalar target metric (core abstraction)**  
    Базовая единица оценки — одна скалярная метрика награды. Несколько метрик поддерживаются как повторные запуски оценки для разных target-колонок, а не как native vector-valued reward.
+   Для multi-target используется `compare_policies_multi_target(...)` как mapping из target -> single-target summary.
 
 ## 3) Границы слоёв
 

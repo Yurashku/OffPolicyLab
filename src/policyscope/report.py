@@ -42,6 +42,9 @@ def decision_summary(res: Dict, metric_name: str, business_threshold: float = 0.
     str
         Сформированный отчёт.
     """
+    if hasattr(res, "to_dict"):
+        res = res.to_dict()
+
     V_A = res["V_A"]
     V_B = res["V_B"]
     D = res["Delta"]

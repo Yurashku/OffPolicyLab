@@ -12,6 +12,7 @@ def test_architecture_doc_exists_and_mentions_domain_model():
     assert "centered paired bootstrap" in text.lower()
     assert "ess" in text.lower()
     assert "replay overlap" in text.lower()
+    assert "compare_policies" in text
 
 
 def test_readme_mentions_p_value_method():
@@ -19,6 +20,7 @@ def test_readme_mentions_p_value_method():
     assert "centered paired bootstrap" in text
     assert "h0: delta = 0" in text
     assert "weight_ess_ratio" in text
+    assert "compare_policies_multi_target" in text
 
 
 def test_agents_contains_stable_sections():

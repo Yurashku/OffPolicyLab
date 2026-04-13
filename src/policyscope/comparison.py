@@ -1,0 +1,209 @@
+"""Official high-level comparison/orchestration API for contextual bandit OPE."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Optional, Sequence
+
+import pandas as pd
+
+from policyscope.ci import estimate_value
+from policyscope.diagnostics import compute_policy_diagnostics, PolicyDiagnostics
+from policyscope.inference import infer_policy_comparison_bootstrap
+from policyscope.estimators import value_on_policy
+
+
+@dataclass(frozen=True)
+class PolicyValueResult:
+    name: str
+    value: float
+    ci: Optional[tuple[float, float]] = None
+
+
+@dataclass(frozen=True)
+class PolicyComparisonSummary:
+    estimator: str
+    target: str
+    v_a: float
+    v_b: float
+    delta: float
+    v_a_ci: Optional[tuple[float, float]] = None
+    v_b_ci: Optional[tuple[float, float]] = None
+    delta_ci: Optional[tuple[float, float]] = None
+    p_value: Optional[float] = None
+    is_significant: Optional[bool] = None
+    significance_rule: Optional[str] = None
+    alpha: Optional[float] = None
+    n_boot: Optional[int] = None
+    inference_method: Optional[str] = None
+    inference_warnings: tuple[str, ...] = field(default_factory=tuple)
+    diagnostics: PolicyDiagnostics | None = None
+    notes: tuple[str, ...] = field(default_factory=tuple)
+
+    def to_dict(self) -> dict:
+        out = {
+            "estimator": self.estimator,
+            "target": self.target,
+            "V_A": self.v_a,
+            "V_B": self.v_b,
+            "Delta": self.delta,
+            "diagnostics": self.diagnostics.to_dict() if self.diagnostics is not None else {},
+            "notes": list(self.notes),
+        }
+        if self.v_a_ci is not None:
+            out["V_A_CI"] = self.v_a_ci
+        if self.v_b_ci is not None:
+            out["V_B_CI"] = self.v_b_ci
+        if self.delta_ci is not None:
+            out["Delta_CI"] = self.delta_ci
+        if self.p_value is not None:
+            out["p_value"] = self.p_value
+        if self.is_significant is not None:
+            out["is_significant"] = self.is_significant
+        if self.significance_rule is not None:
+            out["significance_rule"] = self.significance_rule
+        if self.alpha is not None:
+            out["alpha"] = self.alpha
+        if self.n_boot is not None:
+            out["n_boot"] = self.n_boot
+        if self.inference_method is not None:
+            out["inference_method"] = self.inference_method
+        if self.inference_warnings:
+            out["inference_warnings"] = list(self.inference_warnings)
+        return out
+
+
+@dataclass(frozen=True)
+class MultiMetricComparisonResult:
+    estimator: str
+    results: dict[str, PolicyComparisonSummary]
+
+    def to_dict(self) -> dict:
+        return {
+            "estimator": self.estimator,
+            "results": {k: v.to_dict() for k, v in self.results.items()},
+        }
+
+
+def compare_policies(
+    df: pd.DataFrame,
+    policyB,
+    *,
+    estimator: str = "dr",
+    target: str = "accept",
+    feature_cols: Optional[Sequence[str]] = None,
+    action_col: str = "a_A",
+    action_space: Optional[Sequence] = None,
+    cluster_col: Optional[str] = "user_id",
+    n_boot: int = 300,
+    alpha: float = 0.05,
+    weight_clip: Optional[float] = None,
+    tau: float = 20.0,
+    with_ci: bool = True,
+) -> PolicyComparisonSummary:
+    def point_on(part: pd.DataFrame) -> float:
+        return estimate_value(
+            part,
+            policyB,
+            method=estimator,  # type: ignore[arg-type]
+            target=target,
+            feature_cols=feature_cols,
+            action_col=action_col,
+            action_space=action_space,
+            weight_clip=weight_clip,
+            tau=tau,
+        )
+
+    v_a = value_on_policy(df, target=target)
+    v_b = point_on(df)
+    diag = compute_policy_diagnostics(
+        df,
+        policyB,
+        method=estimator,
+        target=target,
+        feature_cols=feature_cols,
+        action_col=action_col,
+        action_space=action_space,
+        weight_clip=weight_clip,
+        tau=tau,
+    )
+
+    if not with_ci:
+        return PolicyComparisonSummary(
+            estimator=estimator,
+            target=target,
+            v_a=float(v_a),
+            v_b=float(v_b),
+            delta=float(v_b - v_a),
+            diagnostics=diag,
+            notes=tuple(diag.warnings),
+        )
+
+    def estimator_pair(part: pd.DataFrame):
+        a = value_on_policy(part, target=target)
+        b = point_on(part)
+        return a, b, b - a
+
+    inf = infer_policy_comparison_bootstrap(
+        df,
+        estimator_pair,
+        cluster_col=cluster_col,
+        n_boot=n_boot,
+        alpha=alpha,
+    ).to_dict()
+    notes = tuple(diag.warnings) + tuple(inf.get("inference_warnings", []))
+    return PolicyComparisonSummary(
+        estimator=estimator,
+        target=target,
+        v_a=float(inf["V_A"]),
+        v_b=float(inf["V_B"]),
+        delta=float(inf["Delta"]),
+        v_a_ci=inf["V_A_CI"],
+        v_b_ci=inf["V_B_CI"],
+        delta_ci=inf["Delta_CI"],
+        p_value=inf.get("p_value"),
+        is_significant=inf.get("is_significant"),
+        significance_rule=inf.get("significance_rule"),
+        alpha=inf.get("alpha"),
+        n_boot=inf.get("n_boot"),
+        inference_method=inf.get("inference_method"),
+        inference_warnings=tuple(inf.get("inference_warnings", [])),
+        diagnostics=diag,
+        notes=notes,
+    )
+
+
+def compare_policies_multi_target(
+    df: pd.DataFrame,
+    policyB,
+    *,
+    estimator: str = "dr",
+    targets: Sequence[str],
+    feature_cols: Optional[Sequence[str]] = None,
+    action_col: str = "a_A",
+    action_space: Optional[Sequence] = None,
+    cluster_col: Optional[str] = "user_id",
+    n_boot: int = 300,
+    alpha: float = 0.05,
+    weight_clip: Optional[float] = None,
+    tau: float = 20.0,
+    with_ci: bool = True,
+) -> MultiMetricComparisonResult:
+    results: dict[str, PolicyComparisonSummary] = {}
+    for target in targets:
+        results[target] = compare_policies(
+            df,
+            policyB,
+            estimator=estimator,
+            target=target,
+            feature_cols=feature_cols,
+            action_col=action_col,
+            action_space=action_space,
+            cluster_col=cluster_col,
+            n_boot=n_boot,
+            alpha=alpha,
+            weight_clip=weight_clip,
+            tau=tau,
+            with_ci=with_ci,
+        )
+    return MultiMetricComparisonResult(estimator=estimator, results=results)
