@@ -185,12 +185,35 @@ def compare_policies(
             action_space=action_space,
         )
 
+    external_nuisance_bootstrap_warning = (
+        "external_nuisance_not_reused_in_bootstrap_resamples_fallback_to_internal_nuisance_fit"
+    )
+    external_nuisance_observed = bool(
+        (nuisance_bundle is not None and (nuisance_bundle.behavior is not None or nuisance_bundle.outcome is not None))
+        or resolved_behavior is not None
+    )
+    fallback_triggered = {"value": False}
+    base_index = df.index.copy()
+
+    def _can_reuse_external_nuisance(part: pd.DataFrame) -> bool:
+        # Safe reuse policy: only for the exact original row identity and order.
+        # Bootstrap resamples may reorder, duplicate, or omit rows and must not
+        # reuse externally supplied nuisance predictions by position.
+        return part.index.equals(base_index)
+
     def point_on(part: pd.DataFrame) -> float:
+        can_reuse = _can_reuse_external_nuisance(part)
         behavior_preds = None
-        if nuisance_bundle is not None and nuisance_bundle.behavior is not None and len(part) == len(df):
-            behavior_preds = nuisance_bundle.behavior
-        elif resolved_behavior is not None and len(part) == len(df):
-            behavior_preds = resolved_behavior
+        outcome_preds = None
+        if can_reuse:
+            if nuisance_bundle is not None and nuisance_bundle.behavior is not None:
+                behavior_preds = nuisance_bundle.behavior
+            elif resolved_behavior is not None:
+                behavior_preds = resolved_behavior
+            if nuisance_bundle is not None and nuisance_bundle.outcome is not None:
+                outcome_preds = nuisance_bundle.outcome
+        elif external_nuisance_observed:
+            fallback_triggered["value"] = True
         return estimate_value(
             part,
             policyB,
@@ -202,11 +225,7 @@ def compare_policies(
             weight_clip=weight_clip,
             tau=tau,
             nuisance_behavior=behavior_preds,
-            nuisance_outcome=(
-                nuisance_bundle.outcome
-                if nuisance_bundle is not None and nuisance_bundle.outcome is not None and len(part) == len(df)
-                else None
-            ),
+            nuisance_outcome=outcome_preds,
             propensity_source=propensity_source,
             propensity_col=propensity_col,
         )
@@ -269,7 +288,10 @@ def compare_policies(
         n_boot=n_boot,
         alpha=alpha,
     ).to_dict()
-    notes = propensity_notes + tuple(diag.warnings) + tuple(inf.get("inference_warnings", []))
+    inference_warnings = tuple(inf.get("inference_warnings", []))
+    if fallback_triggered["value"]:
+        inference_warnings = inference_warnings + (external_nuisance_bootstrap_warning,)
+    notes = propensity_notes + tuple(diag.warnings) + inference_warnings
     return PolicyComparisonSummary(
         estimator=estimator,
         target=target,
@@ -285,7 +307,7 @@ def compare_policies(
         alpha=inf.get("alpha"),
         n_boot=inf.get("n_boot"),
         inference_method=inf.get("inference_method"),
-        inference_warnings=tuple(inf.get("inference_warnings", [])),
+        inference_warnings=inference_warnings,
         diagnostics=diag,
         notes=notes,
         propensity_source=diag.propensity_source or resolved_source,

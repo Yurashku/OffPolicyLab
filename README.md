@@ -43,6 +43,7 @@ pip install -e .
 - `compare_policies(..., nuisance_bundle=...)` может принять заранее посчитанные nuisance-предсказания (опционально);
 - `compare_policies(..., use_crossfit=True)` строит OOF nuisance автоматически через внутренний helper;
 - покрываемые методы в cross-fitting mode: `ips/snips` (behavior nuisance), `dm/dr/sndr/switch_dr` (behavior + outcome nuisance).
+- migration note (bootstrap safety): при `with_ci=True` внешние nuisance-предсказания используются только для исходного point-estimate на оригинальных строках; в bootstrap-ресемплах они **не переиспользуются** (fallback к внутреннему fit), а факт fallback отражается в `inference_warnings` и `notes`.
 
 По умолчанию ничего менять не нужно: внутренний fit nuisance остаётся стандартным поведением.
 Важно: это практичный approximation-слой для снижения bias риска, а не гарантия «идеального» инференса.
