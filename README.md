@@ -56,6 +56,17 @@ pip install -e .
 
 В `compare_policies(...).to_dict()` и `diagnostics` возвращаются `propensity_source` и `propensity_column` (если применимо).
 
+
+## Simulation validation harness (synthetic oracle checks)
+
+Для систематической валидации поведения estimators добавлен `policyscope.validation.run_simulation_validation(...)`.
+
+Он запускает повторяемые synthetic-эксперименты и возвращает:
+- run-level таблицу с oracle vs estimate (`V_B`, `delta`), bias/error, coverage/significance, diagnostics;
+- aggregate таблицу по `mode x estimator` (mean bias, std, RMSE, coverage, significance rate).
+
+Документация: `docs/validation_harness.md`.
+
 ## Минимальный формат данных
 
 Нужны:

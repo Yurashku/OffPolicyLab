@@ -110,3 +110,14 @@ Data contract -> Point estimation -> Inference -> Diagnostics/Reporting
 Это важно методологически: logged и estimated propensity отражают разные допущения о качестве данных и модели поведения, поэтому provenance отражается в structured outputs и diagnostics.
 
 Migration note: текущий API совместим назад (по умолчанию `auto`), а дополнительная metadata (`propensity_source`, `propensity_column`, fallback notes) доступна без изменения формул estimators.
+
+
+## 9) Simulation validation harness
+
+Добавлен lightweight слой `policyscope.validation` для повторяемой проверки поведения estimators на synthetic-среде с oracle-значениями.
+
+Harness поддерживает сравнение методов (`replay`, `ips`, `snips`, `dm`, `dr`, `sndr`, `switch_dr`) в разных режимах (logged/estimated propensity, cross-fit mode, clipping settings) и возвращает структурированные run-level и aggregate метрики (bias/std/RMSE, coverage, significance rate, diagnostic summaries).
+
+Назначение — внутренний validation/regression инструмент для развития библиотеки. Это не универсальная гарантия корректности на произвольных real-world логах.
+
+Подробнее: `docs/validation_harness.md`.

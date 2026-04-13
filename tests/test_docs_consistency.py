@@ -35,3 +35,10 @@ def test_agents_contains_stable_sections():
     assert "Анти-паттерны для Codex" in text
     assert "delta = V_B - V_A" in text
     assert "significance metadata" in text
+
+
+def test_validation_harness_doc_exists():
+    text = Path("docs/validation_harness.md").read_text(encoding="utf-8").lower()
+    assert "run_simulation_validation" in text
+    assert "oracle" in text
+    assert "не гарантия" in text
