@@ -8,13 +8,8 @@ from typing import Optional, Sequence
 import numpy as np
 import pandas as pd
 
-from policyscope.estimators import (
-    ess,
-    pi_hat_predict,
-    prepare_piB_taken,
-    take_action_probabilities,
-    train_pi_hat,
-)
+from policyscope.estimators import ess
+from policyscope.nuisance import fit_behavior_nuisance_bundle
 
 
 @dataclass(frozen=True)
@@ -109,12 +104,15 @@ def compute_policy_diagnostics(
     clip_share = None
     switch_share = None
     if method in {"ips", "snips", "dr", "sndr", "switch_dr"}:
-        pi_model = train_pi_hat(df, feature_cols=feature_cols, action_col=action_col)
-        pA_all = pi_hat_predict(pi_model, df)
-        pA_taken = take_action_probabilities(pA_all, df[action_col].to_numpy(), action_space=pi_model.classes_)
-        piB_taken = prepare_piB_taken(df, policyB, action_col=action_col, action_space=action_space)
+        behavior_bundle = fit_behavior_nuisance_bundle(
+            df,
+            policyB,
+            feature_cols=feature_cols,
+            action_col=action_col,
+            action_space=action_space,
+        )
         with np.errstate(divide="ignore", invalid="ignore"):
-            weights = piB_taken / pA_taken
+            weights = behavior_bundle.piB_taken / behavior_bundle.pA_taken
         weights = np.nan_to_num(weights, nan=0.0, posinf=np.finfo(float).max, neginf=0.0)
         if weight_clip is not None and method in {"ips", "snips", "dr", "sndr"}:
             clip_share = float(np.mean(weights > weight_clip))

@@ -20,6 +20,7 @@
 
 3. **Nuisance models**  
    Модели `pi_hat` и `mu_hat`, используемые point-estimators (IPS/SNIPS/DR/...).
+   Внутренний reusable bundle-слой собран в `policyscope.nuisance`, чтобы orchestration/inference/diagnostics не дублировали сборку nuisance-объектов.
 
 4. **Point estimators**  
    Оценщики значения политики (`replay`, `ips`, `snips`, `dm`, `dr`, `sndr`, `switch_dr`).

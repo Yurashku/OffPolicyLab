@@ -19,11 +19,6 @@ import pandas as pd
 
 from policyscope.inference import infer_scalar_bootstrap
 from policyscope.estimators import (
-    train_pi_hat,
-    pi_hat_predict,
-    take_action_probabilities,
-    prepare_piB_taken,
-    train_mu_hat,
     value_on_policy,
     replay_value,
     ips_value,
@@ -33,6 +28,7 @@ from policyscope.estimators import (
     sndr_value,
     switch_dr_value,
 )
+from policyscope.nuisance import fit_behavior_nuisance_bundle, fit_outcome_nuisance_bundle
 
 EstimatorName = Literal["on_policy", "replay", "ips", "snips", "dm", "dr", "sndr", "switch_dr"]
 
@@ -61,31 +57,63 @@ def _estimate_point(
         a_B = actions[np.argmax(probsB, axis=1)]
         return replay_value(df, a_B, target=target, action_col=action_col)
 
+    behavior_bundle = None
+    pA_taken: Optional[np.ndarray] = None
     if method in {"ips", "snips", "dr", "sndr", "switch_dr"}:
-        pi_model = train_pi_hat(df, feature_cols=feature_cols, action_col=action_col)
-        pA_all = pi_hat_predict(pi_model, df)
-        pA_taken = take_action_probabilities(pA_all, df[action_col].to_numpy(), action_space=pi_model.classes_)
+        behavior_bundle = fit_behavior_nuisance_bundle(
+            df,
+            policyB,
+            feature_cols=feature_cols,
+            action_col=action_col,
+            action_space=action_space,
+        )
+        pA_taken = behavior_bundle.pA_taken
 
     if method == "ips":
-        piB_taken = prepare_piB_taken(df, policyB, action_col=action_col, action_space=action_space)
-        v, _, _ = ips_value(df, piB_taken, pA_taken, target=target, weight_clip=weight_clip, action_col=action_col)
+        assert behavior_bundle is not None and pA_taken is not None
+        v, _, _ = ips_value(
+            df,
+            behavior_bundle.piB_taken,
+            pA_taken,
+            target=target,
+            weight_clip=weight_clip,
+            action_col=action_col,
+        )
         return v
 
     if method == "snips":
-        piB_taken = prepare_piB_taken(df, policyB, action_col=action_col, action_space=action_space)
-        v, _, _ = snips_value(df, piB_taken, pA_taken, target=target, weight_clip=weight_clip, action_col=action_col)
+        assert behavior_bundle is not None and pA_taken is not None
+        v, _, _ = snips_value(
+            df,
+            behavior_bundle.piB_taken,
+            pA_taken,
+            target=target,
+            weight_clip=weight_clip,
+            action_col=action_col,
+        )
         return v
 
     if method == "dm":
-        mu_model = train_mu_hat(df, target=target, feature_cols=feature_cols, action_col=action_col)
-        return dm_value(df, policyB, mu_model, target=target, action_space=action_space)
+        outcome_bundle = fit_outcome_nuisance_bundle(
+            df,
+            target=target,
+            feature_cols=feature_cols,
+            action_col=action_col,
+        )
+        return dm_value(df, policyB, outcome_bundle.mu_model, target=target, action_space=action_space)
 
     if method == "dr":
-        mu_model = train_mu_hat(df, target=target, feature_cols=feature_cols, action_col=action_col)
+        outcome_bundle = fit_outcome_nuisance_bundle(
+            df,
+            target=target,
+            feature_cols=feature_cols,
+            action_col=action_col,
+        )
+        assert pA_taken is not None
         v, _, _ = dr_value(
             df,
             policyB,
-            mu_model,
+            outcome_bundle.mu_model,
             pA_taken,
             target=target,
             weight_clip=weight_clip,
@@ -95,11 +123,17 @@ def _estimate_point(
         return v
 
     if method == "sndr":
-        mu_model = train_mu_hat(df, target=target, feature_cols=feature_cols, action_col=action_col)
+        outcome_bundle = fit_outcome_nuisance_bundle(
+            df,
+            target=target,
+            feature_cols=feature_cols,
+            action_col=action_col,
+        )
+        assert pA_taken is not None
         v, _, _ = sndr_value(
             df,
             policyB,
-            mu_model,
+            outcome_bundle.mu_model,
             pA_taken,
             target=target,
             weight_clip=weight_clip,
@@ -109,11 +143,17 @@ def _estimate_point(
         return v
 
     if method == "switch_dr":
-        mu_model = train_mu_hat(df, target=target, feature_cols=feature_cols, action_col=action_col)
+        outcome_bundle = fit_outcome_nuisance_bundle(
+            df,
+            target=target,
+            feature_cols=feature_cols,
+            action_col=action_col,
+        )
+        assert pA_taken is not None
         v, _, _ = switch_dr_value(
             df,
             policyB,
-            mu_model,
+            outcome_bundle.mu_model,
             pA_taken,
             tau=tau,
             target=target,
