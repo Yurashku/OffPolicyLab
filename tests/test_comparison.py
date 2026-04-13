@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from policyscope.comparison import (
     MultiMetricComparisonResult,
@@ -12,6 +13,7 @@ from policyscope.nuisance import CrossFitNuisanceBundle, generate_oof_behavior_p
 from policyscope.policies import make_policy
 from policyscope.report import decision_summary
 from policyscope.synthetic import SynthConfig, SyntheticRecommenderEnv
+import policyscope.comparison as comparison_mod
 
 
 def _prepare_env(seed: int = 100):
@@ -277,3 +279,99 @@ def test_logged_bandit_dataset_input_with_propensity_column():
     )
     assert summary.propensity_source == "logged"
     assert summary.propensity_column == "ps"
+
+
+@pytest.mark.parametrize(
+    "index_builder",
+    [
+        lambda n: np.arange(n - 1, -1, -1),  # reordered
+        lambda n: np.concatenate([np.arange(n - 1), [n - 2]]),  # duplicated row
+        lambda n: np.concatenate([np.arange(1, n), [1]]),  # omitted + duplicated row
+    ],
+)
+def test_bootstrap_does_not_reuse_external_nuisance_on_non_identical_rows(monkeypatch, index_builder):
+    logs, policyB = _prepare_env(112)
+    behavior = generate_oof_behavior_predictions(
+        logs,
+        policyB,
+        n_splits=3,
+        random_state=21,
+        feature_cols=["loyal", "age", "risk", "income"],
+        action_col="a_A",
+    )
+    bundle = CrossFitNuisanceBundle(behavior=behavior, n_splits=3)
+
+    original_estimate = comparison_mod.estimate_value
+    captured: list[tuple[bool, bool]] = []
+
+    def wrapped_estimate(*args, **kwargs):
+        captured.append((kwargs.get("nuisance_behavior") is not None, kwargs.get("nuisance_outcome") is not None))
+        return original_estimate(*args, **kwargs)
+
+    class _FakeInferenceResult:
+        def to_dict(self):
+            return {
+                "V_A": 0.0,
+                "V_B": 0.0,
+                "Delta": 0.0,
+                "V_A_CI": (0.0, 0.0),
+                "V_B_CI": (0.0, 0.0),
+                "Delta_CI": (0.0, 0.0),
+                "p_value": 1.0,
+                "is_significant": False,
+                "significance_rule": "centered_paired_bootstrap_p_value_lt_alpha",
+                "alpha": 0.05,
+                "n_boot": 3,
+                "inference_method": "paired_percentile_bootstrap+centered_delta_test",
+                "inference_warnings": [],
+            }
+
+    def fake_infer(df, estimator_pair, **kwargs):
+        idx = index_builder(len(df))
+        part = df.iloc[idx].copy()
+        estimator_pair(part)
+        return _FakeInferenceResult()
+
+    monkeypatch.setattr(comparison_mod, "estimate_value", wrapped_estimate)
+    monkeypatch.setattr(comparison_mod, "infer_policy_comparison_bootstrap", fake_infer)
+
+    summary = compare_policies(
+        logs,
+        policyB,
+        estimator="ips",
+        target="accept",
+        feature_cols=["loyal", "age", "risk", "income"],
+        action_col="a_A",
+        with_ci=True,
+        nuisance_bundle=bundle,
+        n_boot=3,
+    )
+
+    assert captured[0] == (True, False)
+    assert captured[-1] == (False, False)
+    assert "external_nuisance_not_reused_in_bootstrap_resamples_fallback_to_internal_nuisance_fit" in summary.inference_warnings
+    assert "external_nuisance_not_reused_in_bootstrap_resamples_fallback_to_internal_nuisance_fit" in summary.notes
+
+
+def test_with_ci_external_nuisance_fallback_warning_present():
+    logs, policyB = _prepare_env(113)
+    behavior = generate_oof_behavior_predictions(
+        logs,
+        policyB,
+        n_splits=3,
+        random_state=25,
+        feature_cols=["loyal", "age", "risk", "income"],
+        action_col="a_A",
+    )
+    summary = compare_policies(
+        logs,
+        policyB,
+        estimator="ips",
+        target="accept",
+        feature_cols=["loyal", "age", "risk", "income"],
+        action_col="a_A",
+        with_ci=True,
+        nuisance_bundle=CrossFitNuisanceBundle(behavior=behavior, n_splits=3),
+        n_boot=10,
+    )
+    assert "external_nuisance_not_reused_in_bootstrap_resamples_fallback_to_internal_nuisance_fit" in summary.inference_warnings

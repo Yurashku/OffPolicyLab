@@ -67,7 +67,7 @@ def _resample_df(
         return df.iloc[idx].copy()
     clusters = df[cluster_col].unique()
     sampled = rng.choice(clusters, size=len(clusters), replace=True)
-    return pd.concat([df[df[cluster_col] == c] for c in sampled], ignore_index=True)
+    return pd.concat([df[df[cluster_col] == c] for c in sampled]).copy()
 
 
 def _percentile_interval(samples: list[float], alpha: float) -> IntervalResult:
