@@ -98,3 +98,15 @@ Data contract -> Point estimation -> Inference -> Diagnostics/Reporting
 - текущий дефолтный workflow не меняется (внутренний fit nuisance работает как раньше);
 - при необходимости можно заранее посчитать OOF nuisance-предсказания и передать их в `compare_policies(..., nuisance_bundle=...)`;
 - на текущем этапе это интегрировано инкрементально и совместимо с существующим API.
+
+
+## 8) Logged vs estimated propensity (first-class modes)
+
+Для weighted-estimators (`ips`, `snips`, `dr`, `sndr`, `switch_dr`) источник propensity теперь является явной частью orchestration:
+- `propensity_source="auto"` — по умолчанию: сначала пытаемся взять logged propensity column, затем fallback к estimated `pi_hat`;
+- `propensity_source="logged"` — строгий режим только по колонке логов;
+- `propensity_source="estimated"` — всегда через behavior model.
+
+Это важно методологически: logged и estimated propensity отражают разные допущения о качестве данных и модели поведения, поэтому provenance отражается в structured outputs и diagnostics.
+
+Migration note: текущий API совместим назад (по умолчанию `auto`), а дополнительная metadata (`propensity_source`, `propensity_column`, fallback notes) доступна без изменения формул estimators.

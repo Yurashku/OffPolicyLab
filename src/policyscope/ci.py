@@ -32,10 +32,11 @@ from policyscope.estimators import (
 from policyscope.nuisance import (
     BehaviorPredictions,
     OutcomePredictions,
-    fit_behavior_nuisance_bundle,
+    PropensitySource,
     fit_outcome_nuisance_bundle,
     validate_behavior_predictions,
     validate_outcome_predictions,
+    resolve_behavior_predictions,
 )
 
 EstimatorName = Literal["on_policy", "replay", "ips", "snips", "dm", "dr", "sndr", "switch_dr"]
@@ -107,6 +108,8 @@ def _estimate_point(
     tau: float,
     nuisance_behavior: Optional[BehaviorPredictions] = None,
     nuisance_outcome: Optional[OutcomePredictions] = None,
+    propensity_source: PropensitySource = "auto",
+    propensity_col: Optional[str] = None,
 ) -> float:
     if method == "on_policy":
         return value_on_policy(df, target=target)
@@ -121,14 +124,15 @@ def _estimate_point(
     pA_taken: Optional[np.ndarray] = None
     if method in {"ips", "snips", "dr", "sndr", "switch_dr"}:
         if behavior_preds is None:
-            behavior_bundle = fit_behavior_nuisance_bundle(
+            behavior_preds, _, _, _ = resolve_behavior_predictions(
                 df,
                 policyB,
+                propensity_source=propensity_source,
+                propensity_col=propensity_col,
                 feature_cols=feature_cols,
                 action_col=action_col,
                 action_space=action_space,
             )
-            behavior_preds = behavior_bundle.predictions
         validate_behavior_predictions(behavior_preds, len(df))
         pA_taken = behavior_preds.pA_taken
 
@@ -293,6 +297,8 @@ def estimate_value(
     tau: float = 20.0,
     nuisance_behavior: Optional[BehaviorPredictions] = None,
     nuisance_outcome: Optional[OutcomePredictions] = None,
+    propensity_source: PropensitySource = "auto",
+    propensity_col: Optional[str] = None,
 ) -> float:
     """Считает только point-estimate для выбранного OPE-оценщика."""
     return _estimate_point(
@@ -307,6 +313,8 @@ def estimate_value(
         tau=tau,
         nuisance_behavior=nuisance_behavior,
         nuisance_outcome=nuisance_outcome,
+        propensity_source=propensity_source,
+        propensity_col=propensity_col,
     )
 
 
@@ -325,6 +333,8 @@ def estimate_value_with_ci(
     n_boot: int = 300,
     alpha: float = 0.05,
     rng_seed: int = 12345,
+    propensity_source: PropensitySource = "auto",
+    propensity_col: Optional[str] = None,
 ):
     """Считает point-estimate и bootstrap CI для выбранного OPE-оценщика.
 
@@ -342,6 +352,8 @@ def estimate_value_with_ci(
             action_space=action_space,
             weight_clip=weight_clip,
             tau=tau,
+            propensity_source=propensity_source,
+            propensity_col=propensity_col,
         ),
         cluster_col=cluster_col,
         n_boot=n_boot,

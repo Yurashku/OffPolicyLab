@@ -76,3 +76,41 @@ def test_warning_rules_trigger_on_obvious_extreme_weights():
     ).to_dict()
     assert "extreme_max_weight" in d["warnings"] or "heavy_weight_tail" in d["warnings"]
     assert "large_clip_share" in d["warnings"]
+
+
+def test_diagnostics_propensity_source_metadata_logged_vs_estimated():
+    logs, policyB = _make_logs(30)
+    # estimated path
+    d_est = compute_policy_diagnostics(
+        logs,
+        policyB,
+        method="ips",
+        feature_cols=["loyal", "age", "risk", "income"],
+        action_col="a_A",
+        propensity_source="estimated",
+    ).to_dict()
+    assert d_est["propensity_source"] == "estimated"
+
+    # logged path from synthetic in-sample estimated pA (for deterministic test setup)
+    from policyscope.nuisance import resolve_behavior_predictions
+
+    preds, _, _, _ = resolve_behavior_predictions(
+        logs,
+        policyB,
+        propensity_source="estimated",
+        feature_cols=["loyal", "age", "risk", "income"],
+        action_col="a_A",
+    )
+    logs2 = logs.copy()
+    logs2["p_logged"] = preds.pA_taken
+    d_logged = compute_policy_diagnostics(
+        logs2,
+        policyB,
+        method="ips",
+        feature_cols=["loyal", "age", "risk", "income"],
+        action_col="a_A",
+        propensity_source="logged",
+        propensity_col="p_logged",
+    ).to_dict()
+    assert d_logged["propensity_source"] == "logged"
+    assert d_logged["propensity_column"] == "p_logged"

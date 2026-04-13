@@ -13,6 +13,8 @@ def test_architecture_doc_exists_and_mentions_domain_model():
     assert "ess" in text.lower()
     assert "replay overlap" in text.lower()
     assert "compare_policies" in text
+    assert 'propensity_source="auto"' in text
+    assert "logged vs estimated propensity" in text.lower()
 
 
 def test_readme_mentions_p_value_method():
@@ -21,6 +23,8 @@ def test_readme_mentions_p_value_method():
     assert "h0: delta = 0" in text
     assert "weight_ess_ratio" in text
     assert "compare_policies_multi_target" in text
+    assert "propensity source modes" in text
+    assert 'propensity_source="auto"' in text
 
 
 def test_agents_contains_stable_sections():

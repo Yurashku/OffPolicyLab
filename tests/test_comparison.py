@@ -7,7 +7,8 @@ from policyscope.comparison import (
     compare_policies_multi_target,
 )
 from policyscope.evaluator import OPEEvaluator
-from policyscope.nuisance import CrossFitNuisanceBundle, generate_oof_behavior_predictions
+from policyscope.data import BanditSchema, LoggedBanditDataset
+from policyscope.nuisance import CrossFitNuisanceBundle, generate_oof_behavior_predictions, resolve_behavior_predictions
 from policyscope.policies import make_policy
 from policyscope.report import decision_summary
 from policyscope.synthetic import SynthConfig, SyntheticRecommenderEnv
@@ -166,3 +167,113 @@ def test_crossfit_mode_multi_target_still_works():
         crossfit_n_splits=3,
     )
     assert set(out.results.keys()) == {"accept", "cltv"}
+
+
+def test_propensity_source_logged_and_estimated_modes():
+    logs, policyB = _prepare_env(108)
+    estimated_preds, _, _, _ = resolve_behavior_predictions(
+        logs,
+        policyB,
+        propensity_source="estimated",
+        feature_cols=["loyal", "age", "risk", "income"],
+        action_col="a_A",
+    )
+    logs = logs.copy()
+    logs["p_logged"] = estimated_preds.pA_taken
+
+    logged_summary = compare_policies(
+        logs,
+        policyB,
+        estimator="ips",
+        target="accept",
+        feature_cols=["loyal", "age", "risk", "income"],
+        action_col="a_A",
+        with_ci=False,
+        propensity_source="logged",
+        propensity_col="p_logged",
+    )
+    estimated_summary = compare_policies(
+        logs,
+        policyB,
+        estimator="ips",
+        target="accept",
+        feature_cols=["loyal", "age", "risk", "income"],
+        action_col="a_A",
+        with_ci=False,
+        propensity_source="estimated",
+    )
+    assert logged_summary.propensity_source == "logged"
+    assert logged_summary.propensity_column == "p_logged"
+    assert estimated_summary.propensity_source == "estimated"
+
+
+def test_propensity_source_auto_fallback_and_metadata():
+    logs, policyB = _prepare_env(109)
+    summary = compare_policies(
+        logs,
+        policyB,
+        estimator="ips",
+        target="accept",
+        feature_cols=["loyal", "age", "risk", "income"],
+        action_col="a_A",
+        with_ci=False,
+        propensity_source="auto",
+        propensity_col="missing_propensity",
+    )
+    assert summary.propensity_source == "estimated"
+    assert any("fallback" in n for n in summary.notes)
+    assert summary.to_dict()["diagnostics"]["propensity_source"] == "estimated"
+
+
+def test_propensity_source_logged_requires_valid_column():
+    logs, policyB = _prepare_env(110)
+    logs = logs.copy()
+    logs["bad_p"] = 1.5
+    try:
+        compare_policies(
+            logs,
+            policyB,
+            estimator="ips",
+            target="accept",
+            feature_cols=["loyal", "age", "risk", "income"],
+            action_col="a_A",
+            with_ci=False,
+            propensity_source="logged",
+            propensity_col="bad_p",
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Expected ValueError for invalid logged propensity column")
+
+
+def test_logged_bandit_dataset_input_with_propensity_column():
+    logs, policyB = _prepare_env(111)
+    estimated_preds, _, _, _ = resolve_behavior_predictions(
+        logs,
+        policyB,
+        propensity_source="estimated",
+        feature_cols=["loyal", "age", "risk", "income"],
+        action_col="a_A",
+    )
+    logs = logs.copy()
+    logs["ps"] = estimated_preds.pA_taken
+    dataset = LoggedBanditDataset(
+        df=logs,
+        schema=BanditSchema(
+            action_col="a_A",
+            reward_col="accept",
+            feature_cols=["loyal", "age", "risk", "income"],
+            propensity_col="ps",
+            cluster_col="user_id",
+        ),
+    )
+    summary = compare_policies(
+        dataset,
+        policyB,
+        estimator="ips",
+        with_ci=False,
+        propensity_source="auto",
+    )
+    assert summary.propensity_source == "logged"
+    assert summary.propensity_column == "ps"

@@ -47,6 +47,15 @@ pip install -e .
 По умолчанию ничего менять не нужно: внутренний fit nuisance остаётся стандартным поведением.
 Важно: это практичный approximation-слой для снижения bias риска, а не гарантия «идеального» инференса.
 
+### Propensity source modes (official path)
+
+Для взвешенных OPE-методов (`ips`, `snips`, `dr`, `sndr`, `switch_dr`) доступен явный режим источника propensity:
+- `propensity_source="auto"` (по умолчанию): использовать logged propensity column, если валидная колонка доступна; иначе fallback на оценку `pi_hat`;
+- `propensity_source="logged"`: использовать только logged propensity column (если колонка отсутствует/невалидна — ошибка);
+- `propensity_source="estimated"`: всегда оценивать propensity через behavior model.
+
+В `compare_policies(...).to_dict()` и `diagnostics` возвращаются `propensity_source` и `propensity_column` (если применимо).
+
 ## Минимальный формат данных
 
 Нужны:

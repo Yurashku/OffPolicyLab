@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, Sequence
+from typing import Literal, Optional, Sequence
 
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import KFold
+
+PropensitySource = Literal["auto", "logged", "estimated"]
 
 from policyscope.estimators import (
     mu_hat_predict,
@@ -27,6 +29,8 @@ class BehaviorPredictions:
     pA_all: Optional[np.ndarray] = None
     is_out_of_fold: bool = False
     fold_index: Optional[np.ndarray] = None
+    propensity_source: Optional[str] = None
+    propensity_col: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -104,7 +108,12 @@ def fit_behavior_nuisance_bundle(
         action_space=pi_model.classes_,
     )
     piB_taken = prepare_piB_taken(df, policyB, action_col=action_col, action_space=action_space)
-    preds = BehaviorPredictions(pA_taken=pA_taken, piB_taken=piB_taken, pA_all=pA_all)
+    preds = BehaviorPredictions(
+        pA_taken=pA_taken,
+        piB_taken=piB_taken,
+        pA_all=pA_all,
+        propensity_source="estimated",
+    )
     return BehaviorNuisanceBundle(pi_model=pi_model, predictions=preds)
 
 
@@ -181,6 +190,7 @@ def generate_oof_behavior_predictions(
         pA_all=None,
         is_out_of_fold=True,
         fold_index=fold_index,
+        propensity_source="estimated",
     )
 
 
@@ -223,6 +233,98 @@ def generate_oof_outcome_predictions(
         fold_index=fold_index,
     )
 
+
+
+
+def _validate_logged_propensity_values(p: pd.Series, col: str) -> None:
+    if p.isna().any():
+        raise ValueError(f"Propensity column '{col}' contains NaN values")
+    invalid = (~((p > 0.0) & (p <= 1.0))).any()
+    if invalid:
+        raise ValueError(f"Propensity column '{col}' must be in (0, 1]")
+
+
+def build_logged_behavior_predictions(
+    df: pd.DataFrame,
+    policyB,
+    *,
+    propensity_col: str,
+    action_col: str = "a_A",
+    action_space: Optional[Sequence] = None,
+) -> BehaviorPredictions:
+    """Build behavior predictions from logged propensity column."""
+    if propensity_col not in df.columns:
+        raise ValueError(f"Missing propensity column: {propensity_col}")
+    _validate_logged_propensity_values(df[propensity_col], propensity_col)
+    piB_taken = prepare_piB_taken(df, policyB, action_col=action_col, action_space=action_space)
+    return BehaviorPredictions(
+        pA_taken=df[propensity_col].to_numpy(dtype=float),
+        piB_taken=piB_taken,
+        propensity_source="logged",
+        propensity_col=propensity_col,
+    )
+
+
+def resolve_behavior_predictions(
+    df: pd.DataFrame,
+    policyB,
+    *,
+    propensity_source: PropensitySource = "auto",
+    propensity_col: Optional[str] = None,
+    feature_cols: Optional[Sequence[str]] = None,
+    action_col: str = "a_A",
+    action_space: Optional[Sequence] = None,
+) -> tuple[BehaviorPredictions, str, Optional[str], tuple[str, ...]]:
+    """Resolve behavior predictions from logged or estimated propensity path."""
+    notes: list[str] = []
+    if propensity_source == "logged":
+        if propensity_col is None:
+            raise ValueError("propensity_source='logged' requires propensity_col")
+        preds = build_logged_behavior_predictions(
+            df,
+            policyB,
+            propensity_col=propensity_col,
+            action_col=action_col,
+            action_space=action_space,
+        )
+        return preds, "logged", propensity_col, tuple(notes)
+
+    if propensity_source == "estimated":
+        bundle = fit_behavior_nuisance_bundle(
+            df,
+            policyB,
+            feature_cols=feature_cols,
+            action_col=action_col,
+            action_space=action_space,
+        )
+        notes.append("estimated_propensity_from_behavior_model")
+        return bundle.predictions, "estimated", None, tuple(notes)
+
+    # auto
+    if propensity_col is not None and propensity_col in df.columns:
+        try:
+            preds = build_logged_behavior_predictions(
+                df,
+                policyB,
+                propensity_col=propensity_col,
+                action_col=action_col,
+                action_space=action_space,
+            )
+            notes.append("auto_selected_logged_propensity")
+            return preds, "logged", propensity_col, tuple(notes)
+        except ValueError:
+            notes.append("logged_propensity_invalid_fallback_to_estimated")
+
+    if propensity_col is None or propensity_col not in df.columns:
+        notes.append("logged_propensity_missing_fallback_to_estimated")
+    bundle = fit_behavior_nuisance_bundle(
+        df,
+        policyB,
+        feature_cols=feature_cols,
+        action_col=action_col,
+        action_space=action_space,
+    )
+    return bundle.predictions, "estimated", None, tuple(notes)
 
 def validate_behavior_predictions(predictions: BehaviorPredictions, n: int) -> None:
     """Validate that precomputed behavior predictions align with current data length."""

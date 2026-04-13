@@ -9,7 +9,12 @@ import numpy as np
 import pandas as pd
 
 from policyscope.estimators import ess
-from policyscope.nuisance import BehaviorPredictions, fit_behavior_nuisance_bundle, validate_behavior_predictions
+from policyscope.nuisance import (
+    BehaviorPredictions,
+    PropensitySource,
+    resolve_behavior_predictions,
+    validate_behavior_predictions,
+)
 
 
 @dataclass(frozen=True)
@@ -36,6 +41,8 @@ class PolicyDiagnostics:
     overlap: OverlapDiagnostics
     weights: WeightDiagnostics
     warnings: tuple[str, ...] = field(default_factory=tuple)
+    propensity_source: Optional[str] = None
+    propensity_column: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -51,6 +58,8 @@ class PolicyDiagnostics:
             "clip_share": self.weights.clip_share,
             "switch_share": self.weights.switch_share,
             "warnings": list(self.warnings),
+            "propensity_source": self.propensity_source,
+            "propensity_column": self.propensity_column,
         }
 
 
@@ -93,6 +102,8 @@ def compute_policy_diagnostics(
     clip_share_warn_threshold: float = 0.2,
     switch_share_warn_threshold: float = 0.2,
     behavior_predictions: Optional[BehaviorPredictions] = None,
+    propensity_source: PropensitySource = "auto",
+    propensity_col: Optional[str] = None,
 ) -> PolicyDiagnostics:
     n = int(len(df))
     probsB = policyB.action_probs(df)
@@ -104,16 +115,23 @@ def compute_policy_diagnostics(
     weights = None
     clip_share = None
     switch_share = None
+    used_propensity_source: Optional[str] = None
+    used_propensity_col: Optional[str] = None
     if method in {"ips", "snips", "dr", "sndr", "switch_dr"}:
         if behavior_predictions is None:
-            behavior_bundle = fit_behavior_nuisance_bundle(
+            behavior_predictions, used_propensity_source, used_propensity_col, source_notes = resolve_behavior_predictions(
                 df,
                 policyB,
+                propensity_source=propensity_source,
+                propensity_col=propensity_col,
                 feature_cols=feature_cols,
                 action_col=action_col,
                 action_space=action_space,
             )
-            behavior_predictions = behavior_bundle.predictions
+        else:
+            source_notes = ()
+            used_propensity_source = behavior_predictions.propensity_source
+            used_propensity_col = behavior_predictions.propensity_col
         validate_behavior_predictions(behavior_predictions, n)
         with np.errstate(divide="ignore", invalid="ignore"):
             weights = behavior_predictions.piB_taken / behavior_predictions.pA_taken
@@ -124,7 +142,7 @@ def compute_policy_diagnostics(
             switch_share = float(np.mean(weights > tau))
 
     w_diag = _weight_diagnostics(weights, n=n, clip_share=clip_share, switch_share=switch_share)
-    warnings: list[str] = []
+    warnings: list[str] = list(source_notes) if method in {"ips", "snips", "dr", "sndr", "switch_dr"} else []
     if overlap_diag.replay_overlap < replay_overlap_warn_threshold:
         warnings.append("low_replay_overlap")
     if w_diag.ess_ratio is not None and w_diag.ess_ratio < ess_ratio_warn_threshold:
@@ -144,4 +162,6 @@ def compute_policy_diagnostics(
         overlap=overlap_diag,
         weights=w_diag,
         warnings=tuple(warnings),
+        propensity_source=used_propensity_source,
+        propensity_column=used_propensity_col,
     )
