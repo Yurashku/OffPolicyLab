@@ -11,6 +11,7 @@ from policyscope.ci import estimate_value
 from policyscope.diagnostics import compute_policy_diagnostics, PolicyDiagnostics
 from policyscope.inference import infer_policy_comparison_bootstrap
 from policyscope.estimators import value_on_policy
+from policyscope.nuisance import CrossFitNuisanceBundle
 
 
 @dataclass(frozen=True)
@@ -100,8 +101,12 @@ def compare_policies(
     weight_clip: Optional[float] = None,
     tau: float = 20.0,
     with_ci: bool = True,
+    nuisance_bundle: Optional[CrossFitNuisanceBundle] = None,
 ) -> PolicyComparisonSummary:
     def point_on(part: pd.DataFrame) -> float:
+        behavior_preds = None
+        if nuisance_bundle is not None and nuisance_bundle.behavior is not None and len(part) == len(df):
+            behavior_preds = nuisance_bundle.behavior
         return estimate_value(
             part,
             policyB,
@@ -112,6 +117,7 @@ def compare_policies(
             action_space=action_space,
             weight_clip=weight_clip,
             tau=tau,
+            nuisance_behavior=behavior_preds,
         )
 
     v_a = value_on_policy(df, target=target)
@@ -126,6 +132,7 @@ def compare_policies(
         action_space=action_space,
         weight_clip=weight_clip,
         tau=tau,
+        behavior_predictions=nuisance_bundle.behavior if nuisance_bundle is not None else None,
     )
 
     if not with_ci:
@@ -188,6 +195,7 @@ def compare_policies_multi_target(
     weight_clip: Optional[float] = None,
     tau: float = 20.0,
     with_ci: bool = True,
+    nuisance_bundle: Optional[CrossFitNuisanceBundle] = None,
 ) -> MultiMetricComparisonResult:
     results: dict[str, PolicyComparisonSummary] = {}
     for target in targets:
@@ -205,5 +213,6 @@ def compare_policies_multi_target(
             weight_clip=weight_clip,
             tau=tau,
             with_ci=with_ci,
+            nuisance_bundle=nuisance_bundle,
         )
     return MultiMetricComparisonResult(estimator=estimator, results=results)

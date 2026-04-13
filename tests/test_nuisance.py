@@ -1,6 +1,13 @@
 import numpy as np
 
-from policyscope.nuisance import fit_behavior_nuisance_bundle, fit_outcome_nuisance_bundle
+from policyscope.nuisance import (
+    CrossFitNuisanceBundle,
+    fit_behavior_nuisance_bundle,
+    fit_outcome_nuisance_bundle,
+    generate_oof_behavior_predictions,
+    generate_oof_outcome_predictions,
+    make_kfold_indices,
+)
 from policyscope.policies import make_policy
 from policyscope.synthetic import SynthConfig, SyntheticRecommenderEnv
 
@@ -24,13 +31,15 @@ def test_behavior_bundle_shapes_and_bounds():
         action_col="a_A",
     )
 
+    preds = bundle.predictions
     n = len(logs)
-    assert bundle.pA_all.shape[0] == n
-    assert bundle.pA_taken.shape == (n,)
-    assert bundle.piB_taken.shape == (n,)
-    assert np.all(bundle.pA_taken > 0)
-    assert np.all(bundle.piB_taken >= 0)
-    assert np.all(bundle.piB_taken <= 1)
+    assert preds.pA_all is not None
+    assert preds.pA_all.shape[0] == n
+    assert preds.pA_taken.shape == (n,)
+    assert preds.piB_taken.shape == (n,)
+    assert np.all(preds.pA_taken > 0)
+    assert np.all(preds.piB_taken >= 0)
+    assert np.all(preds.piB_taken <= 1)
 
 
 def test_outcome_bundle_predicts_for_binary_target():
@@ -41,5 +50,77 @@ def test_outcome_bundle_predicts_for_binary_target():
         feature_cols=["loyal", "age", "risk", "income"],
         action_col="a_A",
     )
-    design = bundle.mu_model.predict_proba
-    assert callable(design)
+    assert callable(bundle.mu_model.predict_proba)
+
+
+def test_oof_behavior_predictions_have_fold_alignment():
+    logs, policyB = _logs_and_policy(72)
+    preds = generate_oof_behavior_predictions(
+        logs,
+        policyB,
+        n_splits=4,
+        random_state=9,
+        feature_cols=["loyal", "age", "risk", "income"],
+        action_col="a_A",
+    )
+    assert preds.is_out_of_fold
+    assert preds.fold_index is not None
+    assert preds.pA_taken.shape == (len(logs),)
+    assert preds.piB_taken.shape == (len(logs),)
+    assert set(np.unique(preds.fold_index)) == {0, 1, 2, 3}
+
+
+def test_oof_predictions_support_custom_action_column():
+    logs, policyB = _logs_and_policy(73)
+    logs = logs.rename(columns={"a_A": "action_logged"})
+    bpreds = generate_oof_behavior_predictions(
+        logs,
+        policyB,
+        n_splits=3,
+        random_state=7,
+        feature_cols=["loyal", "age", "risk", "income"],
+        action_col="action_logged",
+    )
+    opreds = generate_oof_outcome_predictions(
+        logs,
+        target="accept",
+        n_splits=3,
+        random_state=7,
+        feature_cols=["loyal", "age", "risk", "income"],
+        action_col="action_logged",
+        requested_actions=[0, 1],
+    )
+    assert bpreds.fold_index is not None and opreds.fold_index is not None
+    assert bpreds.pA_taken.shape == (len(logs),)
+    assert opreds.mu_logged_action.shape == (len(logs),)
+    assert opreds.mu_by_action is not None
+    assert set(opreds.mu_by_action.keys()) == {0, 1}
+
+
+def test_kfold_indices_cover_all_rows_once():
+    n = 41
+    folds = make_kfold_indices(n, n_splits=5, random_state=123)
+    seen = np.concatenate([holdout for _, holdout in folds])
+    assert len(seen) == n
+    assert sorted(seen.tolist()) == list(range(n))
+
+
+def test_crossfit_bundle_container_works():
+    logs, policyB = _logs_and_policy(74)
+    behavior = generate_oof_behavior_predictions(
+        logs,
+        policyB,
+        n_splits=3,
+        random_state=2,
+        feature_cols=["loyal", "age", "risk", "income"],
+    )
+    outcome = generate_oof_outcome_predictions(
+        logs,
+        target="accept",
+        n_splits=3,
+        random_state=2,
+        feature_cols=["loyal", "age", "risk", "income"],
+    )
+    bundle = CrossFitNuisanceBundle(behavior=behavior, outcome=outcome, n_splits=3)
+    assert bundle.n_splits == 3
+    assert bundle.behavior is not None and bundle.outcome is not None

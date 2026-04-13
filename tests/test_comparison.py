@@ -7,6 +7,7 @@ from policyscope.comparison import (
     compare_policies_multi_target,
 )
 from policyscope.evaluator import OPEEvaluator
+from policyscope.nuisance import CrossFitNuisanceBundle, generate_oof_behavior_predictions
 from policyscope.policies import make_policy
 from policyscope.report import decision_summary
 from policyscope.synthetic import SynthConfig, SyntheticRecommenderEnv
@@ -94,3 +95,28 @@ def test_report_accepts_structured_summary_object():
     )
     text = decision_summary(summary, metric_name="accept", business_threshold=0.0)
     assert "Delta (B−A)" in text
+
+
+def test_comparison_accepts_external_nuisance_predictions():
+    logs, policyB = _prepare_env(105)
+    behavior = generate_oof_behavior_predictions(
+        logs,
+        policyB,
+        n_splits=3,
+        random_state=11,
+        feature_cols=["loyal", "age", "risk", "income"],
+        action_col="a_A",
+    )
+    summary = compare_policies(
+        logs,
+        policyB,
+        estimator="ips",
+        target="accept",
+        feature_cols=["loyal", "age", "risk", "income"],
+        action_col="a_A",
+        with_ci=False,
+        nuisance_bundle=CrossFitNuisanceBundle(behavior=behavior, n_splits=3),
+    )
+    out = summary.to_dict()
+    assert out["estimator"] == "ips"
+    assert "diagnostics" in out and "weight_ess_ratio" in out["diagnostics"]

@@ -35,6 +35,15 @@ pip install -e .
 - Краткое описание архитектурных границ и доменной модели: `docs/architecture.md`.
 - Библиотека разделяет слои: `data contract -> point estimators -> inference -> diagnostics/reporting`.
 
+## Experimental: cross-fitting-ready nuisance layer
+
+Добавлена инкрементальная поддержка внешних nuisance-предсказаний (без ломки текущего workflow):
+- структуры `BehaviorPredictions`, `OutcomePredictions`, `CrossFitNuisanceBundle`;
+- fold utilities: `make_kfold_indices`, `generate_oof_behavior_predictions`, `generate_oof_outcome_predictions`;
+- `compare_policies(..., nuisance_bundle=...)` может принять заранее посчитанные nuisance-предсказания (опционально).
+
+По умолчанию ничего менять не нужно: внутренний fit nuisance остаётся стандартным поведением.
+
 ## Минимальный формат данных
 
 Нужны:

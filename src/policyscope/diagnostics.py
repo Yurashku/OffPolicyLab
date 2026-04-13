@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 from policyscope.estimators import ess
-from policyscope.nuisance import fit_behavior_nuisance_bundle
+from policyscope.nuisance import BehaviorPredictions, fit_behavior_nuisance_bundle, validate_behavior_predictions
 
 
 @dataclass(frozen=True)
@@ -92,6 +92,7 @@ def compute_policy_diagnostics(
     p99_weight_warn_threshold: float = 20.0,
     clip_share_warn_threshold: float = 0.2,
     switch_share_warn_threshold: float = 0.2,
+    behavior_predictions: Optional[BehaviorPredictions] = None,
 ) -> PolicyDiagnostics:
     n = int(len(df))
     probsB = policyB.action_probs(df)
@@ -104,15 +105,18 @@ def compute_policy_diagnostics(
     clip_share = None
     switch_share = None
     if method in {"ips", "snips", "dr", "sndr", "switch_dr"}:
-        behavior_bundle = fit_behavior_nuisance_bundle(
-            df,
-            policyB,
-            feature_cols=feature_cols,
-            action_col=action_col,
-            action_space=action_space,
-        )
+        if behavior_predictions is None:
+            behavior_bundle = fit_behavior_nuisance_bundle(
+                df,
+                policyB,
+                feature_cols=feature_cols,
+                action_col=action_col,
+                action_space=action_space,
+            )
+            behavior_predictions = behavior_bundle.predictions
+        validate_behavior_predictions(behavior_predictions, n)
         with np.errstate(divide="ignore", invalid="ignore"):
-            weights = behavior_bundle.piB_taken / behavior_bundle.pA_taken
+            weights = behavior_predictions.piB_taken / behavior_predictions.pA_taken
         weights = np.nan_to_num(weights, nan=0.0, posinf=np.finfo(float).max, neginf=0.0)
         if weight_clip is not None and method in {"ips", "snips", "dr", "sndr"}:
             clip_share = float(np.mean(weights > weight_clip))

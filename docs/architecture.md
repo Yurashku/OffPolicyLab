@@ -74,3 +74,26 @@ Data contract -> Point estimation -> Inference -> Diagnostics/Reporting
 - Полное переписывание всех estimators на новый объект данных.
 - Изменение математических формул/предположений существующих OPE методов.
 - Большая переработка публичного API за один релиз.
+
+
+## 7) Cross-fitting readiness (incremental)
+
+Почему это важно:
+- при использовании одних и тех же данных для обучения nuisance-моделей (`pi_hat`, `mu_hat`) и финальной оценки возможен дополнительный finite-sample bias;
+- out-of-fold предсказания уменьшают этот эффект и подготавливают почву для более строгой cross-fitting схемы.
+
+Что добавлено сейчас:
+- явные структуры предсказаний: `BehaviorPredictions`, `OutcomePredictions`;
+- контейнер `CrossFitNuisanceBundle` для fold-aware nuisance артефактов;
+- утилиты первого уровня: `make_kfold_indices`, `generate_oof_behavior_predictions`, `generate_oof_outcome_predictions`;
+- основной orchestration path (`compare_policies`) может принимать внешний nuisance bundle (additive path, без обязательного использования).
+
+Что пока не делаем (future work):
+- полноценный cross-fitting rollout для каждого estimator и bootstrap-веток;
+- жёсткий API-контракт для всех вариантов multi-fold обучения;
+- изменение математики уже реализованных OPE-оценщиков.
+
+Краткая migration note:
+- текущий дефолтный workflow не меняется (внутренний fit nuisance работает как раньше);
+- при необходимости можно заранее посчитать OOF nuisance-предсказания и передать их в `compare_policies(..., nuisance_bundle=...)`;
+- на текущем этапе это интегрировано инкрементально и совместимо с существующим API.

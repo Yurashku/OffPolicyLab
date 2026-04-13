@@ -28,7 +28,12 @@ from policyscope.estimators import (
     sndr_value,
     switch_dr_value,
 )
-from policyscope.nuisance import fit_behavior_nuisance_bundle, fit_outcome_nuisance_bundle
+from policyscope.nuisance import (
+    BehaviorPredictions,
+    fit_behavior_nuisance_bundle,
+    fit_outcome_nuisance_bundle,
+    validate_behavior_predictions,
+)
 
 EstimatorName = Literal["on_policy", "replay", "ips", "snips", "dm", "dr", "sndr", "switch_dr"]
 
@@ -47,6 +52,7 @@ def _estimate_point(
     action_space: Optional[Sequence],
     weight_clip: Optional[float],
     tau: float,
+    nuisance_behavior: Optional[BehaviorPredictions] = None,
 ) -> float:
     if method == "on_policy":
         return value_on_policy(df, target=target)
@@ -57,23 +63,26 @@ def _estimate_point(
         a_B = actions[np.argmax(probsB, axis=1)]
         return replay_value(df, a_B, target=target, action_col=action_col)
 
-    behavior_bundle = None
+    behavior_preds: Optional[BehaviorPredictions] = nuisance_behavior
     pA_taken: Optional[np.ndarray] = None
     if method in {"ips", "snips", "dr", "sndr", "switch_dr"}:
-        behavior_bundle = fit_behavior_nuisance_bundle(
-            df,
-            policyB,
-            feature_cols=feature_cols,
-            action_col=action_col,
-            action_space=action_space,
-        )
-        pA_taken = behavior_bundle.pA_taken
+        if behavior_preds is None:
+            behavior_bundle = fit_behavior_nuisance_bundle(
+                df,
+                policyB,
+                feature_cols=feature_cols,
+                action_col=action_col,
+                action_space=action_space,
+            )
+            behavior_preds = behavior_bundle.predictions
+        validate_behavior_predictions(behavior_preds, len(df))
+        pA_taken = behavior_preds.pA_taken
 
     if method == "ips":
-        assert behavior_bundle is not None and pA_taken is not None
+        assert behavior_preds is not None and pA_taken is not None
         v, _, _ = ips_value(
             df,
-            behavior_bundle.piB_taken,
+            behavior_preds.piB_taken,
             pA_taken,
             target=target,
             weight_clip=weight_clip,
@@ -82,10 +91,10 @@ def _estimate_point(
         return v
 
     if method == "snips":
-        assert behavior_bundle is not None and pA_taken is not None
+        assert behavior_preds is not None and pA_taken is not None
         v, _, _ = snips_value(
             df,
-            behavior_bundle.piB_taken,
+            behavior_preds.piB_taken,
             pA_taken,
             target=target,
             weight_clip=weight_clip,
@@ -176,6 +185,7 @@ def estimate_value(
     action_space: Optional[Sequence] = None,
     weight_clip: Optional[float] = None,
     tau: float = 20.0,
+    nuisance_behavior: Optional[BehaviorPredictions] = None,
 ) -> float:
     """Считает только point-estimate для выбранного OPE-оценщика."""
     return _estimate_point(
@@ -188,6 +198,7 @@ def estimate_value(
         action_space=action_space,
         weight_clip=weight_clip,
         tau=tau,
+        nuisance_behavior=nuisance_behavior,
     )
 
 
