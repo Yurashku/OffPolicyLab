@@ -9,6 +9,13 @@ def test_architecture_doc_exists_and_mentions_domain_model():
     assert "non-goals" in text.lower()
     assert "significance" in text.lower()
     assert "scalar" in text.lower()
+    assert "centered paired bootstrap" in text.lower()
+
+
+def test_readme_mentions_p_value_method():
+    text = Path("README.md").read_text(encoding="utf-8").lower()
+    assert "centered paired bootstrap" in text
+    assert "h0: delta = 0" in text
 
 
 def test_agents_contains_stable_sections():

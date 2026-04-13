@@ -20,9 +20,7 @@ class ComparisonInferenceResult:
     v_a_ci: IntervalResult
     v_b_ci: IntervalResult
     delta_ci: IntervalResult
-    # MVP policy: we do not report a numeric p-value yet to avoid misleading inference.
-    # Significance is derived conservatively from whether delta CI excludes zero.
-    p_value: Optional[float]
+    p_value: float
     is_significant: bool
     significance_rule: str
     alpha: float
@@ -78,8 +76,15 @@ def _percentile_interval(samples: list[float], alpha: float) -> IntervalResult:
     return IntervalResult(low=low, high=high)
 
 
-def _is_significant_from_ci(delta_ci: IntervalResult) -> bool:
-    return bool(delta_ci.low > 0.0 or delta_ci.high < 0.0)
+def _centered_bootstrap_pvalue(delta_boot: list[float], delta_hat: float) -> float:
+    """Two-sided centered paired-bootstrap p-value for H0: delta = 0."""
+    arr = np.asarray(delta_boot, dtype=float)
+    centered = arr - float(delta_hat)
+    test_stat = abs(float(delta_hat))
+    extreme = np.mean(np.abs(centered) >= test_stat)
+    # Add-one smoothing for finite bootstrap samples.
+    p = (extreme * len(arr) + 1.0) / (len(arr) + 1.0)
+    return float(min(max(p, 0.0), 1.0))
 
 
 def infer_scalar_bootstrap(
@@ -122,11 +127,8 @@ def infer_policy_comparison_bootstrap(
 ) -> PolicyComparisonResult:
     """Official paired comparison inference entrypoint for (V_A, V_B, delta).
 
-    Notes
-    -----
-    In the current MVP, significance is reported via a CI-based decision rule
-    (`delta_ci_excludes_zero`). Numeric p-values are intentionally omitted
-    (`p_value=None`) to avoid exposing potentially misleading values.
+    Uses percentile bootstrap CIs for (V_A, V_B, delta) and a centered paired
+    bootstrap two-sided test for H0: delta = 0.
     """
     rng = np.random.default_rng(rng_seed)
     v_a, v_b, delta = estimator_pair(df)
@@ -141,16 +143,21 @@ def infer_policy_comparison_bootstrap(
         b_d.append(float(d))
 
     delta_ci = _percentile_interval(b_d, alpha=alpha)
+    p_value = _centered_bootstrap_pvalue(b_d, float(delta))
+    warnings: list[str] = []
+    if n_boot < 200:
+        warnings.append("low_n_boot_p_value_may_be_unstable")
+
     inference = ComparisonInferenceResult(
         v_a_ci=_percentile_interval(b_a, alpha=alpha),
         v_b_ci=_percentile_interval(b_b, alpha=alpha),
         delta_ci=delta_ci,
-        p_value=None,
-        is_significant=_is_significant_from_ci(delta_ci),
-        significance_rule="delta_ci_excludes_zero",
+        p_value=p_value,
+        is_significant=bool(p_value < alpha),
+        significance_rule="centered_paired_bootstrap_p_value_lt_alpha",
         alpha=alpha,
         n_boot=n_boot,
-        method=method,
-        warnings=("p_value_not_reported_use_ci_rule",),
+        method=f"{method}+centered_delta_test",
+        warnings=tuple(warnings),
     )
     return PolicyComparisonResult(v_a=float(v_a), v_b=float(v_b), delta=float(delta), inference=inference)

@@ -25,7 +25,7 @@
    Оценщики значения политики (`replay`, `ips`, `snips`, `dm`, `dr`, `sndr`, `switch_dr`).
 
 5. **Inference**  
-   Слой построения CI и significance metadata (bootstrap row/cluster/paired), независимо от point-estimator.
+   Слой построения CI и significance metadata (percentile bootstrap CI + centered paired bootstrap test), независимо от point-estimator.
 
 6. **Diagnostics**  
    ESS, clipping/share, устойчивость и sanity-check метрики.

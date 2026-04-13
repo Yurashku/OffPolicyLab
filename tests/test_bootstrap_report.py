@@ -60,10 +60,10 @@ def test_paired_bootstrap_ci_basic():
     assert lo <= delta <= hi
     assert res["n_boot"] == 200
     assert res["alpha"] == 0.1
-    assert res["p_value"] is None
+    assert 0.0 <= res["p_value"] <= 1.0
     assert isinstance(res["is_significant"], bool)
-    assert res["significance_rule"] == "delta_ci_excludes_zero"
-    assert res["inference_method"] == "paired_percentile_bootstrap"
+    assert res["significance_rule"] == "centered_paired_bootstrap_p_value_lt_alpha"
+    assert "paired_percentile_bootstrap" in res["inference_method"]
 
 
 def test_paired_bootstrap_ci_respects_alpha_width():
@@ -107,6 +107,38 @@ def test_paired_bootstrap_ci_matches_official_inference_wrapper():
     ).to_dict()
     assert legacy["Delta_CI"] == official["Delta_CI"]
     assert legacy["is_significant"] == official["is_significant"]
+    assert legacy["p_value"] == official["p_value"]
+
+
+def test_centered_bootstrap_p_value_obvious_cases():
+    df_equal = pd.DataFrame(
+        {
+            "user_id": [1, 1, 2, 2, 3, 3],
+            "val_a": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            "val_b": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+        }
+    )
+    df_large_effect = pd.DataFrame(
+        {
+            "user_id": [1, 1, 2, 2, 3, 3],
+            "val_a": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "val_b": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+        }
+    )
+
+    def estimator_pair(d):
+        va = d["val_a"].mean()
+        vb = d["val_b"].mean()
+        return va, vb, vb - va
+
+    eq = paired_bootstrap_ci(df_equal, estimator_pair, cluster_col="user_id", n_boot=400, alpha=0.05, rng_seed=5)
+    big = paired_bootstrap_ci(
+        df_large_effect, estimator_pair, cluster_col="user_id", n_boot=400, alpha=0.05, rng_seed=5
+    )
+    assert eq["p_value"] > 0.3
+    assert big["p_value"] < 0.05
+    assert eq["is_significant"] is False
+    assert big["is_significant"] is True
 
 
 def test_decision_summary_outcomes():

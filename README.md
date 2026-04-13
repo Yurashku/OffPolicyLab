@@ -7,8 +7,8 @@
 - Туториал стал короче и практичнее: есть компактный сценарий «взял свой DataFrame → получил все OPE‑оценки».
 - Bootstrap-инференс считается через единый API: `OPEEvaluator(...).evaluate(method)` или `estimate_value_with_ci(..., method=...)`.
 - Для сравнения A vs B в `OPEEvaluator` доступны `Delta_CI` и честная significance metadata:
-  - `is_significant` + `significance_rule="delta_ci_excludes_zero"`,
-  - `p_value` в MVP-режиме явно не репортится (`None`), чтобы не вводить в заблуждение.
+  - `p_value` (двусторонний centered paired bootstrap test для `H0: delta = 0`),
+  - `is_significant` + `significance_rule="centered_paired_bootstrap_p_value_lt_alpha"`.
 - Все основные OPE‑оценщики снабжены подробными docstring на русском (аргументы, возвращаемые значения, интерпретация).
 
 ## Установка
@@ -195,9 +195,9 @@ python examples/run_synthetic_experiment.py --n_users 50000 --seed 42 --policyA 
   'V_B_CI': (..., ...),
   'Delta': ...,
   'Delta_CI': (..., ...),
-  'p_value': None,  # в MVP-режиме не репортится
+  'p_value': ...,
   'is_significant': ...,
-  'significance_rule': 'delta_ci_excludes_zero',
+  'significance_rule': 'centered_paired_bootstrap_p_value_lt_alpha',
   'n_boot': ...,
   'inference_method': ...
 }
@@ -216,6 +216,6 @@ jupyter nbconvert --to notebook --execute examples/tutorial.ipynb --inplace
 - Публичные имена функций не менялись.
 - В выходах сравнения политик (`paired_bootstrap_ci`, `OPEEvaluator.evaluate`) добавлены поля:
   - `is_significant` и `significance_rule`,
-  - `p_value` (в текущем MVP — `None`, см. CI-based significance rule),
+  - `p_value` (centered paired bootstrap approximation для `H0: delta = 0`),
   - `inference_method`,
   - `alpha`.
