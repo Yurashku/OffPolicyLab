@@ -86,7 +86,8 @@ Data contract -> Point estimation -> Inference -> Diagnostics/Reporting
 - явные структуры предсказаний: `BehaviorPredictions`, `OutcomePredictions`;
 - контейнер `CrossFitNuisanceBundle` для fold-aware nuisance артефактов;
 - утилиты первого уровня: `make_kfold_indices`, `generate_oof_behavior_predictions`, `generate_oof_outcome_predictions`;
-- основной orchestration path (`compare_policies`) может принимать внешний nuisance bundle (additive path, без обязательного использования).
+- cross-fitting mode применим для `dm`, `dr`, `sndr`, `switch_dr` (outcome + behavior nuisance) и для `ips`, `snips` (behavior nuisance).
+- основной orchestration path (`compare_policies`) поддерживает `use_crossfit=True` и/или внешний `nuisance_bundle` (additive path, без обязательного использования).
 
 Что пока не делаем (future work):
 - полноценный cross-fitting rollout для каждого estimator и bootstrap-веток;

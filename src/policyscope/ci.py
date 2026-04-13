@@ -21,6 +21,7 @@ from policyscope.inference import infer_scalar_bootstrap
 from policyscope.estimators import (
     value_on_policy,
     replay_value,
+    prepare_piB_taken,
     ips_value,
     snips_value,
     dm_value,
@@ -30,15 +31,67 @@ from policyscope.estimators import (
 )
 from policyscope.nuisance import (
     BehaviorPredictions,
+    OutcomePredictions,
     fit_behavior_nuisance_bundle,
     fit_outcome_nuisance_bundle,
     validate_behavior_predictions,
+    validate_outcome_predictions,
 )
 
 EstimatorName = Literal["on_policy", "replay", "ips", "snips", "dm", "dr", "sndr", "switch_dr"]
 
 
 __all__ = ["estimate_value", "estimate_value_with_ci"]
+
+
+def _resolve_action_values(probsB: np.ndarray, action_space: Optional[Sequence]) -> list:
+    if action_space is None:
+        return list(range(probsB.shape[1]))
+    return list(action_space)
+
+
+def _dm_dr_family_from_predictions(
+    df: pd.DataFrame,
+    policyB,
+    *,
+    outcome_predictions: OutcomePredictions,
+    target: str,
+    action_col: str,
+    action_space: Optional[Sequence],
+    pA_taken: Optional[np.ndarray],
+    method: EstimatorName,
+    weight_clip: Optional[float],
+    tau: float,
+) -> float:
+    probsB = policyB.action_probs(df)
+    actions = _resolve_action_values(probsB, action_space)
+    validate_outcome_predictions(outcome_predictions, len(df), required_actions=actions)
+
+    assert outcome_predictions.mu_by_action is not None
+    dm_part = np.zeros(len(df), dtype=float)
+    for idx, action in enumerate(actions):
+        dm_part += probsB[:, idx] * outcome_predictions.mu_by_action[action]
+
+    if method == "dm":
+        return float(np.mean(dm_part))
+
+    assert pA_taken is not None
+    piB_taken = prepare_piB_taken(df, policyB, action_col=action_col, action_space=action_space)
+    w = piB_taken / pA_taken
+    if weight_clip is not None and method in {"dr", "sndr"}:
+        w = np.minimum(w, weight_clip)
+
+    r = df[target].to_numpy()
+    mu_logged = outcome_predictions.mu_logged_action
+
+    if method == "dr":
+        return float(np.mean(dm_part + w * (r - mu_logged)))
+    if method == "sndr":
+        return float(np.mean(dm_part + (w / (w.mean() + 1e-12)) * (r - mu_logged)))
+
+    mask = w <= tau
+    w_sw = np.where(mask, w, 0.0)
+    return float(np.mean(dm_part + w_sw * (r - mu_logged)))
 
 
 def _estimate_point(
@@ -53,6 +106,7 @@ def _estimate_point(
     weight_clip: Optional[float],
     tau: float,
     nuisance_behavior: Optional[BehaviorPredictions] = None,
+    nuisance_outcome: Optional[OutcomePredictions] = None,
 ) -> float:
     if method == "on_policy":
         return value_on_policy(df, target=target)
@@ -103,6 +157,19 @@ def _estimate_point(
         return v
 
     if method == "dm":
+        if nuisance_outcome is not None:
+            return _dm_dr_family_from_predictions(
+                df,
+                policyB,
+                outcome_predictions=nuisance_outcome,
+                target=target,
+                action_col=action_col,
+                action_space=action_space,
+                pA_taken=None,
+                method=method,
+                weight_clip=weight_clip,
+                tau=tau,
+            )
         outcome_bundle = fit_outcome_nuisance_bundle(
             df,
             target=target,
@@ -112,6 +179,19 @@ def _estimate_point(
         return dm_value(df, policyB, outcome_bundle.mu_model, target=target, action_space=action_space)
 
     if method == "dr":
+        if nuisance_outcome is not None:
+            return _dm_dr_family_from_predictions(
+                df,
+                policyB,
+                outcome_predictions=nuisance_outcome,
+                target=target,
+                action_col=action_col,
+                action_space=action_space,
+                pA_taken=pA_taken,
+                method=method,
+                weight_clip=weight_clip,
+                tau=tau,
+            )
         outcome_bundle = fit_outcome_nuisance_bundle(
             df,
             target=target,
@@ -132,6 +212,19 @@ def _estimate_point(
         return v
 
     if method == "sndr":
+        if nuisance_outcome is not None:
+            return _dm_dr_family_from_predictions(
+                df,
+                policyB,
+                outcome_predictions=nuisance_outcome,
+                target=target,
+                action_col=action_col,
+                action_space=action_space,
+                pA_taken=pA_taken,
+                method=method,
+                weight_clip=weight_clip,
+                tau=tau,
+            )
         outcome_bundle = fit_outcome_nuisance_bundle(
             df,
             target=target,
@@ -152,6 +245,19 @@ def _estimate_point(
         return v
 
     if method == "switch_dr":
+        if nuisance_outcome is not None:
+            return _dm_dr_family_from_predictions(
+                df,
+                policyB,
+                outcome_predictions=nuisance_outcome,
+                target=target,
+                action_col=action_col,
+                action_space=action_space,
+                pA_taken=pA_taken,
+                method=method,
+                weight_clip=weight_clip,
+                tau=tau,
+            )
         outcome_bundle = fit_outcome_nuisance_bundle(
             df,
             target=target,
@@ -186,6 +292,7 @@ def estimate_value(
     weight_clip: Optional[float] = None,
     tau: float = 20.0,
     nuisance_behavior: Optional[BehaviorPredictions] = None,
+    nuisance_outcome: Optional[OutcomePredictions] = None,
 ) -> float:
     """Считает только point-estimate для выбранного OPE-оценщика."""
     return _estimate_point(
@@ -199,6 +306,7 @@ def estimate_value(
         weight_clip=weight_clip,
         tau=tau,
         nuisance_behavior=nuisance_behavior,
+        nuisance_outcome=nuisance_outcome,
     )
 
 

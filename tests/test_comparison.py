@@ -120,3 +120,49 @@ def test_comparison_accepts_external_nuisance_predictions():
     out = summary.to_dict()
     assert out["estimator"] == "ips"
     assert "diagnostics" in out and "weight_ess_ratio" in out["diagnostics"]
+
+
+def test_crossfit_mode_dm_and_dr_family_runs():
+    logs, policyB = _prepare_env(106)
+    dm_summary = compare_policies(
+        logs,
+        policyB,
+        estimator="dm",
+        target="accept",
+        feature_cols=["loyal", "age", "risk", "income"],
+        action_col="a_A",
+        with_ci=False,
+        use_crossfit=True,
+        crossfit_n_splits=3,
+        crossfit_random_state=19,
+    )
+    dr_summary = compare_policies(
+        logs,
+        policyB,
+        estimator="dr",
+        target="accept",
+        feature_cols=["loyal", "age", "risk", "income"],
+        action_col="a_A",
+        with_ci=False,
+        use_crossfit=True,
+        crossfit_n_splits=3,
+        crossfit_random_state=19,
+    )
+    assert np.isfinite(dm_summary.v_b)
+    assert np.isfinite(dr_summary.v_b)
+
+
+def test_crossfit_mode_multi_target_still_works():
+    logs, policyB = _prepare_env(107)
+    out = compare_policies_multi_target(
+        logs,
+        policyB,
+        estimator="dr",
+        targets=["accept", "cltv"],
+        feature_cols=["loyal", "age", "risk", "income"],
+        action_col="a_A",
+        with_ci=False,
+        use_crossfit=True,
+        crossfit_n_splits=3,
+    )
+    assert set(out.results.keys()) == {"accept", "cltv"}

@@ -11,7 +11,7 @@ from policyscope.ci import estimate_value
 from policyscope.diagnostics import compute_policy_diagnostics, PolicyDiagnostics
 from policyscope.inference import infer_policy_comparison_bootstrap
 from policyscope.estimators import value_on_policy
-from policyscope.nuisance import CrossFitNuisanceBundle
+from policyscope.nuisance import CrossFitNuisanceBundle, fit_crossfit_nuisance_bundle
 
 
 @dataclass(frozen=True)
@@ -102,7 +102,22 @@ def compare_policies(
     tau: float = 20.0,
     with_ci: bool = True,
     nuisance_bundle: Optional[CrossFitNuisanceBundle] = None,
+    use_crossfit: bool = False,
+    crossfit_n_splits: int = 5,
+    crossfit_random_state: int = 123,
 ) -> PolicyComparisonSummary:
+    if use_crossfit and nuisance_bundle is None:
+        nuisance_bundle = fit_crossfit_nuisance_bundle(
+            df,
+            policyB,
+            target=target,
+            n_splits=crossfit_n_splits,
+            random_state=crossfit_random_state,
+            feature_cols=feature_cols,
+            action_col=action_col,
+            action_space=action_space,
+        )
+
     def point_on(part: pd.DataFrame) -> float:
         behavior_preds = None
         if nuisance_bundle is not None and nuisance_bundle.behavior is not None and len(part) == len(df):
@@ -118,6 +133,11 @@ def compare_policies(
             weight_clip=weight_clip,
             tau=tau,
             nuisance_behavior=behavior_preds,
+            nuisance_outcome=(
+                nuisance_bundle.outcome
+                if nuisance_bundle is not None and nuisance_bundle.outcome is not None and len(part) == len(df)
+                else None
+            ),
         )
 
     v_a = value_on_policy(df, target=target)
@@ -196,6 +216,9 @@ def compare_policies_multi_target(
     tau: float = 20.0,
     with_ci: bool = True,
     nuisance_bundle: Optional[CrossFitNuisanceBundle] = None,
+    use_crossfit: bool = False,
+    crossfit_n_splits: int = 5,
+    crossfit_random_state: int = 123,
 ) -> MultiMetricComparisonResult:
     results: dict[str, PolicyComparisonSummary] = {}
     for target in targets:
@@ -214,5 +237,8 @@ def compare_policies_multi_target(
             tau=tau,
             with_ci=with_ci,
             nuisance_bundle=nuisance_bundle,
+            use_crossfit=use_crossfit,
+            crossfit_n_splits=crossfit_n_splits,
+            crossfit_random_state=crossfit_random_state,
         )
     return MultiMetricComparisonResult(estimator=estimator, results=results)

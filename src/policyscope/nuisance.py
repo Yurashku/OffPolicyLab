@@ -228,3 +228,61 @@ def validate_behavior_predictions(predictions: BehaviorPredictions, n: int) -> N
     """Validate that precomputed behavior predictions align with current data length."""
     _validate_length("pA_taken", predictions.pA_taken, n)
     _validate_length("piB_taken", predictions.piB_taken, n)
+
+
+def validate_outcome_predictions(
+    predictions: OutcomePredictions,
+    n: int,
+    *,
+    required_actions: Optional[Sequence] = None,
+) -> None:
+    """Validate that precomputed outcome predictions align with current data length."""
+    _validate_length("mu_logged_action", predictions.mu_logged_action, n)
+    if required_actions is None:
+        return
+    if predictions.mu_by_action is None:
+        raise ValueError("Outcome predictions must include mu_by_action for DM/DR-family cross-fitting path")
+    for action in required_actions:
+        if action not in predictions.mu_by_action:
+            raise ValueError(f"Outcome predictions missing action {action}")
+        _validate_length(f"mu_by_action[{action}]", predictions.mu_by_action[action], n)
+
+
+def fit_crossfit_nuisance_bundle(
+    df: pd.DataFrame,
+    policyB,
+    *,
+    target: str,
+    n_splits: int = 5,
+    random_state: int = 123,
+    feature_cols: Optional[Sequence[str]] = None,
+    action_col: str = "a_A",
+    action_space: Optional[Sequence] = None,
+) -> CrossFitNuisanceBundle:
+    """Fit OOF nuisance predictions and return a single structured bundle."""
+    probsB = policyB.action_probs(df)
+    actions = list(action_space) if action_space is not None else list(range(probsB.shape[1]))
+    behavior = generate_oof_behavior_predictions(
+        df,
+        policyB,
+        n_splits=n_splits,
+        random_state=random_state,
+        feature_cols=feature_cols,
+        action_col=action_col,
+        action_space=action_space,
+    )
+    outcome = generate_oof_outcome_predictions(
+        df,
+        target=target,
+        n_splits=n_splits,
+        random_state=random_state,
+        feature_cols=feature_cols,
+        action_col=action_col,
+        requested_actions=actions,
+    )
+    return CrossFitNuisanceBundle(
+        behavior=behavior,
+        outcome=outcome,
+        n_splits=n_splits,
+        notes=("oof_crossfit_bundle",),
+    )

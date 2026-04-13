@@ -7,6 +7,7 @@ from policyscope.nuisance import (
     generate_oof_behavior_predictions,
     generate_oof_outcome_predictions,
     make_kfold_indices,
+    fit_crossfit_nuisance_bundle,
 )
 from policyscope.policies import make_policy
 from policyscope.synthetic import SynthConfig, SyntheticRecommenderEnv
@@ -124,3 +125,21 @@ def test_crossfit_bundle_container_works():
     bundle = CrossFitNuisanceBundle(behavior=behavior, outcome=outcome, n_splits=3)
     assert bundle.n_splits == 3
     assert bundle.behavior is not None and bundle.outcome is not None
+
+
+def test_fit_crossfit_nuisance_bundle_contains_behavior_and_outcome():
+    logs, policyB = _logs_and_policy(75)
+    bundle = fit_crossfit_nuisance_bundle(
+        logs,
+        policyB,
+        target="accept",
+        n_splits=3,
+        random_state=13,
+        feature_cols=["loyal", "age", "risk", "income"],
+        action_col="a_A",
+    )
+    assert bundle.behavior is not None
+    assert bundle.outcome is not None
+    assert bundle.behavior.is_out_of_fold
+    assert bundle.outcome.is_out_of_fold
+    assert bundle.outcome.mu_by_action is not None

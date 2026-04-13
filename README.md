@@ -40,9 +40,12 @@ pip install -e .
 Добавлена инкрементальная поддержка внешних nuisance-предсказаний (без ломки текущего workflow):
 - структуры `BehaviorPredictions`, `OutcomePredictions`, `CrossFitNuisanceBundle`;
 - fold utilities: `make_kfold_indices`, `generate_oof_behavior_predictions`, `generate_oof_outcome_predictions`;
-- `compare_policies(..., nuisance_bundle=...)` может принять заранее посчитанные nuisance-предсказания (опционально).
+- `compare_policies(..., nuisance_bundle=...)` может принять заранее посчитанные nuisance-предсказания (опционально);
+- `compare_policies(..., use_crossfit=True)` строит OOF nuisance автоматически через внутренний helper;
+- покрываемые методы в cross-fitting mode: `ips/snips` (behavior nuisance), `dm/dr/sndr/switch_dr` (behavior + outcome nuisance).
 
 По умолчанию ничего менять не нужно: внутренний fit nuisance остаётся стандартным поведением.
+Важно: это практичный approximation-слой для снижения bias риска, а не гарантия «идеального» инференса.
 
 ## Минимальный формат данных
 
