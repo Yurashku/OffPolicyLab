@@ -48,15 +48,17 @@ def decision_summary(res: Dict, metric_name: str, business_threshold: float = 0.
     V_A = res["V_A"]
     V_B = res["V_B"]
     D = res["Delta"]
+    alpha = float(res.get("alpha", 0.05))
+    ci_level = int(round((1.0 - alpha) * 100))
     A_lo, A_hi = res["V_A_CI"]
     B_lo, B_hi = res["V_B_CI"]
     D_lo, D_hi = res["Delta_CI"]
 
     lines = []
     lines.append(f"Метрика: {metric_name}")
-    lines.append(f"V(A) = {V_A:.6f} (95% CI: {A_lo:.6f} .. {A_hi:.6f})")
-    lines.append(f"V(B) = {V_B:.6f} (95% CI: {B_lo:.6f} .. {B_hi:.6f})")
-    lines.append(f"Delta (B−A) = {D:.6f} (95% CI: {D_lo:.6f} .. {D_hi:.6f})")
+    lines.append(f"V(A) = {V_A:.6f} ({ci_level}% CI: {A_lo:.6f} .. {A_hi:.6f})")
+    lines.append(f"V(B) = {V_B:.6f} ({ci_level}% CI: {B_lo:.6f} .. {B_hi:.6f})")
+    lines.append(f"Delta (B−A) = {D:.6f} ({ci_level}% CI: {D_lo:.6f} .. {D_hi:.6f})")
 
     if D_lo > business_threshold:
         lines.append(f"Решение: модель B лучше A, поскольку нижняя граница CI превышает порог {business_threshold}.")
@@ -64,6 +66,12 @@ def decision_summary(res: Dict, metric_name: str, business_threshold: float = 0.
         lines.append(f"Решение: модель A лучше B, поскольку верхняя граница CI ниже -{business_threshold}.")
     else:
         lines.append("Решение: статистически значимого отличия не обнаружено или эффект слишком мал.")
+    recommendation = res.get("recommendation")
+    trust_level = res.get("trust_level")
+    if trust_level is not None:
+        lines.append(f"Уровень доверия к оценке: {trust_level}.")
+    if recommendation:
+        lines.append(f"Рекомендация: {recommendation}")
     return "\n".join(lines)
 
 

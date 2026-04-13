@@ -36,6 +36,8 @@
 7. **Comparison result**  
    Сводка по `V_A`, `V_B`, `delta`, CI, `p-value` и диагностике для сравнения A vs B.
    Официальный orchestration path: `policyscope.comparison.compare_policies(...)`.
+   В summary дополнительно нормализованы группы заметок/предупреждений:
+   `info_notes`, `diagnostic_warnings`, `inference_warnings`, `trust_notes`, и агрегированный `trust_level`.
 
 8. **Scalar target metric (core abstraction)**  
    Базовая единица оценки — одна скалярная метрика награды. Несколько метрик поддерживаются как повторные запуски оценки для разных target-колонок, а не как native vector-valued reward.
@@ -135,3 +137,14 @@ Harness поддерживает сравнение методов (`replay`, `i
 - cross-fit mode: diagnostics отмечаются как OOF (fold-aware provenance).
 
 Этот слой не меняет формулы estimators и служит для trust-quality интерпретации результатов.
+
+
+## 11) Recommended defaults (API-polish)
+
+Чтобы high-level API был opinionated и безопаснее по умолчанию, в comparison metadata фиксируются рекомендации:
+- `preferred_estimator_general_use = "dr"`;
+- `preferred_propensity_mode_when_logged_available = "auto"`;
+- `preferred_propensity_fallback_when_logged_unavailable = "estimated"`;
+- рекомендация cross-fit для `dm/dr/sndr/switch_dr`.
+
+Это guidance-слой и metadata; математика реализованных estimators не меняется.

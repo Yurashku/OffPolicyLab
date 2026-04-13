@@ -160,3 +160,20 @@ def test_decision_summary_outcomes():
     res_neu = {**base, "Delta": 0.0, "Delta_CI": (-0.03, 0.04)}
     txt_neu = decision_summary(res_neu, "metric", business_threshold=0.01)
     assert "статистически значимого отличия" in txt_neu
+
+
+def test_decision_summary_uses_alpha_from_result():
+    res = {
+        "V_A": 0.2,
+        "V_B": 0.25,
+        "Delta": 0.05,
+        "V_A_CI": (0.18, 0.22),
+        "V_B_CI": (0.20, 0.30),
+        "Delta_CI": (0.01, 0.09),
+        "alpha": 0.1,
+        "trust_level": "caution",
+        "recommendation": "check diagnostics",
+    }
+    txt = decision_summary(res, "metric", business_threshold=0.0)
+    assert "90% CI" in txt
+    assert "Уровень доверия к оценке: caution." in txt

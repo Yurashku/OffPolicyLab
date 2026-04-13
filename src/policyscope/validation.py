@@ -44,6 +44,7 @@ class ValidationRunRow:
     p_value: Optional[float]
     propensity_source_used: Optional[str]
     propensity_column_used: Optional[str]
+    trust_level: Optional[str]
     ess_ratio: Optional[float]
     weight_p99: Optional[float]
     behavior_log_loss: Optional[float]
@@ -191,6 +192,7 @@ def run_simulation_validation(
                         p_value=summary.p_value,
                         propensity_source_used=summary.propensity_source,
                         propensity_column_used=summary.propensity_column,
+                        trust_level=summary.trust_level,
                         ess_ratio=diag.get("weight_ess_ratio"),
                         weight_p99=diag.get("weight_p99"),
                         behavior_log_loss=(

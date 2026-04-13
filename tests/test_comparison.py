@@ -46,6 +46,9 @@ def test_official_comparison_entrypoint_shape():
     assert "V_A_CI" in d and "Delta_CI" in d
     assert "diagnostics" in d and "weight_ess_ratio" in d["diagnostics"]
     assert 0.0 <= d["p_value"] <= 1.0
+    assert d["recommended_defaults"]["preferred_estimator_general_use"] == "dr"
+    assert "info_notes" in d and "diagnostic_warnings" in d and "trust_notes" in d
+    assert d["trust_level"] in {"ok", "caution", "elevated_concern"}
 
 
 def test_multi_target_repeated_scalar_evaluation():
@@ -223,8 +226,28 @@ def test_propensity_source_auto_fallback_and_metadata():
         propensity_col="missing_propensity",
     )
     assert summary.propensity_source == "estimated"
-    assert any("fallback" in n for n in summary.notes)
+    assert any("fallback" in n for n in summary.info_notes)
     assert summary.to_dict()["diagnostics"]["propensity_source"] == "estimated"
+
+
+def test_notes_are_structured_and_legacy_notes_remain_compatible():
+    logs, policyB = _prepare_env(114)
+    summary = compare_policies(
+        logs,
+        policyB,
+        estimator="dr",
+        target="accept",
+        feature_cols=["loyal", "age", "risk", "income"],
+        action_col="a_A",
+        with_ci=True,
+        n_boot=10,
+    )
+    assert isinstance(summary.info_notes, tuple)
+    assert isinstance(summary.diagnostic_warnings, tuple)
+    assert isinstance(summary.inference_warnings, tuple)
+    assert isinstance(summary.trust_notes, tuple)
+    # Legacy combined notes stays available for backward-compatible consumers.
+    assert set(summary.info_notes).issubset(set(summary.notes))
 
 
 def test_propensity_source_logged_requires_valid_column():
