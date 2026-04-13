@@ -15,6 +15,7 @@ def test_architecture_doc_exists_and_mentions_domain_model():
     assert "compare_policies" in text
     assert 'propensity_source="auto"' in text
     assert "logged vs estimated propensity" in text.lower()
+    assert "nuisance-model quality diagnostics" in text.lower()
 
 
 def test_readme_mentions_p_value_method():
@@ -24,6 +25,7 @@ def test_readme_mentions_p_value_method():
     assert "weight_ess_ratio" in text
     assert "compare_policies_multi_target" in text
     assert "propensity source modes" in text
+    assert "nuisance model diagnostics" in text
     assert 'propensity_source="auto"' in text
 
 

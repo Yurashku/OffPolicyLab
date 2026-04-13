@@ -121,3 +121,17 @@ Harness поддерживает сравнение методов (`replay`, `i
 Назначение — внутренний validation/regression инструмент для развития библиотеки. Это не универсальная гарантия корректности на произвольных real-world логах.
 
 Подробнее: `docs/validation_harness.md`.
+
+
+## 10) Nuisance-model quality diagnostics
+
+Дополнительно к overlap/weight diagnostics введён отдельный слой `nuisance diagnostics` для качества моделей `pi_hat` и `mu_hat`.
+
+Зачем: хорошие ESS/overlap сами по себе не гарантируют, что nuisance-модели адекватны. Поэтому в structured outputs добавляются behavior/outcome quality метрики и warning rules.
+
+Ключевые принципы:
+- logged propensity path: behavior model quality помечается как not applicable;
+- estimated propensity path: behavior quality считается и добавляется в summary;
+- cross-fit mode: diagnostics отмечаются как OOF (fold-aware provenance).
+
+Этот слой не меняет формулы estimators и служит для trust-quality интерпретации результатов.

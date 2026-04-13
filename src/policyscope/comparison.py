@@ -12,6 +12,7 @@ from policyscope.data import LoggedBanditDataset
 from policyscope.diagnostics import compute_policy_diagnostics, PolicyDiagnostics
 from policyscope.inference import infer_policy_comparison_bootstrap
 from policyscope.estimators import value_on_policy
+from policyscope.nuisance_diagnostics import NuisanceDiagnostics, compute_nuisance_diagnostics
 from policyscope.nuisance import (
     CrossFitNuisanceBundle,
     PropensitySource,
@@ -48,6 +49,7 @@ class PolicyComparisonSummary:
     notes: tuple[str, ...] = field(default_factory=tuple)
     propensity_source: Optional[str] = None
     propensity_column: Optional[str] = None
+    nuisance_diagnostics: Optional[NuisanceDiagnostics] = None
 
     def to_dict(self) -> dict:
         out = {
@@ -83,6 +85,8 @@ class PolicyComparisonSummary:
             out["propensity_source"] = self.propensity_source
         if self.propensity_column is not None:
             out["propensity_column"] = self.propensity_column
+        if self.nuisance_diagnostics is not None:
+            out["nuisance_diagnostics"] = self.nuisance_diagnostics.to_dict()
         return out
 
 
@@ -226,6 +230,19 @@ def compare_policies(
         propensity_col=propensity_col,
     )
 
+    nuisance_diag = compute_nuisance_diagnostics(
+        df,
+        target=target,
+        estimator=estimator,
+        feature_cols=feature_cols,
+        action_col=action_col,
+        propensity_source=diag.propensity_source or resolved_source,
+        behavior_predictions=(
+            nuisance_bundle.behavior if nuisance_bundle is not None and nuisance_bundle.behavior is not None else resolved_behavior
+        ),
+        nuisance_bundle=nuisance_bundle,
+    )
+
     if not with_ci:
         return PolicyComparisonSummary(
             estimator=estimator,
@@ -237,6 +254,7 @@ def compare_policies(
             notes=propensity_notes + tuple(diag.warnings),
             propensity_source=diag.propensity_source or resolved_source,
             propensity_column=diag.propensity_column or resolved_propensity_col,
+            nuisance_diagnostics=nuisance_diag,
         )
 
     def estimator_pair(part: pd.DataFrame):
@@ -272,6 +290,7 @@ def compare_policies(
         notes=notes,
         propensity_source=diag.propensity_source or resolved_source,
         propensity_column=diag.propensity_column or resolved_propensity_col,
+        nuisance_diagnostics=nuisance_diag,
     )
 
 

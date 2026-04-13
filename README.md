@@ -56,6 +56,15 @@ pip install -e .
 
 В `compare_policies(...).to_dict()` и `diagnostics` возвращаются `propensity_source` и `propensity_column` (если применимо).
 
+### Nuisance model diagnostics
+
+В high-level summary добавлен блок `nuisance_diagnostics`:
+- behavior-side quality для estimated propensity path (например multiclass log-loss, top-1 agreement);
+- outcome-side quality (`accept`: log-loss/Brier/AUC, `cltv`: RMSE/MAE/R²);
+- маркеры `applicable` и `is_out_of_fold`, чтобы явно различать logged path и cross-fit OOF path.
+
+Важно: diagnostics по весам/overlap и diagnostics качества nuisance дополняют друг друга; ни один из блоков сам по себе не гарантирует корректность оценки на реальных данных.
+
 
 ## Simulation validation harness (synthetic oracle checks)
 

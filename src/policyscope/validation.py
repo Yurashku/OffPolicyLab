@@ -46,6 +46,9 @@ class ValidationRunRow:
     propensity_column_used: Optional[str]
     ess_ratio: Optional[float]
     weight_p99: Optional[float]
+    behavior_log_loss: Optional[float]
+    outcome_log_loss: Optional[float]
+    outcome_rmse: Optional[float]
 
 
 @dataclass(frozen=True)
@@ -90,6 +93,9 @@ def _aggregate_rows(rows: list[ValidationRunRow]) -> pd.DataFrame:
             significance_rate=("is_significant", "mean"),
             mean_ess_ratio=("ess_ratio", "mean"),
             mean_weight_p99=("weight_p99", "mean"),
+            mean_behavior_log_loss=("behavior_log_loss", "mean"),
+            mean_outcome_log_loss=("outcome_log_loss", "mean"),
+            mean_outcome_rmse=("outcome_rmse", "mean"),
         )
         .reset_index()
     )
@@ -187,6 +193,21 @@ def run_simulation_validation(
                         propensity_column_used=summary.propensity_column,
                         ess_ratio=diag.get("weight_ess_ratio"),
                         weight_p99=diag.get("weight_p99"),
+                        behavior_log_loss=(
+                            summary.nuisance_diagnostics.behavior.multiclass_log_loss
+                            if summary.nuisance_diagnostics is not None
+                            else None
+                        ),
+                        outcome_log_loss=(
+                            summary.nuisance_diagnostics.outcome.log_loss
+                            if summary.nuisance_diagnostics is not None
+                            else None
+                        ),
+                        outcome_rmse=(
+                            summary.nuisance_diagnostics.outcome.rmse
+                            if summary.nuisance_diagnostics is not None
+                            else None
+                        ),
                     )
                 )
 

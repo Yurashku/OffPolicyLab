@@ -11,7 +11,8 @@
 - `Delta_CI` coverage (если CI рассчитан);
 - частота significance decision (`is_significant`);
 - diagnostics-поля (например, `weight_ess_ratio`, `weight_p99`);
-- provenance (`propensity_source_used`, `propensity_column_used`).
+- provenance (`propensity_source_used`, `propensity_column_used`);
+- nuisance-quality summaries (например behavior log-loss, outcome log-loss/RMSE) для сравнения режимов.
 
 На уровне aggregate (по `mode` и `estimator`):
 - mean bias, std, RMSE для `V_B` и `delta`;
