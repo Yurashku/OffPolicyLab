@@ -3,7 +3,7 @@ import pandas as pd
 
 from policyscope.bootstrap import cluster_bootstrap_ci, paired_bootstrap_ci
 from policyscope.inference import infer_policy_comparison_bootstrap
-from policyscope.report import decision_summary
+from policyscope.report import analyze_logs, decision_summary
 
 
 def test_cluster_bootstrap_ci_basic():
@@ -160,3 +160,43 @@ def test_decision_summary_outcomes():
     res_neu = {**base, "Delta": 0.0, "Delta_CI": (-0.03, 0.04)}
     txt_neu = decision_summary(res_neu, "metric", business_threshold=0.01)
     assert "статистически значимого отличия" in txt_neu
+
+
+def test_decision_summary_uses_alpha_from_result():
+    res = {
+        "V_A": 0.2,
+        "V_B": 0.25,
+        "Delta": 0.05,
+        "V_A_CI": (0.18, 0.22),
+        "V_B_CI": (0.20, 0.30),
+        "Delta_CI": (0.01, 0.09),
+        "alpha": 0.1,
+        "trust_level": "caution",
+        "recommendation": "check diagnostics",
+    }
+    txt = decision_summary(res, "metric", business_threshold=0.0)
+    assert "90% CI" in txt
+    assert "Уровень доверия к оценке: caution." in txt
+
+
+def test_decision_summary_legacy_output_without_ci_is_supported():
+    res = {"V_A": 0.2, "V_B": 0.25, "Delta": 0.05, "is_significant": False}
+    txt = decision_summary(res, "metric", business_threshold=0.0)
+    assert "CI недоступен" in txt
+    assert "итог следует трактовать как предварительный" in txt
+
+
+def test_analyze_logs_mentions_official_workflow_and_propensity_modes():
+    df = pd.DataFrame(
+        {
+            "user_id": [1, 2, 3],
+            "a_A": [0, 1, 0],
+            "accept": [1.0, 0.0, 1.0],
+            "age": [20, 30, 40],
+        }
+    )
+    txt = analyze_logs(df, policyB=None, propensity_col="propensity_A")
+    assert "compare_policies" in txt
+    assert "режим auto перейдёт в estimated propensity path" in txt
+    assert "strict logged path требует валидную propensity_col" in txt
+    assert "DR/SNDR/Switch-DR" in txt

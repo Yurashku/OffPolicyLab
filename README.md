@@ -10,6 +10,10 @@
   - `p_value` (двусторонний centered paired bootstrap test для `H0: delta = 0`),
   - `is_significant` + `significance_rule="centered_paired_bootstrap_p_value_lt_alpha"`.
 - В comparison output также включены trust/stability diagnostics (`ESS`, `ESS/N`, replay overlap, weight tails, clip/switch share, warning flags).
+- В high-level summary добавлены explicit recommended-default metadata и структурированные note-группы:
+  - `recommended_defaults` (рекомендуемые режимы по умолчанию),
+  - `info_notes`, `diagnostic_warnings`, `inference_warnings`, `trust_notes`,
+  - итоговый `trust_level` и короткая `recommendation`.
 - Все основные OPE‑оценщики снабжены подробными docstring на русском (аргументы, возвращаемые значения, интерпретация).
 
 ## Установка
@@ -56,6 +60,15 @@ pip install -e .
 - `propensity_source="estimated"`: всегда оценивать propensity через behavior model.
 
 В `compare_policies(...).to_dict()` и `diagnostics` возвращаются `propensity_source` и `propensity_column` (если применимо).
+
+### Recommended defaults (safe-by-default guidance)
+
+Официальные defaults для общего сценария:
+- preferred estimator: `dr`;
+- если logged propensity доступна и валидна: `propensity_source="auto"` (предпочтёт logged path);
+- если logged propensity недоступна/невалидна: fallback в estimated propensity path;
+- `use_crossfit=True` обычно рекомендуется для `dm/dr/sndr/switch_dr`, когда важна bias-hardening устойчивость;
+- `trust_level in {"caution", "elevated_concern"}` — сигнал поднимать требования к интерпретации результата.
 
 ### Nuisance model diagnostics
 
@@ -304,3 +317,8 @@ jupyter nbconvert --to notebook --execute examples/tutorial.ipynb --inplace
   - `p_value` (centered paired bootstrap approximation для `H0: delta = 0`),
   - `inference_method`,
   - `alpha`.
+- Дополнительно для API-polish:
+  - структурированные note/warning-поля: `info_notes`, `diagnostic_warnings`, `inference_warnings`, `trust_notes`;
+  - `trust_level` + `recommendation`;
+  - `recommended_defaults` для явного safe-by-default workflow.
+  - Поле `notes` сохранено для backward compatibility как объединение структурированных групп.

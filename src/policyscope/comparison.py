@@ -20,6 +20,11 @@ from policyscope.nuisance import (
     resolve_behavior_predictions,
 )
 
+RECOMMENDED_ESTIMATOR = "dr"
+RECOMMENDED_PROPENSITY_SOURCE_WITH_LOGGED = "auto"
+RECOMMENDED_PROPENSITY_SOURCE_FALLBACK = "estimated"
+RECOMMENDED_CROSSFIT_ESTIMATORS = frozenset({"dm", "dr", "sndr", "switch_dr"})
+
 
 @dataclass(frozen=True)
 class PolicyValueResult:
@@ -47,6 +52,12 @@ class PolicyComparisonSummary:
     inference_warnings: tuple[str, ...] = field(default_factory=tuple)
     diagnostics: PolicyDiagnostics | None = None
     notes: tuple[str, ...] = field(default_factory=tuple)
+    info_notes: tuple[str, ...] = field(default_factory=tuple)
+    diagnostic_warnings: tuple[str, ...] = field(default_factory=tuple)
+    trust_notes: tuple[str, ...] = field(default_factory=tuple)
+    trust_level: str = "ok"
+    recommendation: Optional[str] = None
+    recommended_defaults: dict[str, object] = field(default_factory=dict)
     propensity_source: Optional[str] = None
     propensity_column: Optional[str] = None
     nuisance_diagnostics: Optional[NuisanceDiagnostics] = None
@@ -60,7 +71,15 @@ class PolicyComparisonSummary:
             "Delta": self.delta,
             "diagnostics": self.diagnostics.to_dict() if self.diagnostics is not None else {},
             "notes": list(self.notes),
+            "info_notes": list(self.info_notes),
+            "diagnostic_warnings": list(self.diagnostic_warnings),
+            "trust_notes": list(self.trust_notes),
+            "trust_level": self.trust_level,
         }
+        if self.recommendation is not None:
+            out["recommendation"] = self.recommendation
+        if self.recommended_defaults:
+            out["recommended_defaults"] = self.recommended_defaults
         if self.v_a_ci is not None:
             out["V_A_CI"] = self.v_a_ci
         if self.v_b_ci is not None:
@@ -88,6 +107,49 @@ class PolicyComparisonSummary:
         if self.nuisance_diagnostics is not None:
             out["nuisance_diagnostics"] = self.nuisance_diagnostics.to_dict()
         return out
+
+
+def _recommended_defaults(estimator: str) -> dict[str, object]:
+    return {
+        "preferred_estimator_general_use": RECOMMENDED_ESTIMATOR,
+        "preferred_propensity_mode_when_logged_available": RECOMMENDED_PROPENSITY_SOURCE_WITH_LOGGED,
+        "preferred_propensity_fallback_when_logged_unavailable": RECOMMENDED_PROPENSITY_SOURCE_FALLBACK,
+        "crossfit_recommended_for_estimator": estimator in RECOMMENDED_CROSSFIT_ESTIMATORS,
+    }
+
+
+def _build_trust_metadata(
+    *,
+    estimator: str,
+    use_crossfit: bool,
+    propensity_notes: tuple[str, ...],
+    diagnostic_warnings: tuple[str, ...],
+    inference_warnings: tuple[str, ...],
+) -> tuple[tuple[str, ...], tuple[str, ...], str, Optional[str]]:
+    info_notes = list(dict.fromkeys(propensity_notes))
+    trust_notes: list[str] = []
+    risk_score = 0
+    if diagnostic_warnings:
+        risk_score += len(diagnostic_warnings)
+        trust_notes.append("diagnostics_warnings_present_review_weight_overlap_metrics")
+    if inference_warnings:
+        risk_score += len(inference_warnings)
+        trust_notes.append("inference_warnings_present_ci_and_p_value_less_stable")
+    if estimator in RECOMMENDED_CROSSFIT_ESTIMATORS and not use_crossfit:
+        info_notes.append("crossfit_optional_recommendation_for_bias_hardening")
+    if any(w in {"low_ess_ratio", "heavy_weight_tail", "extreme_max_weight"} for w in diagnostic_warnings):
+        risk_score += 1
+        trust_notes.append("trust_elevated_concern_unstable_importance_weights")
+
+    trust_level = "ok"
+    recommendation = None
+    if risk_score >= 3:
+        trust_level = "elevated_concern"
+        recommendation = "Treat comparison as directional; improve overlap/weights or collect more representative logs."
+    elif risk_score > 0:
+        trust_level = "caution"
+        recommendation = "Review diagnostics and inference warnings before making product decisions."
+    return tuple(info_notes), tuple(trust_notes), trust_level, recommendation
 
 
 @dataclass(frozen=True)
@@ -263,6 +325,15 @@ def compare_policies(
     )
 
     if not with_ci:
+        diag_warnings = tuple(diag.warnings)
+        info_notes, trust_notes, trust_level, recommendation = _build_trust_metadata(
+            estimator=estimator,
+            use_crossfit=use_crossfit,
+            propensity_notes=propensity_notes,
+            diagnostic_warnings=diag_warnings,
+            inference_warnings=tuple(),
+        )
+        notes = tuple(dict.fromkeys(info_notes + diag_warnings + trust_notes))
         return PolicyComparisonSummary(
             estimator=estimator,
             target=target,
@@ -270,7 +341,13 @@ def compare_policies(
             v_b=float(v_b),
             delta=float(v_b - v_a),
             diagnostics=diag,
-            notes=propensity_notes + tuple(diag.warnings),
+            notes=notes,
+            info_notes=info_notes,
+            diagnostic_warnings=diag_warnings,
+            trust_notes=trust_notes,
+            trust_level=trust_level,
+            recommendation=recommendation,
+            recommended_defaults=_recommended_defaults(estimator),
             propensity_source=diag.propensity_source or resolved_source,
             propensity_column=diag.propensity_column or resolved_propensity_col,
             nuisance_diagnostics=nuisance_diag,
@@ -291,7 +368,15 @@ def compare_policies(
     inference_warnings = tuple(inf.get("inference_warnings", []))
     if fallback_triggered["value"]:
         inference_warnings = inference_warnings + (external_nuisance_bootstrap_warning,)
-    notes = propensity_notes + tuple(diag.warnings) + inference_warnings
+    diag_warnings = tuple(diag.warnings)
+    info_notes, trust_notes, trust_level, recommendation = _build_trust_metadata(
+        estimator=estimator,
+        use_crossfit=use_crossfit,
+        propensity_notes=propensity_notes,
+        diagnostic_warnings=diag_warnings,
+        inference_warnings=inference_warnings,
+    )
+    notes = tuple(dict.fromkeys(info_notes + diag_warnings + inference_warnings + trust_notes))
     return PolicyComparisonSummary(
         estimator=estimator,
         target=target,
@@ -310,6 +395,12 @@ def compare_policies(
         inference_warnings=inference_warnings,
         diagnostics=diag,
         notes=notes,
+        info_notes=info_notes,
+        diagnostic_warnings=diag_warnings,
+        trust_notes=trust_notes,
+        trust_level=trust_level,
+        recommendation=recommendation,
+        recommended_defaults=_recommended_defaults(estimator),
         propensity_source=diag.propensity_source or resolved_source,
         propensity_column=diag.propensity_column or resolved_propensity_col,
         nuisance_diagnostics=nuisance_diag,

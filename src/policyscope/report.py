@@ -48,22 +48,47 @@ def decision_summary(res: Dict, metric_name: str, business_threshold: float = 0.
     V_A = res["V_A"]
     V_B = res["V_B"]
     D = res["Delta"]
-    A_lo, A_hi = res["V_A_CI"]
-    B_lo, B_hi = res["V_B_CI"]
-    D_lo, D_hi = res["Delta_CI"]
+    alpha = float(res.get("alpha", res.get("inference_alpha", 0.05)))
+    ci_level = int(round((1.0 - alpha) * 100))
+    a_ci = res.get("V_A_CI")
+    b_ci = res.get("V_B_CI")
+    d_ci = res.get("Delta_CI")
 
     lines = []
     lines.append(f"Метрика: {metric_name}")
-    lines.append(f"V(A) = {V_A:.6f} (95% CI: {A_lo:.6f} .. {A_hi:.6f})")
-    lines.append(f"V(B) = {V_B:.6f} (95% CI: {B_lo:.6f} .. {B_hi:.6f})")
-    lines.append(f"Delta (B−A) = {D:.6f} (95% CI: {D_lo:.6f} .. {D_hi:.6f})")
-
-    if D_lo > business_threshold:
-        lines.append(f"Решение: модель B лучше A, поскольку нижняя граница CI превышает порог {business_threshold}.")
-    elif D_hi < -business_threshold:
-        lines.append(f"Решение: модель A лучше B, поскольку верхняя граница CI ниже -{business_threshold}.")
+    if a_ci is not None:
+        A_lo, A_hi = a_ci
+        lines.append(f"V(A) = {V_A:.6f} ({ci_level}% CI: {A_lo:.6f} .. {A_hi:.6f})")
     else:
-        lines.append("Решение: статистически значимого отличия не обнаружено или эффект слишком мал.")
+        lines.append(f"V(A) = {V_A:.6f} (CI недоступен)")
+    if b_ci is not None:
+        B_lo, B_hi = b_ci
+        lines.append(f"V(B) = {V_B:.6f} ({ci_level}% CI: {B_lo:.6f} .. {B_hi:.6f})")
+    else:
+        lines.append(f"V(B) = {V_B:.6f} (CI недоступен)")
+    if d_ci is not None:
+        D_lo, D_hi = d_ci
+        lines.append(f"Delta (B−A) = {D:.6f} ({ci_level}% CI: {D_lo:.6f} .. {D_hi:.6f})")
+    else:
+        lines.append(f"Delta (B−A) = {D:.6f} (CI недоступен)")
+
+    if d_ci is not None:
+        if D_lo > business_threshold:
+            lines.append(f"Решение: модель B лучше A, поскольку нижняя граница CI превышает порог {business_threshold}.")
+        elif D_hi < -business_threshold:
+            lines.append(f"Решение: модель A лучше B, поскольку верхняя граница CI ниже -{business_threshold}.")
+        else:
+            lines.append("Решение: статистически значимого отличия не обнаружено или эффект слишком мал.")
+    elif res.get("is_significant") is True:
+        lines.append("Решение: обнаружено статистически значимое отличие, но без CI интерпретация менее устойчива.")
+    else:
+        lines.append("Решение: CI не передан; итог следует трактовать как предварительный.")
+    recommendation = res.get("recommendation")
+    trust_level = res.get("trust_level")
+    if trust_level is not None:
+        lines.append(f"Уровень доверия к оценке: {trust_level}.")
+    if recommendation:
+        lines.append(f"Рекомендация: {recommendation}")
     return "\n".join(lines)
 
 
@@ -86,7 +111,10 @@ def analyze_logs(
 ) -> str:
     """Проверяет наличие ключевых столбцов в логах и формирует краткий отчёт."""
 
-    lines = ["Проверка входных данных для off-policy оценки:"]
+    lines = [
+        "Проверка входных данных для off-policy оценки:",
+        "- Рекомендуемый high-level путь: compare_policies(...) или OPEEvaluator(...).evaluate_summary(...).",
+    ]
 
     # базовые колонки
     missing_basic = [c for c in (user_id_col, action_a_col) if c not in df.columns]
@@ -106,28 +134,27 @@ def analyze_logs(
         try:
             a_B = policyB.action_argmax(df)
             share = float(np.mean(a_B == df.get(action_a_col, -1)))
-            lines.append(
-                f"- Replay: политика B совпадает с A в {share * 100:.1f}% случаев."
-            )
+            lines.append(f"- Replay overlap A/B: {share * 100:.1f}%.")
             if share < 0.1:
-                lines[-1] += " Требуется больше пересечений для надёжной оценки."
+                lines.append("- Replay: низкий overlap, оценка может быть шумной и зависимой от support логирующей политики.")
+            else:
+                lines.append("- Replay: интерпретируйте как диагностический baseline, а не как универсально несмещённую оценку.")
         except Exception:
-            lines.append(
-                "- Replay: не удалось вычислить пересечение действий A и B."
-            )
+            lines.append("- Replay: не удалось вычислить пересечение действий A и B.")
     else:
-        lines.append("- Replay: политика B не передана.")
+        lines.append("- Replay: политика B не передана; overlap-диагностика недоступна.")
 
-    # IPS / SNIPS
+    # Propensity source modes
     if propensity_col in df.columns:
-        lines.append(f"- IPS/SNIPS: колонка {propensity_col} найдена.")
+        lines.append(f"- Propensity: колонка {propensity_col} найдена; режим auto сможет использовать logged propensity path.")
+        lines.append("- Propensity: estimated path также доступен через propensity_source='estimated'.")
     else:
         lines.append(
-            "- IPS/SNIPS: propensities не найдены."
-            " Необходимо добавить колонку с π_A(a|x) или обучить модель пропенсити."
+            f"- Propensity: колонка {propensity_col} не найдена; режим auto перейдёт в estimated propensity path."
         )
+        lines.append("- Propensity: strict logged path требует валидную propensity_col.")
 
-    # DM
+    # Feature availability for DM/DR family
     if feature_cols is None:
         feature_candidates = ["age", "income", "risk", "loyal"]
         feats = [c for c in feature_candidates if c in df.columns]
@@ -136,19 +163,11 @@ def analyze_logs(
     if feats:
         lines.append(f"- DM: доступны признаки {feats}, ок.")
     else:
-        lines.append("- DM: признаки не найдены.")
+        lines.append("- DM/DR-family: признаки не найдены; модели nuisance могут быть нестабильны.")
 
-    # DR
-    if propensity_col not in df.columns:
-        if feats:
-            lines.append(
-                "- DR: пропенсити отсутствуют, но можно применить DM;"
-                " метод DR будет смещён, если модель неточна."
-            )
-        else:
-            lines.append("- DR: нет пропенсити и признаков, метод неприменим.")
-    else:
-        lines.append("- DR: можно применить, пропенсити присутствуют.")
+    if feats:
+        lines.append("- DR/SNDR/Switch-DR: применимы через официальный comparison API; проверяйте CI/p-value и diagnostics вместе.")
+        lines.append("- Cross-fit: опционально рекомендуется для дополнительного bias-hardening в DR-family режимах.")
 
     for line in lines:
         logging.info(line)
