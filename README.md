@@ -1,20 +1,27 @@
-# Policyscope: офлайн‑оценка политик рекомендаций (переиспользуемый пайплайн)
+# Policyscope
 
-`Policyscope` помогает оценивать новую политику **B** по логам текущей политики **A** без онлайн A/B‑теста.
+Библиотека для **contextual bandit off-policy evaluation (OPE)**: оценка target/candidate policy **B** по логам behavior/logging policy **A**.
 
-Главное в текущей версии:
-- API стал **универсальным**: названия колонок (`a_A`, `a_B`, целевая метрика, `user_id`) и список признаков задаются аргументами.
-- Туториал стал короче и практичнее: есть компактный сценарий «взял свой DataFrame → получил все OPE‑оценки».
-- Bootstrap-инференс считается через единый API: `OPEEvaluator(...).evaluate(method)` или `estimate_value_with_ci(..., method=...)`.
-- Для сравнения A vs B в `OPEEvaluator` доступны `Delta_CI` и честная significance metadata:
-  - `p_value` (двусторонний centered paired bootstrap test для `H0: delta = 0`),
-  - `is_significant` + `significance_rule="centered_paired_bootstrap_p_value_lt_alpha"`.
-- В comparison output также включены trust/stability diagnostics (`ESS`, `ESS/N`, replay overlap, weight tails, clip/switch share, warning flags).
-- В high-level summary добавлены explicit recommended-default metadata и структурированные note-группы:
-  - `recommended_defaults` (рекомендуемые режимы по умолчанию),
-  - `info_notes`, `diagnostic_warnings`, `inference_warnings`, `trust_notes`,
-  - итоговый `trust_level` и короткая `recommendation`.
-- Все основные OPE‑оценщики снабжены подробными docstring на русском (аргументы, возвращаемые значения, интерпретация).
+Главные выходы сравнения: `V_A`, `V_B`, `Delta = V_B - V_A`, CI/p-value и diagnostics/trust metadata (включая `weight_ess_ratio`, replay overlap и warning flags).
+
+## Быстрый навигатор
+
+### 1) Я хочу запустить на своих данных
+- **Quickstart notebook (основной путь)**: `examples/quickstart_own_data_ru.ipynb`
+- Покрывает: `BanditSchema`, `LoggedBanditDataset`, `compare_policies(...)`, режимы propensity (logged/estimated/auto), чтение `Delta`, CI, `p_value`, diagnostics и `trust_level`.
+
+### 2) Я хочу понять, как методы ведут себя относительно oracle
+- **Synthetic comparison notebook**: `examples/compare_estimators_vs_oracle_ru.ipynb`
+- Покрывает сравнение Replay / IPS / SNIPS / DM / DR / SNDR / Switch-DR в контролируемых synthetic-сценариях.
+
+### 3) Я хочу понять, когда OPE результату можно (и нельзя) доверять
+- **Практический интерпретационный гайд (RU)**: `docs/how_to_interpret_ope_outputs_ru.md`
+
+### 4) Я хочу понять устройство библиотеки
+- **Architecture doc**: `docs/architecture.md`
+
+### 5) Я хочу системно валидировать поведение оценщиков
+- **Validation harness doc**: `docs/validation_harness.md`
 
 ## Установка
 
@@ -29,296 +36,48 @@ pip install -e .
 
 - Replay
 - IPS / SNIPS
-- DM (Direct Method)
+- DM
 - DR / SNDR / Switch-DR
-- Кластерный и обычный бутстрэп (если `cluster_col=None`)
-- Data contract слой для логов contextual bandit (`BanditSchema`, `LoggedBanditDataset`)
-
-## Архитектура
-
-- Краткое описание архитектурных границ и доменной модели: `docs/architecture.md`.
-- Библиотека разделяет слои: `data contract -> point estimators -> inference -> diagnostics/reporting`.
-
-## Experimental: cross-fitting-ready nuisance layer
-
-Добавлена инкрементальная поддержка внешних nuisance-предсказаний (без ломки текущего workflow):
-- структуры `BehaviorPredictions`, `OutcomePredictions`, `CrossFitNuisanceBundle`;
-- fold utilities: `make_kfold_indices`, `generate_oof_behavior_predictions`, `generate_oof_outcome_predictions`;
-- `compare_policies(..., nuisance_bundle=...)` может принять заранее посчитанные nuisance-предсказания (опционально);
-- `compare_policies(..., use_crossfit=True)` строит OOF nuisance автоматически через внутренний helper;
-- покрываемые методы в cross-fitting mode: `ips/snips` (behavior nuisance), `dm/dr/sndr/switch_dr` (behavior + outcome nuisance).
-- migration note (bootstrap safety): при `with_ci=True` внешние nuisance-предсказания используются только для исходного point-estimate на оригинальных строках; в bootstrap-ресемплах они **не переиспользуются** (fallback к внутреннему fit), а факт fallback отражается в `inference_warnings` и `notes`.
-
-По умолчанию ничего менять не нужно: внутренний fit nuisance остаётся стандартным поведением.
-Важно: это практичный approximation-слой для снижения bias риска, а не гарантия «идеального» инференса.
-
-### Propensity source modes (official path)
-
-Для взвешенных OPE-методов (`ips`, `snips`, `dr`, `sndr`, `switch_dr`) доступен явный режим источника propensity:
-- `propensity_source="auto"` (по умолчанию): использовать logged propensity column, если валидная колонка доступна; иначе fallback на оценку `pi_hat`;
-- `propensity_source="logged"`: использовать только logged propensity column (если колонка отсутствует/невалидна — ошибка);
-- `propensity_source="estimated"`: всегда оценивать propensity через behavior model.
-
-В `compare_policies(...).to_dict()` и `diagnostics` возвращаются `propensity_source` и `propensity_column` (если применимо).
-
-### Recommended defaults (safe-by-default guidance)
-
-Официальные defaults для общего сценария:
-- preferred estimator: `dr`;
-- если logged propensity доступна и валидна: `propensity_source="auto"` (предпочтёт logged path);
-- если logged propensity недоступна/невалидна: fallback в estimated propensity path;
-- `use_crossfit=True` обычно рекомендуется для `dm/dr/sndr/switch_dr`, когда важна bias-hardening устойчивость;
-- `trust_level in {"caution", "elevated_concern"}` — сигнал поднимать требования к интерпретации результата.
-
-### Nuisance model diagnostics
-
-В high-level summary добавлен блок `nuisance_diagnostics`:
-- behavior-side quality для estimated propensity path (например multiclass log-loss, top-1 agreement);
-- outcome-side quality (`accept`: log-loss/Brier/AUC, `cltv`: RMSE/MAE/R²);
-- маркеры `applicable` и `is_out_of_fold`, чтобы явно различать logged path и cross-fit OOF path.
-
-Важно: diagnostics по весам/overlap и diagnostics качества nuisance дополняют друг друга; ни один из блоков сам по себе не гарантирует корректность оценки на реальных данных.
+- Bootstrap inference (clustered и non-clustered)
+- Data contract слой: `BanditSchema`, `LoggedBanditDataset`
 
 
-## Simulation validation harness (synthetic oracle checks)
+Инференс significance в `compare_policies` опирается на **centered paired bootstrap** p-value для проверки **H0: Delta = 0**.
 
-Для систематической валидации поведения estimators добавлен `policyscope.validation.run_simulation_validation(...)`.
-
-Он запускает повторяемые synthetic-эксперименты и возвращает:
-- run-level таблицу с oracle vs estimate (`V_B`, `delta`), bias/error, coverage/significance, diagnostics;
-- aggregate таблицу по `mode x estimator` (mean bias, std, RMSE, coverage, significance rate).
-
-Документация: `docs/validation_harness.md`.
-
-## Минимальный формат данных
-
-Нужны:
-- колонка действия, зафиксированного в логах A (по умолчанию `a_A`),
-- целевая метрика (например, `accept`, `cltv` или ваша `reward`),
-- признаки (`feature_cols`),
-- опционально `user_id` для кластерного бутстрэпа.
-
-Дополнительно можно хранить `a_B` (действие рекомендованное B) для диагностики и таблиц в туториале.
-
-## Универсальный пример на своих данных
+## Официальный high-level entrypoint
 
 ```python
-import numpy as np
-import pandas as pd
-from policyscope.data import BanditSchema, LoggedBanditDataset
-from policyscope.estimators import (
-    train_pi_hat,
-    pi_hat_predict,
-    train_mu_hat,
-    prepare_piB_taken,
-    take_action_probabilities,
-    ips_value,
-    snips_value,
-    dm_value,
-    dr_value,
-)
-from policyscope.ci import estimate_value_with_ci
-from policyscope.evaluator import OPEEvaluator
-from policyscope.comparison import compare_policies, compare_policies_multi_target
+from policyscope.comparison import compare_policies
 
-# ваш датасет
-# df columns example:
-# user_col, logged_action, candidate_action, reward, f1, f2, f3
-
-df = pd.read_csv("my_logs.csv")
-
-# (Опционально, но рекомендуется) валидируем контракт логов до OPE
-schema = BanditSchema(
-    action_col="logged_action",
-    reward_col="reward",
-    feature_cols=["f1", "f2", "f3"],
-    cluster_col="user_col",
-)
-logged = LoggedBanditDataset(df=df, schema=schema)
-df = logged.df
-
-feature_cols = ["f1", "f2", "f3"]
-action_col = "logged_action"
-target_col = "reward"
-
-policyB = ...  # объект с методом action_probs(df) -> (n, k)
-
-# 1) Вероятность того, что B выбрала бы логированное действие
-piB_taken = prepare_piB_taken(df, policyB, action_col=action_col)
-
-# 2) Оценка модели поведения A: pA(a|x)
-pi_model = train_pi_hat(df, feature_cols=feature_cols, action_col=action_col)
-pA_all = pi_hat_predict(pi_model, df)
-pA_taken = take_action_probabilities(
-    pA_all,
-    df[action_col].values,
-    action_space=pi_model.classes_,
-)
-
-# 3) Модель исхода mu(x, a)
-mu = train_mu_hat(df, target=target_col, feature_cols=feature_cols, action_col=action_col)
-
-# 4) OPE-оценки
-v_ips, ess_ips, clip_ips = ips_value(df, piB_taken, pA_taken, target=target_col, action_col=action_col)
-v_snips, ess_snips, clip_snips = snips_value(df, piB_taken, pA_taken, target=target_col, action_col=action_col)
-v_dm = dm_value(df, policyB, mu, target=target_col)
-v_dr, ess_dr, clip_dr = dr_value(df, policyB, mu, pA_taken, target=target_col, action_col=action_col)
-
-# 5) Единый слой CI для любого встроенного OPE-эстиматора
-ips_ci = estimate_value_with_ci(
-    df,
-    policyB,
-    method="ips",          # "snips", "dm", "dr", "sndr", "switch_dr", ...
-    target=target_col,
-    action_col=action_col,
-    feature_cols=feature_cols,
-    cluster_col="user_col",
-    n_boot=300,
-)
-print(ips_ci)
-
-# 6) Единый абстрактный объект (CI включён по умолчанию)
-evaluator = OPEEvaluator(
-    df,
-    policyB,
-    target=target_col,
-    feature_cols=feature_cols,
-    action_col=action_col,
-    cluster_col="user_col",
-    n_boot=300,
-    alpha=0.05,
-    weight_clip=20.0,
-)
-dr_report = evaluator.evaluate("dr")  # также: "ips", "snips", "dm", "sndr", "switch_dr", ...
-print(dr_report)  # V_A, V_B, Delta + CI + significance metadata
-
-# 7) Официальный orchestration entrypoint (структурированный результат)
 summary = compare_policies(
-    df,
+    logged_dataset,
     policyB,
     estimator="dr",
-    target=target_col,
-    feature_cols=feature_cols,
-    action_col=action_col,
-    cluster_col="user_col",
-    n_boot=300,
-    alpha=0.05,
+    target="accept",
+    propensity_source="auto",
 )
+
 print(summary.to_dict())
-
-# 8) Multi-target режим: повторная scalar-оценка для каждого target
-multi = compare_policies_multi_target(
-    df,
-    policyB,
-    estimator="dr",
-    targets=["reward", "reward_2"],
-    feature_cols=feature_cols,
-    action_col=action_col,
-    cluster_col="user_col",
-    n_boot=300,
-    alpha=0.05,
-)
-print(multi.to_dict())
 ```
 
-## Теория и ссылки на статьи (RU)
+## Про experiment runners (скрипты)
 
-### Нотация в формулах
+Файлы в `examples/`:
+- `run_synthetic_experiment.py`
+- `run_validation_experiment.py`
 
-Используем единый набор обозначений: `π_A`, `π_B`, `μ̂`, `V̂`, `Δ`, `τ`, `w̄`.
+Это **script-like experiment runners** для пакетных прогонов/артефактов, а не основной обучающий путь. Для обучения и first-run используйте notebook'и из раздела «Быстрый навигатор».
 
-Добавлен отдельный подробный гайд по математической интуиции и строгим источникам для всех реализованных OPE-методов:
+## Legacy tutorial
 
-- `docs/ope_methods_math_guide_ru.md`
-
-В гайде разобраны: On-policy baseline, Replay, IPS, SNIPS, DM, DR, SNDR, Switch-DR и методы построения доверительных интервалов (CI).
-Формулы в гайде приведены в plain-text формате (без обязательной LaTeX-разметки), чтобы корректно читаться и на GitHub, и в локальных Markdown-просмотрщиках.
-Отдельно поясняется важный момент: bootstrap CI — это не отдельный OPE-эстиматор, а inference-обёртка поверх выбранного оценщика.
-Гайд также содержит отдельное сравнение: какие CI-подходы используются в OPE-литературе/практике и что именно реализовано в текущем репозитории.
-В API есть единый CI-слой `estimate_value_with_ci` для встроенных OPE-эстиматоров и совместимая низкоуровневая обёртка `estimator_with_bootstrap_ci` для произвольных `estimator_fn`.
-Нотация в формулах гайда унифицирована: `π_A`, `π_B`, `μ̂`, `V̂`, `Δ`, `τ`, `w̄` — для более читаемого и однозначного математического стиля.
-Также добавлен `OPEEvaluator` — единый абстрактный объект, который унифицированно вызывает эстиматоры по имени и возвращает CI по умолчанию.
-
-## Постоянные инструкции для AI-агентов
-
-В репозиторий добавлены постоянные инструкции для агентных инструментов (в т.ч. Codex):
-
-- `AGENTS.md` — каноничный набор постоянных правил и workflow для Codex/агентов.
+- `examples/tutorial.ipynb` сохранён как расширенный legacy walkthrough.
+- Для новых пользователей рекомендуется начинать с `examples/quickstart_own_data_ru.ipynb`.
 
 
-## Быстрый синтетический запуск
+Для multi-metric сценариев используйте `compare_policies_multi_target` (повторная scalar-оценка по нескольким target).
 
-```bash
-python examples/run_synthetic_experiment.py --n_users 50000 --seed 42 --policyA epsilon_greedy --policyB softmax
-```
 
-Скрипт сохраняет артефакты в `artifacts/`.
+Propensity source modes: `auto`, `logged`, `estimated` (для взвешенных estimators).
 
-## Туториал
 
-- Основной notebook: `examples/tutorial.ipynb`
-- В нём показано:
-  1. генерация синтетики,
-  2. валидация data contract через `BanditSchema` / `LoggedBanditDataset`,
-  3. вывод oracle ground-truth (`V_A`, `V_B`, `Delta`) сразу после генерации,
-  4. явная остановка использования синтезатора после шага ground-truth (anti data-leakage),
-  5. проверка логов и таблица фич + `a_A` + `a_B`,
-  6. компактный расчёт всех метрик,
-  7. унифицированный вызов через `OPEEvaluator` (переключается только имя эстиматора),
-  8. bootstrap CI и significance metadata для **всех** методов через `OPEEvaluator`,
-  9. итоговая таблица сравнения методов с колонками CI (`V_B_CI`, `Delta_CI`) для каждого метода.
-
-Для переноса на реальный кейс в туториале отдельно показано, какие 3-4 строки обычно нужно заменить (`df/logs`, `feature_cols`, `action_col`, `target_col`).
-
-После `OPEEvaluator(...).evaluate("dr")` вы получите словарь:
-
-```python
-{
-  'V_A': ...,
-  'V_A_CI': (..., ...),
-  'V_B': ...,
-  'V_B_CI': (..., ...),
-  'Delta': ...,
-  'Delta_CI': (..., ...),
-  'p_value': ...,
-  'is_significant': ...,
-  'significance_rule': 'centered_paired_bootstrap_p_value_lt_alpha',
-  'n_boot': ...,
-  'inference_method': ...,
-  'diagnostics': {
-    'weight_ess': ...,
-    'weight_ess_ratio': ...,
-    'replay_overlap': ...,
-    'weight_max': ...,
-    'weight_p95': ...,
-    'weight_p99': ...,
-    'clip_share': ...,
-    'switch_share': ...,
-    'warnings': [...],
-  }
-}
-```
-
-Интерпретация: статистическая значимость (`p_value`, `is_significant`) **не достаточна сама по себе** — проверяйте diagnostics на поддержку/стабильность весов.
-
-## Проверки перед коммитом
-
-```bash
-python -m flake8 src tests
-pytest
-jupyter nbconvert --to notebook --execute examples/tutorial.ipynb --inplace
-```
-
-## Migration note (inference)
-
-- Публичные имена функций не менялись.
-- В выходах сравнения политик (`paired_bootstrap_ci`, `OPEEvaluator.evaluate`) добавлены поля:
-  - `is_significant` и `significance_rule`,
-  - `p_value` (centered paired bootstrap approximation для `H0: delta = 0`),
-  - `inference_method`,
-  - `alpha`.
-- Дополнительно для API-polish:
-  - структурированные note/warning-поля: `info_notes`, `diagnostic_warnings`, `inference_warnings`, `trust_notes`;
-  - `trust_level` + `recommendation`;
-  - `recommended_defaults` для явного safe-by-default workflow.
-  - Поле `notes` сохранено для backward compatibility как объединение структурированных групп.
+Nuisance model diagnostics возвращаются в summary (`nuisance_diagnostics`) и дополняют overlap/weight diagnostics.
