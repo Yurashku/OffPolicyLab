@@ -1,5 +1,9 @@
+import numpy as np
+import pandas as pd
+
 from policyscope.comparison import compare_policies
-from policyscope.nuisance import fit_crossfit_nuisance_bundle, resolve_behavior_predictions
+from policyscope.nuisance import BehaviorPredictions, fit_crossfit_nuisance_bundle, resolve_behavior_predictions
+from policyscope.nuisance_diagnostics import _compute_behavior_diagnostics
 from policyscope.policies import make_policy
 from policyscope.synthetic import SynthConfig, SyntheticRecommenderEnv
 
@@ -87,3 +91,52 @@ def test_outcome_diagnostics_binary_and_crossfit_oof_flag():
     assert nd.outcome.is_binary_target
     assert nd.outcome.is_out_of_fold
     assert nd.outcome.log_loss is not None
+
+
+def test_behavior_top1_diagnostics_support_string_action_labels():
+    df = pd.DataFrame({"action_logged": ["email", "sms", "email", "push"]})
+    behavior = BehaviorPredictions(
+        pA_taken=np.array([0.9, 0.8, 0.85, 0.7]),
+        piB_taken=np.array([0.2, 0.2, 0.2, 0.2]),
+        pA_all=np.array(
+            [
+                [0.9, 0.1, 0.0],
+                [0.1, 0.8, 0.1],
+                [0.7, 0.2, 0.1],
+                [0.1, 0.2, 0.7],
+            ]
+        ),
+        propensity_source="estimated",
+        action_space=("email", "sms", "push"),
+    )
+    diag = _compute_behavior_diagnostics(
+        df,
+        action_col="action_logged",
+        behavior_predictions=behavior,
+        propensity_source="estimated",
+    )
+    assert diag.top1_accuracy == 1.0
+
+
+def test_behavior_top1_diagnostics_int_labels_without_action_space_still_work():
+    df = pd.DataFrame({"a_A": [0, 1, 2, 1]})
+    behavior = BehaviorPredictions(
+        pA_taken=np.array([0.9, 0.8, 0.85, 0.7]),
+        piB_taken=np.array([0.2, 0.2, 0.2, 0.2]),
+        pA_all=np.array(
+            [
+                [0.9, 0.1, 0.0],
+                [0.1, 0.8, 0.1],
+                [0.1, 0.2, 0.7],
+                [0.2, 0.6, 0.2],
+            ]
+        ),
+        propensity_source="estimated",
+    )
+    diag = _compute_behavior_diagnostics(
+        df,
+        action_col="a_A",
+        behavior_predictions=behavior,
+        propensity_source="estimated",
+    )
+    assert diag.top1_accuracy == 1.0

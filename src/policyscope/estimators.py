@@ -14,7 +14,7 @@ policyscope.estimators
 from __future__ import annotations
 
 import logging
-from typing import Literal, Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -44,6 +44,17 @@ __all__ = [
     "estimator_with_bootstrap_ci",
     "ate_from_values",
 ]
+
+def _is_binary_target_values(values: np.ndarray) -> bool:
+    """Проверяет, что массив содержит только бинарные значения 0/1."""
+    uniq = np.unique(values)
+    if uniq.size != 2:
+        return False
+    try:
+        uniqf = uniq.astype(float)
+    except (TypeError, ValueError):
+        return False
+    return bool(np.array_equal(np.sort(uniqf), np.array([0.0, 1.0])))
 
 
 def infer_feature_columns(
@@ -238,20 +249,20 @@ def take_action_probabilities(
 
 def train_mu_hat(
     df: pd.DataFrame,
-    target: Literal["accept", "cltv"] = "accept",
+    target: str = "accept",
     *,
     feature_cols: Optional[Sequence[str]] = None,
     action_col: str = "a_A",
 ):
     """Обучает модель исхода ``mu(x, a)=E[r|x,a]``.
 
-    Для бинарной цели ``accept`` используется ``LogisticRegression`` и далее
+    Для бинарной цели (значения 0/1) используется ``LogisticRegression`` и далее
     возвращаются вероятности класса 1. Для непрерывной цели (например ``cltv``)
     используется ``LinearRegression``.
 
     Args:
         df: Логи с признаками, действием и целевой колонкой.
-        target: Название целевой метрики (``accept`` или ``cltv``).
+        target: Название целевой метрики.
         feature_cols: Колонки признаков. Если ``None``, выбираются автоматически.
         action_col: Колонка с действием в логах.
 
@@ -261,12 +272,14 @@ def train_mu_hat(
     """
     X, _, oh, scaler, feats = make_design(df, feature_cols=feature_cols, action_col=action_col)
     y = df[target].to_numpy()
-    model = LogisticRegression(max_iter=1000) if target == "accept" else LinearRegression()
+    is_binary_target = _is_binary_target_values(y)
+    model = LogisticRegression(max_iter=1000) if is_binary_target else LinearRegression()
     model.fit(X, y)
     model._oh = oh  # type: ignore[attr-defined]
     model._scaler = scaler  # type: ignore[attr-defined]
     model._feature_cols = feats  # type: ignore[attr-defined]
     model._action_col = action_col  # type: ignore[attr-defined]
+    model._is_binary_target = is_binary_target  # type: ignore[attr-defined]
     return model
 
 
@@ -277,7 +290,7 @@ def mu_hat_predict(model, df: pd.DataFrame, action: np.ndarray, target: str) -> 
         model: Модель из ``train_mu_hat``.
         df: DataFrame с признаками.
         action: Одно действие (скаляр) или массив действий длины ``n``.
-        target: Тип цели. Для ``accept`` вернёт вероятности, иначе регрессионный прогноз.
+        target: Тип цели. Для бинарной цели вернёт вероятности, иначе регрессионный прогноз.
 
     Returns:
         Вектор предсказаний ``mu(x, a)`` длины ``n``.
@@ -289,7 +302,8 @@ def mu_hat_predict(model, df: pd.DataFrame, action: np.ndarray, target: str) -> 
         act = np.asarray(action, dtype=object).reshape(-1, 1)
     A_oh = model._oh.transform(act)
     X = np.hstack([X_num, A_oh])
-    if target == "accept":
+    is_binary_target = bool(getattr(model, "_is_binary_target", target == "accept"))
+    if is_binary_target:
         return np.clip(model.predict_proba(X)[:, 1], 1e-6, 1 - 1e-6)
     return model.predict(X)
 

@@ -31,6 +31,7 @@ class BehaviorPredictions:
     fold_index: Optional[np.ndarray] = None
     propensity_source: Optional[str] = None
     propensity_col: Optional[str] = None
+    action_space: Optional[tuple[object, ...]] = None
 
 
 @dataclass(frozen=True)
@@ -113,6 +114,7 @@ def fit_behavior_nuisance_bundle(
         piB_taken=piB_taken,
         pA_all=pA_all,
         propensity_source="estimated",
+        action_space=tuple(pi_model.classes_),
     )
     return BehaviorNuisanceBundle(pi_model=pi_model, predictions=preds)
 
