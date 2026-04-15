@@ -9,6 +9,7 @@
 ### 1) Я хочу запустить на своих данных
 - **Quickstart notebook (основной путь)**: `examples/quickstart_own_data_ru.ipynb`
 - Покрывает: `BanditSchema`, `LoggedBanditDataset`, `compare_policies(...)`, режимы propensity (logged/estimated/auto), чтение `Delta`, CI, `p_value`, diagnostics и `trust_level`.
+- Если у вас уже есть колонка `action_B`, используйте `policyscope.policy_adapters.DeterministicActionColumnPolicy`.
 
 ### 2) Я хочу понять, как методы ведут себя относительно oracle
 - **Synthetic comparison notebook**: `examples/compare_estimators_vs_oracle_ru.ipynb`
