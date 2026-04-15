@@ -8,8 +8,6 @@ Policyscope package.
 Версия пакета определяется переменной `__version__`.
 """
 
-import logging
-
 from policyscope.comparison import (
     RECOMMENDED_CROSSFIT_ESTIMATORS,
     RECOMMENDED_ESTIMATOR,
@@ -17,7 +15,6 @@ from policyscope.comparison import (
     RECOMMENDED_PROPENSITY_SOURCE_WITH_LOGGED,
 )
 
-logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 __all__ = [
     "__version__",

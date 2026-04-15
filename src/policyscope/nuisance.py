@@ -31,6 +31,7 @@ class BehaviorPredictions:
     fold_index: Optional[np.ndarray] = None
     propensity_source: Optional[str] = None
     propensity_col: Optional[str] = None
+    action_space: Optional[tuple[object, ...]] = None
 
 
 @dataclass(frozen=True)
@@ -98,9 +99,19 @@ def fit_behavior_nuisance_bundle(
     feature_cols: Optional[Sequence[str]] = None,
     action_col: str = "a_A",
     action_space: Optional[Sequence] = None,
+    target_col: Optional[str] = None,
+    propensity_col: Optional[str] = None,
+    cluster_col: Optional[str] = None,
 ) -> BehaviorNuisanceBundle:
     """Fit behavior model and derive reusable propensity vectors."""
-    pi_model = train_pi_hat(df, feature_cols=feature_cols, action_col=action_col)
+    pi_model = train_pi_hat(
+        df,
+        feature_cols=feature_cols,
+        action_col=action_col,
+        target_col=target_col,
+        propensity_col=propensity_col,
+        cluster_col=cluster_col,
+    )
     pA_all = pi_hat_predict(pi_model, df)
     pA_taken = _take_logged_probabilities_with_safe_default(
         pA_all,
@@ -113,6 +124,7 @@ def fit_behavior_nuisance_bundle(
         piB_taken=piB_taken,
         pA_all=pA_all,
         propensity_source="estimated",
+        action_space=tuple(pi_model.classes_),
     )
     return BehaviorNuisanceBundle(pi_model=pi_model, predictions=preds)
 
@@ -153,6 +165,9 @@ def generate_oof_behavior_predictions(
     feature_cols: Optional[Sequence[str]] = None,
     action_col: str = "a_A",
     action_space: Optional[Sequence] = None,
+    target_col: Optional[str] = None,
+    propensity_col: Optional[str] = None,
+    cluster_col: Optional[str] = None,
 ) -> BehaviorPredictions:
     """Generate out-of-fold behavior predictions aligned to the original rows."""
     n = len(df)
@@ -166,7 +181,14 @@ def generate_oof_behavior_predictions(
         train_df = df.iloc[train_idx]
         holdout_df = df.iloc[holdout_idx]
 
-        pi_model = train_pi_hat(train_df, feature_cols=feature_cols, action_col=action_col)
+        pi_model = train_pi_hat(
+            train_df,
+            feature_cols=feature_cols,
+            action_col=action_col,
+            target_col=target_col,
+            propensity_col=propensity_col,
+            cluster_col=cluster_col,
+        )
         pA_all_holdout = pi_hat_predict(pi_model, holdout_df)
         pA_taken_holdout = _take_logged_probabilities_with_safe_default(
             pA_all_holdout,
@@ -274,6 +296,8 @@ def resolve_behavior_predictions(
     feature_cols: Optional[Sequence[str]] = None,
     action_col: str = "a_A",
     action_space: Optional[Sequence] = None,
+    target_col: Optional[str] = None,
+    cluster_col: Optional[str] = None,
 ) -> tuple[BehaviorPredictions, str, Optional[str], tuple[str, ...]]:
     """Resolve behavior predictions from logged or estimated propensity path."""
     notes: list[str] = []
@@ -296,6 +320,9 @@ def resolve_behavior_predictions(
             feature_cols=feature_cols,
             action_col=action_col,
             action_space=action_space,
+            target_col=target_col,
+            propensity_col=propensity_col,
+            cluster_col=cluster_col,
         )
         notes.append("estimated_propensity_from_behavior_model")
         return bundle.predictions, "estimated", None, tuple(notes)
@@ -323,6 +350,9 @@ def resolve_behavior_predictions(
         feature_cols=feature_cols,
         action_col=action_col,
         action_space=action_space,
+        target_col=target_col,
+        propensity_col=propensity_col,
+        cluster_col=cluster_col,
     )
     return bundle.predictions, "estimated", None, tuple(notes)
 
@@ -360,6 +390,8 @@ def fit_crossfit_nuisance_bundle(
     feature_cols: Optional[Sequence[str]] = None,
     action_col: str = "a_A",
     action_space: Optional[Sequence] = None,
+    propensity_col: Optional[str] = None,
+    cluster_col: Optional[str] = None,
 ) -> CrossFitNuisanceBundle:
     """Fit OOF nuisance predictions and return a single structured bundle."""
     probsB = policyB.action_probs(df)
@@ -372,6 +404,9 @@ def fit_crossfit_nuisance_bundle(
         feature_cols=feature_cols,
         action_col=action_col,
         action_space=action_space,
+        target_col=target,
+        propensity_col=propensity_col,
+        cluster_col=cluster_col,
     )
     outcome = generate_oof_outcome_predictions(
         df,

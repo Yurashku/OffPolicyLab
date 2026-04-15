@@ -132,6 +132,7 @@ def _estimate_point(
                 feature_cols=feature_cols,
                 action_col=action_col,
                 action_space=action_space,
+                target_col=target,
             )
         validate_behavior_predictions(behavior_preds, len(df))
         pA_taken = behavior_preds.pA_taken

@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import brier_score_loss, log_loss, mean_absolute_error, mean_squared_error, r2_score, roc_auc_score
 
-from policyscope.estimators import mu_hat_predict
+from policyscope.estimators import _is_binary_target_values, mu_hat_predict
 from policyscope.nuisance import (
     BehaviorPredictions,
     CrossFitNuisanceBundle,
@@ -104,7 +104,13 @@ def _compute_behavior_diagnostics(
     ll = float(-np.mean(np.log(p_taken)))
     top1 = None
     if behavior_predictions.pA_all is not None:
-        top1 = float(np.mean(np.argmax(behavior_predictions.pA_all, axis=1) == y))
+        top_idx = np.argmax(behavior_predictions.pA_all, axis=1)
+        if behavior_predictions.action_space is not None and len(behavior_predictions.action_space) == behavior_predictions.pA_all.shape[1]:
+            labels = np.asarray(behavior_predictions.action_space, dtype=object)
+            top_pred = labels[top_idx]
+            top1 = float(np.mean(top_pred == y))
+        else:
+            top1 = float(np.mean(top_idx == y))
     warnings: list[str] = []
     if ll > 1.2:
         warnings.append("weak_behavior_log_loss")
@@ -141,7 +147,7 @@ def _compute_outcome_diagnostics(
         )
 
     y = df[target].to_numpy()
-    is_binary = np.array_equal(np.unique(y), np.array([0, 1])) or np.array_equal(np.unique(y), np.array([0.0, 1.0]))
+    is_binary = _is_binary_target_values(y)
 
     if outcome_predictions is None:
         mu_bundle = fit_outcome_nuisance_bundle(df, target=target, feature_cols=feature_cols, action_col=action_col)

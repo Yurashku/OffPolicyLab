@@ -7,7 +7,7 @@
 - `IPS/SNIPS/DM/DR/SNDR/Switch-DR/Replay` — это **оценщики значения политики** (point estimators).
 - `Bootstrap CI` — это **не отдельный OPE-оценщик**, а процедура статистического вывода (inference), которая строит доверительный интервал вокруг выбранного оценщика.
 
-Иными словами, CI-слой в API (`OPEEvaluator` / `estimate_value_with_ci`) — это обёртка «оценщик + интервал», а не «ещё один метод оценки политики» наравне с IPS/DR.
+Иными словами, CI-слой в API (`compare_policies(...)` / `estimate_value_with_ci`) — это обёртка «оценщик + интервал», а не «ещё один метод оценки политики» наравне с IPS/DR.
 
 ---
 
@@ -269,7 +269,8 @@ CI = V̂ ± z_(1-α/2) · SÊ
 
 Сейчас в репозитории реализовано:
 
-- `OPEEvaluator` — единый объект для вызова эстиматоров по имени с CI по умолчанию (`evaluate("dr")`, `evaluate("ips")`, ...).  
+- `compare_policies(...)` — официальный high-level orchestration path для сравнения `V_A`, `V_B`, `Delta` с CI/diagnostics/trust metadata.  
+- `OPEEvaluator` — convenience wrapper для запуска оценщиков по имени с CI по умолчанию (`evaluate("dr")`, `evaluate("ips")`, ...).  
 - `estimate_value_with_ci` — единый CI-слой для встроенных OPE-оценщиков (`ips/snips/dm/dr/sndr/switch_dr/...`).  
 - `estimator_with_bootstrap_ci` — низкоуровневая универсальная обёртка «любой estimator_fn + bootstrap CI».  
 - `cluster_bootstrap_ci` — **percentile bootstrap CI** (по строкам или кластерам).  
@@ -286,4 +287,4 @@ CI = V̂ ± z_(1-α/2) · SÊ
 Практический вывод: текущая реализация покрывает рабочий baseline (percentile cluster bootstrap), но до «полного набора индустриальных/академических CI-подходов» ещё есть пространство для расширения.
 
 
-Рекомендация по API: держать один high-level интерфейс (`OPEEvaluator`) и единый CI-слой (`estimate_value_with_ci`), без дублирующих DR-specific shortcut-функций.
+Рекомендация по API: использовать `compare_policies(...)` как основной high-level интерфейс, `OPEEvaluator` — как convenience wrapper, и единый CI-слой (`estimate_value_with_ci`) без дублирующих DR-specific shortcut-функций.

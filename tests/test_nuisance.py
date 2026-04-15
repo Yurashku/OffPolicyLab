@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 
 from policyscope.nuisance import (
     CrossFitNuisanceBundle,
@@ -143,3 +144,25 @@ def test_fit_crossfit_nuisance_bundle_contains_behavior_and_outcome():
     assert bundle.behavior.is_out_of_fold
     assert bundle.outcome.is_out_of_fold
     assert bundle.outcome.mu_by_action is not None
+
+
+def test_behavior_auto_feature_inference_excludes_target_and_meta_columns():
+    logs, policyB = _logs_and_policy(76)
+    logs = logs.rename(columns={"accept": "reward"})
+    logs["propensity_custom"] = 0.25
+    logs["candidate_action"] = pd.Series(logs["a_A"]).shift(1).fillna(0).astype(int)
+
+    bundle = fit_behavior_nuisance_bundle(
+        logs,
+        policyB,
+        feature_cols=None,
+        action_col="a_A",
+        target_col="reward",
+        propensity_col="propensity_custom",
+        cluster_col="user_id",
+    )
+    inferred = list(bundle.pi_model._feature_cols)  # type: ignore[attr-defined]
+    assert "reward" not in inferred
+    assert "a_A" not in inferred
+    assert "propensity_custom" not in inferred
+    assert "user_id" not in inferred

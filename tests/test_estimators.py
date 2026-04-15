@@ -15,6 +15,7 @@ from policyscope.estimators import (
     switch_dr_value,
     estimator_with_bootstrap_ci,
     take_action_probabilities,
+    mu_hat_predict,
 )
 from policyscope.ci import estimate_value_with_ci
 from policyscope.evaluator import OPEEvaluator
@@ -216,3 +217,73 @@ def test_structured_inference_result_shape():
     assert res.inference.significance_rule == "centered_paired_bootstrap_p_value_lt_alpha"
     out = res.to_dict()
     assert "Delta_CI" in out and "is_significant" in out
+
+
+def test_train_mu_hat_uses_classification_for_binary_non_accept_target():
+    cfg = SynthConfig(n_users=120, horizon_days=20, seed=77)
+    env = SyntheticRecommenderEnv(cfg)
+    X = env.sample_users()
+    policyA = make_policy("epsilon_greedy", epsilon=0.1, seed=77)
+    logs = env.simulate_logs_A(policyA, X).rename(columns={"accept": "reward_flag"})
+
+    mu = train_mu_hat(
+        logs,
+        target="reward_flag",
+        feature_cols=["loyal", "age", "risk", "income"],
+        action_col="a_A",
+    )
+    pred = mu_hat_predict(mu, logs, logs["a_A"].to_numpy(), target="reward_flag")
+    assert bool(getattr(mu, "_is_binary_target", False))
+    assert np.all((pred >= 0.0) & (pred <= 1.0))
+
+
+def test_train_mu_hat_uses_regression_for_continuous_target():
+    cfg = SynthConfig(n_users=120, horizon_days=20, seed=78)
+    env = SyntheticRecommenderEnv(cfg)
+    X = env.sample_users()
+    policyA = make_policy("epsilon_greedy", epsilon=0.1, seed=78)
+    logs = env.simulate_logs_A(policyA, X).rename(columns={"cltv": "custom_value"})
+
+    mu = train_mu_hat(
+        logs,
+        target="custom_value",
+        feature_cols=["loyal", "age", "risk", "income"],
+        action_col="a_A",
+    )
+    pred = mu_hat_predict(mu, logs, logs["a_A"].to_numpy(), target="custom_value")
+    assert not bool(getattr(mu, "_is_binary_target", True))
+    assert pred.shape == (len(logs),)
+
+
+def test_train_mu_hat_auto_feature_inference_excludes_custom_binary_target():
+    cfg = SynthConfig(n_users=120, horizon_days=20, seed=79)
+    env = SyntheticRecommenderEnv(cfg)
+    X = env.sample_users()
+    policyA = make_policy("epsilon_greedy", epsilon=0.1, seed=79)
+    logs = env.simulate_logs_A(policyA, X).rename(columns={"accept": "reward"})
+
+    mu = train_mu_hat(logs, target="reward", feature_cols=None, action_col="a_A")
+    assert "reward" not in list(mu._feature_cols)  # type: ignore[attr-defined]
+
+
+def test_train_mu_hat_auto_feature_inference_excludes_custom_continuous_target():
+    cfg = SynthConfig(n_users=120, horizon_days=20, seed=80)
+    env = SyntheticRecommenderEnv(cfg)
+    X = env.sample_users()
+    policyA = make_policy("epsilon_greedy", epsilon=0.1, seed=80)
+    logs = env.simulate_logs_A(policyA, X).rename(columns={"cltv": "revenue"})
+
+    mu = train_mu_hat(logs, target="revenue", feature_cols=None, action_col="a_A")
+    assert "revenue" not in list(mu._feature_cols)  # type: ignore[attr-defined]
+
+
+def test_train_mu_hat_explicit_feature_cols_are_preserved():
+    cfg = SynthConfig(n_users=120, horizon_days=20, seed=81)
+    env = SyntheticRecommenderEnv(cfg)
+    X = env.sample_users()
+    policyA = make_policy("epsilon_greedy", epsilon=0.1, seed=81)
+    logs = env.simulate_logs_A(policyA, X).rename(columns={"accept": "reward"})
+
+    explicit = ["loyal", "age"]
+    mu = train_mu_hat(logs, target="reward", feature_cols=explicit, action_col="a_A")
+    assert list(mu._feature_cols) == explicit  # type: ignore[attr-defined]

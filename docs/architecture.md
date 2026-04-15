@@ -5,43 +5,35 @@
 `Policyscope` — библиотека для **off-policy evaluation** в постановке contextual bandit:
 
 - есть логи поведения политики `A` (behavior/logging policy),
-- нужно оценить значение политики `B` (target/candidate policy),
-- целевые артефакты: `policy value`, `delta = value(B) - value(A)`, CI, significance metadata (`p-value` или CI-based decision) и диагностика.
+- оценивается политика `B` (target/candidate policy),
+- основные выходы: `policy value`, `delta = value(B) - value(A)`, CI, significance metadata и diagnostics.
 
-## 2) Доменная модель (phase 1)
-
-### 2.1 Core entities
+## 2) Доменная модель
 
 1. **BanditSchema**  
-   Декларирует контракт колонок: действие, награда, признаки, опционально propensity и cluster id.
+   Контракт колонок: action, reward, features, опционально propensity и cluster id.
 
 2. **LoggedBanditDataset**  
-   Лёгкая обёртка над `DataFrame` + `BanditSchema` с базовой валидацией и удобными accessors.
+   Обёртка над `DataFrame` + `BanditSchema` с валидацией и accessors.
 
 3. **Nuisance models**  
-   Модели `pi_hat` и `mu_hat`, используемые point-estimators (IPS/SNIPS/DR/...).
-   Внутренний reusable bundle-слой собран в `policyscope.nuisance`, чтобы orchestration/inference/diagnostics не дублировали сборку nuisance-объектов.
+   `pi_hat` и `mu_hat`, используемые в weighted/model-based OPE-оценках.
 
 4. **Point estimators**  
-   Оценщики значения политики (`replay`, `ips`, `snips`, `dm`, `dr`, `sndr`, `switch_dr`).
+   `replay`, `ips`, `snips`, `dm`, `dr`, `sndr`, `switch_dr`.
 
 5. **Inference**  
-   Слой построения CI и significance metadata (percentile bootstrap CI + centered paired bootstrap test), независимо от point-estimator.
+   CI + significance metadata (включая centered paired bootstrap для проверки `delta=0`).
 
 6. **Diagnostics**  
-   ESS, clipping/share, устойчивость и sanity-check метрики.
-   Диагностика обязательна рядом с инференсом, но не заменяет CI/p-value.
-   Базовые trust/stability diagnostics включают: `ESS`, `ESS/N`, replay overlap, max/p95/p99 importance weights, clip/switch share и простые warning rules.
+   Replay overlap, ESS/ESS ratio, weight tails, clip/switch share и warning flags.
 
-7. **Comparison result**  
-   Сводка по `V_A`, `V_B`, `delta`, CI, `p-value` и диагностике для сравнения A vs B.
-   Официальный orchestration path: `policyscope.comparison.compare_policies(...)`.
-   В summary дополнительно нормализованы группы заметок/предупреждений:
-   `info_notes`, `diagnostic_warnings`, `inference_warnings`, `trust_notes`, и агрегированный `trust_level`.
+7. **Comparison summary**  
+   Официальный orchestration path: `compare_policies(...)`.
+   Summary включает `V_A`, `V_B`, `Delta`, CI/p-value, diagnostics, `trust_level`, notes/warnings.
 
-8. **Scalar target metric (core abstraction)**  
-   Базовая единица оценки — одна скалярная метрика награды. Несколько метрик поддерживаются как повторные запуски оценки для разных target-колонок, а не как native vector-valued reward.
-   Для multi-target используется `compare_policies_multi_target(...)` как mapping из target -> single-target summary.
+8. **Scalar target abstraction**  
+   Базовая единица — одна скалярная reward-метрика. Multi-target режим реализуется как повторные scalar-оценки через `compare_policies_multi_target(...)`.
 
 ## 3) Границы слоёв
 
@@ -49,102 +41,73 @@
 Data contract -> Point estimation -> Inference -> Diagnostics/Reporting
 ```
 
-- **Data contract** не знает про алгоритмы оценивания.
-- **Point estimation** не должен дублировать логику инференса.
-- **Inference** принимает estimator как функцию/метод и не меняет математику estimator.
-- **Reporting** собирает результаты в человекочитаемую форму.
+- **Data contract**: схема и валидация входов.
+- **Point estimation**: оценка `V_B` выбранным estimator.
+- **Inference**: uncertainty/significance поверх point-estimator.
+- **Diagnostics/Reporting**: устойчивость и интерпретация результата.
 
-## 4) Статус текущей миграции
+## 4) Официальный high-level orchestration path
 
-В этой фазе добавлен новый data contract слой (`BanditSchema`, `LoggedBanditDataset`) без массового переписывания estimator-кода.
+`compare_policies(...)` — основной entrypoint для сравнения A vs B на пользовательских логах.
 
-Это означает:
+Практический default-путь:
+- estimator: `dr`,
+- propensity mode: `propensity_source="auto"`,
+- вместе читать `Delta`, CI/p-value, diagnostics и trust metadata.
 
-- текущие estimator API остаются рабочими;
-- новый слой готов для поэтапного внедрения в точках входа;
-- математическая реализация существующих estimators не меняется.
+## 5) Propensity source modes (logged vs estimated propensity)
 
-## 5) Migration strategy (без API-ломки)
+Для weighted methods (`ips`, `snips`, `dr`, `sndr`, `switch_dr`) поддерживаются first-class режимы:
 
-1. Добавить data contract и покрыть тестами.
-2. Использовать data contract на внешних границах (tutorial/examples/high-level API).
-3. Постепенно адаптировать внутренние вызовы estimator/inference к новому объекту.
-4. Удалять дублирующие проверки только после стабилизации миграции.
+- `propensity_source="auto"`: использовать logged propensity при валидной колонке, иначе fallback на estimated behavior model;
+- `propensity_source="logged"`: строго использовать logged propensity column;
+- `propensity_source="estimated"`: всегда использовать оценённую behavior model.
 
-## 6) Non-goals этой фазы
+Эти режимы отражаются в structured output (`propensity_source`, `propensity_column`, warnings/notes).
 
-- Полное переписывание всех estimators на новый объект данных.
-- Изменение математических формул/предположений существующих OPE методов.
-- Большая переработка публичного API за один релиз.
+## 6) Nuisance-model quality diagnostics
 
+Помимо overlap/weight diagnostics, summary содержит **nuisance-model quality diagnostics**:
 
-## 7) Cross-fitting readiness (incremental)
+- behavior-side качество для estimated propensity path;
+- outcome-side качество для DM/DR-family;
+- OOF/provenance markers для cross-fit path.
 
-Почему это важно:
-- при использовании одних и тех же данных для обучения nuisance-моделей (`pi_hat`, `mu_hat`) и финальной оценки возможен дополнительный finite-sample bias;
-- out-of-fold предсказания уменьшают этот эффект и подготавливают почву для более строгой cross-fitting схемы.
+Диагностика — это support-сигналы для интерпретации, а не доказательство корректности результата.
 
-Что добавлено сейчас:
-- явные структуры предсказаний: `BehaviorPredictions`, `OutcomePredictions`;
-- контейнер `CrossFitNuisanceBundle` для fold-aware nuisance артефактов;
-- утилиты первого уровня: `make_kfold_indices`, `generate_oof_behavior_predictions`, `generate_oof_outcome_predictions`;
-- cross-fitting mode применим для `dm`, `dr`, `sndr`, `switch_dr` (outcome + behavior nuisance) и для `ips`, `snips` (behavior nuisance).
-- основной orchestration path (`compare_policies`) поддерживает `use_crossfit=True` и/или внешний `nuisance_bundle` (additive path, без обязательного использования).
+## 7) Cross-fitting support и ограничения
 
-Что пока не делаем (future work):
-- полноценный cross-fitting rollout для каждого estimator и bootstrap-веток;
-- жёсткий API-контракт для всех вариантов multi-fold обучения;
-- изменение математики уже реализованных OPE-оценщиков.
+Поддерживаются:
+- `BehaviorPredictions`, `OutcomePredictions`, `CrossFitNuisanceBundle`;
+- OOF utilities для behavior/outcome nuisance;
+- `compare_policies(..., use_crossfit=True)` и передача внешнего `nuisance_bundle`.
 
-Краткая migration note:
-- текущий дефолтный workflow не меняется (внутренний fit nuisance работает как раньше);
-- при необходимости можно заранее посчитать OOF nuisance-предсказания и передать их в `compare_policies(..., nuisance_bundle=...)`;
-- на текущем этапе это интегрировано инкрементально и совместимо с существующим API.
+Текущее ограничение:
+- внешний nuisance не переиспользуется в bootstrap-resamples при несовпадении row identity/order (безопасный fallback на внутренний fit).
 
+## 8) Validation harness: роль и ограничения
 
-## 8) Logged vs estimated propensity (first-class modes)
+`policyscope.validation.run_simulation_validation(...)` — инструмент synthetic-regression проверки estimator behavior против oracle.
 
-Для weighted-estimators (`ips`, `snips`, `dr`, `sndr`, `switch_dr`) источник propensity теперь является явной частью orchestration:
-- `propensity_source="auto"` — по умолчанию: сначала пытаемся взять logged propensity column, затем fallback к estimated `pi_hat`;
-- `propensity_source="logged"` — строгий режим только по колонке логов;
-- `propensity_source="estimated"` — всегда через behavior model.
+Что даёт:
+- run-level и aggregate метрики (bias/error/coverage/significance/diagnostics).
 
-Это важно методологически: logged и estimated propensity отражают разные допущения о качестве данных и модели поведения, поэтому provenance отражается в structured outputs и diagnostics.
+Что не даёт:
+- не является универсальной гарантией корректности для произвольных real-world логов.
 
-Migration note: текущий API совместим назад (по умолчанию `auto`), а дополнительная metadata (`propensity_source`, `propensity_column`, fallback notes) доступна без изменения формул estimators.
+## 9) Recommended defaults и trust metadata
 
+High-level summary содержит guidance metadata:
+- preferred estimator: `dr`,
+- preferred propensity mode with logged column: `auto`,
+- fallback: `estimated`,
+- trust metadata: `diagnostic_warnings`, `inference_warnings`, `trust_notes`, `trust_level`.
 
-## 9) Simulation validation harness
+Важно: trust metadata — эвристическая поддержка принятия решений, а не замена A/B-тестам.
 
-Добавлен lightweight слой `policyscope.validation` для повторяемой проверки поведения estimators на synthetic-среде с oracle-значениями.
+## 10) Non-goals (scope boundaries)
 
-Harness поддерживает сравнение методов (`replay`, `ips`, `snips`, `dm`, `dr`, `sndr`, `switch_dr`) в разных режимах (logged/estimated propensity, cross-fit mode, clipping settings) и возвращает структурированные run-level и aggregate метрики (bias/std/RMSE, coverage, significance rate, diagnostic summaries).
-
-Назначение — внутренний validation/regression инструмент для развития библиотеки. Это не универсальная гарантия корректности на произвольных real-world логах.
-
-Подробнее: `docs/validation_harness.md`.
-
-
-## 10) Nuisance-model quality diagnostics
-
-Дополнительно к overlap/weight diagnostics введён отдельный слой `nuisance diagnostics` для качества моделей `pi_hat` и `mu_hat`.
-
-Зачем: хорошие ESS/overlap сами по себе не гарантируют, что nuisance-модели адекватны. Поэтому в structured outputs добавляются behavior/outcome quality метрики и warning rules.
-
-Ключевые принципы:
-- logged propensity path: behavior model quality помечается как not applicable;
-- estimated propensity path: behavior quality считается и добавляется в summary;
-- cross-fit mode: diagnostics отмечаются как OOF (fold-aware provenance).
-
-Этот слой не меняет формулы estimators и служит для trust-quality интерпретации результатов.
-
-
-## 11) Recommended defaults (API-polish)
-
-Чтобы high-level API был opinionated и безопаснее по умолчанию, в comparison metadata фиксируются рекомендации:
-- `preferred_estimator_general_use = "dr"`;
-- `preferred_propensity_mode_when_logged_available = "auto"`;
-- `preferred_propensity_fallback_when_logged_unavailable = "estimated"`;
-- рекомендация cross-fit для `dm/dr/sndr/switch_dr`.
-
-Это guidance-слой и metadata; математика реализованных estimators не меняется.
+`Policyscope` не пытается:
+- автоматически заменять продуктовые A/B-эксперименты одним OPE-числом;
+- выдавать «гарантии безопасности» только по CI/diagnostics;
+- менять математическую сущность существующих estimators без явного запроса.
