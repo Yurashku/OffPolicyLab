@@ -68,16 +68,15 @@ print(summary.to_dict())
 
 Это **script-like experiment runners** для пакетных прогонов/артефактов, а не основной обучающий путь. Для обучения и first-run используйте notebook'и из раздела «Быстрый навигатор».
 
-## Legacy tutorial
+## Дополнительный tutorial
 
-- `examples/tutorial.ipynb` сохранён как расширенный legacy walkthrough.
-- Для новых пользователей рекомендуется начинать с `examples/quickstart_own_data_ru.ipynb`.
-
+- `examples/tutorial.ipynb` сохранён как расширенный walkthrough.
+- Для первого запуска рекомендуется `examples/quickstart_own_data_ru.ipynb`.
 
 Для multi-metric сценариев используйте `compare_policies_multi_target` (повторная scalar-оценка по нескольким target).
 
-
 Propensity source modes: `auto`, `logged`, `estimated` (для взвешенных estimators).
 
-
 Nuisance model diagnostics возвращаются в summary (`nuisance_diagnostics`) и дополняют overlap/weight diagnostics.
+
+Важно: OPE + diagnostics/trust metadata помогают с offline screening, но не являются автоматической заменой A/B-теста для high-stakes решений.
