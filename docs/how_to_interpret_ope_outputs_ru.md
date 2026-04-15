@@ -97,3 +97,31 @@ OPE обычно **недостаточно** как единственный а
 5. есть план онлайн-верификации для high-stakes решений?
 
 Если ответы 3–5 отрицательные — усиливайте осторожность и не заменяйте A/B-тест одним OPE.
+
+
+## 9) Откуда берётся propensity_A
+
+`propensity_A` — это вероятность, что logging policy A выбрала именно логированное действие:
+
+`propensity_A = pi_A(action_A | x)`
+
+Практически:
+- лучший случай: propensity логируется из randomized/exploration-политики A;
+- если A почти детерминированная, «истинная» propensity часто недоступна или вырожденная;
+- тогда используется estimated propensity (через behavior model), но это более слабый путь и обычно понижает уровень доверия;
+- неверная propensity может смещать IPS/DR-family оценки.
+
+Вывод: при выборе между logged и estimated propensity всегда фиксируйте provenance и читайте результат вместе с diagnostics/trust metadata.
+
+
+## 10) Как diagnostics помогают выбрать estimator
+
+Короткая карта сигналов:
+- **low replay overlap**: Replay становится слабым как оценка, используйте его скорее как support-baseline.
+- **low ESS ratio**: IPS/SNIPS/DR-family менее стабильны, усиливайте осторожность к `Delta` и CI.
+- **heavy weight tails**: проверяйте robustness через SNIPS/SNDR/Switch-DR и sensitivity к clip/tau.
+- **weak behavior model diagnostics**: estimated propensity path может быть ненадёжным, доверие к weighted methods ниже.
+- **weak outcome model diagnostics**: DM/DR-family чувствительны к ошибкам `mu_hat`, сравнивайте с IPS/SNIPS и смотрите расхождения.
+- **заметное disagreement между estimators**: трактуйте результат как directional evidence и повышайте планку для продуктового решения (часто нужен A/B).
+
+Практический старт остаётся тем же: DR как baseline + обязательная проверка diagnostics/trust metadata.
