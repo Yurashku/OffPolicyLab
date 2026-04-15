@@ -127,6 +127,7 @@ def compute_policy_diagnostics(
                 feature_cols=feature_cols,
                 action_col=action_col,
                 action_space=action_space,
+                target_col=target,
             )
         else:
             source_notes = ()

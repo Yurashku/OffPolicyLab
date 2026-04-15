@@ -228,6 +228,8 @@ def compare_policies(
             feature_cols=feature_cols,
             action_col=action_col,
             action_space=action_space,
+            propensity_col=propensity_col,
+            cluster_col=cluster_col,
         )
 
     resolved_behavior = None
@@ -245,6 +247,8 @@ def compare_policies(
             feature_cols=feature_cols,
             action_col=action_col,
             action_space=action_space,
+            target_col=target,
+            cluster_col=cluster_col,
         )
 
     external_nuisance_bootstrap_warning = (

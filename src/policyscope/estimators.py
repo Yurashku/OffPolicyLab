@@ -77,6 +77,8 @@ def infer_feature_columns(
 
 def _default_feature_cols(df: pd.DataFrame) -> list[str]:
     preferred = ["loyal", "age", "risk", "income"]
+    # NOTE: preferred columns are used only when they are present.
+    # Target/action/meta columns are filtered in _resolve_feature_cols.
     cols = [c for c in preferred if c in df.columns]
     if cols:
         return cols
@@ -86,8 +88,26 @@ def _default_feature_cols(df: pd.DataFrame) -> list[str]:
     )
 
 
-def _resolve_feature_cols(df: pd.DataFrame, feature_cols: Optional[Sequence[str]]) -> list[str]:
-    cols = list(feature_cols) if feature_cols is not None else _default_feature_cols(df)
+def _resolve_feature_cols(
+    df: pd.DataFrame,
+    feature_cols: Optional[Sequence[str]],
+    *,
+    target_col: Optional[str] = None,
+    action_col: str = "a_A",
+    propensity_col: Optional[str] = None,
+    cluster_col: Optional[str] = None,
+) -> list[str]:
+    if feature_cols is not None:
+        cols = list(feature_cols)
+    else:
+        excluded = {action_col, target_col, propensity_col, cluster_col, "a_B", "propensity_A", "user_id"}
+        excluded = {c for c in excluded if c is not None}
+        # Heuristic: helper action columns often follow `a_*` naming.
+        excluded.update(c for c in df.columns if c.startswith("a_") and c != action_col)
+        cols = infer_feature_columns(df, exclude=sorted(excluded))
+        preferred = [c for c in _default_feature_cols(df) if c not in excluded]
+        if preferred:
+            cols = preferred
     missing = [c for c in cols if c not in df.columns]
     if missing:
         raise ValueError(f"Missing feature columns: {missing}")
@@ -148,6 +168,9 @@ def make_design(
     *,
     feature_cols: Optional[Sequence[str]] = None,
     action_col: str = "a_A",
+    target_col: Optional[str] = None,
+    propensity_col: Optional[str] = None,
+    cluster_col: Optional[str] = None,
 ) -> Tuple[np.ndarray, np.ndarray, OneHotEncoder, StandardScaler, list[str]]:
     """Собирает дизайн-матрицу для обучения модели исхода ``mu(x, a)``.
 
@@ -166,7 +189,14 @@ def make_design(
         - ``scaler`` — обученный ``StandardScaler`` для числовых фич,
         - ``feats`` — фактический список использованных признаков.
     """
-    feats = _resolve_feature_cols(df, feature_cols)
+    feats = _resolve_feature_cols(
+        df,
+        feature_cols,
+        target_col=target_col,
+        action_col=action_col,
+        propensity_col=propensity_col,
+        cluster_col=cluster_col,
+    )
     X_num, scaler = _build_scaler(df, feats)
     a = df[action_col].to_numpy().reshape(-1, 1)
     oh = _fit_one_hot(a)
@@ -180,6 +210,9 @@ def train_pi_hat(
     *,
     feature_cols: Optional[Sequence[str]] = None,
     action_col: str = "a_A",
+    target_col: Optional[str] = None,
+    propensity_col: Optional[str] = None,
+    cluster_col: Optional[str] = None,
 ):
     """Обучает оценку behavior policy: ``pi_A(a|x)``.
 
@@ -196,7 +229,14 @@ def train_pi_hat(
         Обученная sklearn-модель классификации с сохранёнными служебными
         атрибутами: ``_scaler``, ``_feature_cols``, ``_action_col``.
     """
-    feats = _resolve_feature_cols(df, feature_cols)
+    feats = _resolve_feature_cols(
+        df,
+        feature_cols,
+        target_col=target_col,
+        action_col=action_col,
+        propensity_col=propensity_col,
+        cluster_col=cluster_col,
+    )
     X_num, scaler = _build_scaler(df, feats)
     y = df[action_col].to_numpy()
     model = LogisticRegression(max_iter=1000)
@@ -270,7 +310,12 @@ def train_mu_hat(
         Обученная модель исхода с сохранёнными служебными атрибутами:
         ``_oh``, ``_scaler``, ``_feature_cols``, ``_action_col``.
     """
-    X, _, oh, scaler, feats = make_design(df, feature_cols=feature_cols, action_col=action_col)
+    X, _, oh, scaler, feats = make_design(
+        df,
+        feature_cols=feature_cols,
+        action_col=action_col,
+        target_col=target,
+    )
     y = df[target].to_numpy()
     is_binary_target = _is_binary_target_values(y)
     model = LogisticRegression(max_iter=1000) if is_binary_target else LinearRegression()
