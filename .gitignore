@@ -19,6 +19,7 @@ venv/
 env/
 ENV/
 .env
+poetry.lock
 
 # ==============================================================================
 # Testing & coverage (pytest, coverage)
