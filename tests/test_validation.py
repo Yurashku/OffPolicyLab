@@ -9,7 +9,9 @@ def test_validation_harness_runs_end_to_end_small():
         estimators=("ips", "dr"),
         modes=(
             ValidationMode(name="estimated", propensity_source="estimated"),
-            ValidationMode(name="logged", propensity_source="logged", propensity_col="propensity_A"),
+            ValidationMode(
+                name="logged", propensity_source="logged", propensity_col="propensity_A"
+            ),
         ),
     )
     assert len(res.run_rows) == 2 * 2 * 2

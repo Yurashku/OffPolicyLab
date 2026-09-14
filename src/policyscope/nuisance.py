@@ -70,8 +70,6 @@ class OutcomeNuisanceBundle:
     mu_model: object
 
 
-
-
 def _take_logged_probabilities_with_safe_default(
     probs: np.ndarray,
     actions: np.ndarray,
@@ -86,6 +84,7 @@ def _take_logged_probabilities_with_safe_default(
         if idx is not None:
             out[i] = probs[i, idx]
     return out
+
 
 def _validate_length(name: str, values: np.ndarray, n: int) -> None:
     if len(values) != n:
@@ -118,7 +117,9 @@ def fit_behavior_nuisance_bundle(
         df[action_col].to_numpy(),
         action_space=pi_model.classes_,
     )
-    piB_taken = prepare_piB_taken(df, policyB, action_col=action_col, action_space=action_space)
+    piB_taken = prepare_piB_taken(
+        df, policyB, action_col=action_col, action_space=action_space
+    )
     preds = BehaviorPredictions(
         pA_taken=pA_taken,
         piB_taken=piB_taken,
@@ -137,7 +138,9 @@ def fit_outcome_nuisance_bundle(
     action_col: str = "a_A",
 ) -> OutcomeNuisanceBundle:
     """Fit reusable outcome model for DM/DR-family estimators."""
-    mu_model = train_mu_hat(df, target=target, feature_cols=feature_cols, action_col=action_col)
+    mu_model = train_mu_hat(
+        df, target=target, feature_cols=feature_cols, action_col=action_col
+    )
     return OutcomeNuisanceBundle(mu_model=mu_model)
 
 
@@ -239,12 +242,21 @@ def generate_oof_outcome_predictions(
     ):
         train_df = df.iloc[train_idx]
         holdout_df = df.iloc[holdout_idx]
-        mu_model = train_mu_hat(train_df, target=target, feature_cols=feature_cols, action_col=action_col)
+        mu_model = train_mu_hat(
+            train_df, target=target, feature_cols=feature_cols, action_col=action_col
+        )
 
         logged_actions = holdout_df[action_col].to_numpy()
-        mu_logged[holdout_idx] = mu_hat_predict(mu_model, holdout_df, logged_actions, target)
+        mu_logged[holdout_idx] = mu_hat_predict(
+            mu_model, holdout_df, logged_actions, target
+        )
         for action, values in mu_by_action.items():
-            values[holdout_idx] = mu_hat_predict(mu_model, holdout_df, np.full(len(holdout_df), action, dtype=object), target)
+            values[holdout_idx] = mu_hat_predict(
+                mu_model,
+                holdout_df,
+                np.full(len(holdout_df), action, dtype=object),
+                target,
+            )
         fold_index[holdout_idx] = fold_id
 
     return OutcomePredictions(
@@ -254,8 +266,6 @@ def generate_oof_outcome_predictions(
         is_out_of_fold=True,
         fold_index=fold_index,
     )
-
-
 
 
 def _validate_logged_propensity_values(p: pd.Series, col: str) -> None:
@@ -278,7 +288,9 @@ def build_logged_behavior_predictions(
     if propensity_col not in df.columns:
         raise ValueError(f"Missing propensity column: {propensity_col}")
     _validate_logged_propensity_values(df[propensity_col], propensity_col)
-    piB_taken = prepare_piB_taken(df, policyB, action_col=action_col, action_space=action_space)
+    piB_taken = prepare_piB_taken(
+        df, policyB, action_col=action_col, action_space=action_space
+    )
     return BehaviorPredictions(
         pA_taken=df[propensity_col].to_numpy(dtype=float),
         piB_taken=piB_taken,
@@ -356,6 +368,7 @@ def resolve_behavior_predictions(
     )
     return bundle.predictions, "estimated", None, tuple(notes)
 
+
 def validate_behavior_predictions(predictions: BehaviorPredictions, n: int) -> None:
     """Validate that precomputed behavior predictions align with current data length."""
     _validate_length("pA_taken", predictions.pA_taken, n)
@@ -373,7 +386,9 @@ def validate_outcome_predictions(
     if required_actions is None:
         return
     if predictions.mu_by_action is None:
-        raise ValueError("Outcome predictions must include mu_by_action for DM/DR-family cross-fitting path")
+        raise ValueError(
+            "Outcome predictions must include mu_by_action for DM/DR-family cross-fitting path"
+        )
     for action in required_actions:
         if action not in predictions.mu_by_action:
             raise ValueError(f"Outcome predictions missing action {action}")
@@ -395,7 +410,9 @@ def fit_crossfit_nuisance_bundle(
 ) -> CrossFitNuisanceBundle:
     """Fit OOF nuisance predictions and return a single structured bundle."""
     probsB = policyB.action_probs(df)
-    actions = list(action_space) if action_space is not None else list(range(probsB.shape[1]))
+    actions = (
+        list(action_space) if action_space is not None else list(range(probsB.shape[1]))
+    )
     behavior = generate_oof_behavior_predictions(
         df,
         policyB,

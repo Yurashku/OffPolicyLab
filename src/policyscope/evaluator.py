@@ -51,7 +51,9 @@ class OPEEvaluator:
         """
         return self.evaluate_summary(estimator=estimator, with_ci=with_ci).to_dict()
 
-    def evaluate_summary(self, estimator: str = "dr", *, with_ci: bool = True) -> PolicyComparisonSummary:
+    def evaluate_summary(
+        self, estimator: str = "dr", *, with_ci: bool = True
+    ) -> PolicyComparisonSummary:
         """Официальный структурированный результат сравнения A vs B."""
         return compare_policies(
             self.df,

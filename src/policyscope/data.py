@@ -54,7 +54,10 @@ class LoggedBanditDataset:
             if invalid:
                 raise ValueError("Propensity values must be in the interval (0, 1].")
 
-        if self.schema.cluster_col is not None and self.schema.cluster_col not in self.df.columns:
+        if (
+            self.schema.cluster_col is not None
+            and self.schema.cluster_col not in self.df.columns
+        ):
             raise ValueError(f"Missing cluster column: {self.schema.cluster_col}")
 
     @property

@@ -15,7 +15,10 @@ from __future__ import annotations
 import pandas as pd
 from typing import Callable, Tuple, Dict, Any
 
-from policyscope.inference import infer_policy_comparison_bootstrap, infer_scalar_bootstrap
+from policyscope.inference import (
+    infer_policy_comparison_bootstrap,
+    infer_scalar_bootstrap,
+)
 
 __all__ = ["cluster_bootstrap_ci", "paired_bootstrap_ci"]
 

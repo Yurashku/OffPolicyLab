@@ -66,7 +66,9 @@ class ValidationExperimentResult:
         }
 
 
-def _attach_logged_propensity(logs: pd.DataFrame, policyA, *, action_col: str, propensity_col: str) -> pd.DataFrame:
+def _attach_logged_propensity(
+    logs: pd.DataFrame, policyA, *, action_col: str, propensity_col: str
+) -> pd.DataFrame:
     probsA = policyA.action_probs(logs)
     actions = logs[action_col].to_numpy().astype(int)
     logged = probsA[np.arange(len(logs)), actions]
@@ -106,7 +108,15 @@ def _aggregate_rows(rows: list[ValidationRunRow]) -> pd.DataFrame:
 def run_simulation_validation(
     *,
     target: str = "accept",
-    estimators: Sequence[str] = ("replay", "ips", "snips", "dm", "dr", "sndr", "switch_dr"),
+    estimators: Sequence[str] = (
+        "replay",
+        "ips",
+        "snips",
+        "dm",
+        "dr",
+        "sndr",
+        "switch_dr",
+    ),
     modes: Optional[Sequence[ValidationMode]] = None,
     n_runs: int = 5,
     n_users: int = 400,
@@ -124,21 +134,35 @@ def run_simulation_validation(
     if modes is None:
         modes = (
             ValidationMode(name="estimated_default", propensity_source="estimated"),
-            ValidationMode(name="logged_auto", propensity_source="auto", propensity_col="propensity_A"),
-            ValidationMode(name="crossfit_estimated", propensity_source="estimated", use_crossfit=True),
-            ValidationMode(name="estimated_clip20", propensity_source="estimated", weight_clip=20.0),
+            ValidationMode(
+                name="logged_auto",
+                propensity_source="auto",
+                propensity_col="propensity_A",
+            ),
+            ValidationMode(
+                name="crossfit_estimated",
+                propensity_source="estimated",
+                use_crossfit=True,
+            ),
+            ValidationMode(
+                name="estimated_clip20", propensity_source="estimated", weight_clip=20.0
+            ),
         )
 
     rows: list[ValidationRunRow] = []
     for run_id in range(n_runs):
         seed = base_seed + run_id
-        env = SyntheticRecommenderEnv(SynthConfig(n_users=n_users, seed=seed, horizon_days=30))
+        env = SyntheticRecommenderEnv(
+            SynthConfig(n_users=n_users, seed=seed, horizon_days=30)
+        )
         X = env.sample_users()
         policyA = make_policy("epsilon_greedy", seed=seed, epsilon=policyA_epsilon)
         policyB = make_policy("softmax", seed=seed + 1, tau=policyB_tau)
 
         logs = env.simulate_logs_A(policyA, X)
-        logs = _attach_logged_propensity(logs, policyA, action_col=action_col, propensity_col="propensity_A")
+        logs = _attach_logged_propensity(
+            logs, policyA, action_col=action_col, propensity_col="propensity_A"
+        )
 
         oracle_v_a = env.oracle_value(policyA, X, metric=target, n_mc=2)
         oracle_v_b = env.oracle_value(policyB, X, metric=target, n_mc=2)
@@ -163,13 +187,21 @@ def run_simulation_validation(
                     propensity_source=mode.propensity_source,  # type: ignore[arg-type]
                     propensity_col=mode.propensity_col,
                 )
-                delta_ci_low = summary.delta_ci[0] if summary.delta_ci is not None else None
-                delta_ci_high = summary.delta_ci[1] if summary.delta_ci is not None else None
+                delta_ci_low = (
+                    summary.delta_ci[0] if summary.delta_ci is not None else None
+                )
+                delta_ci_high = (
+                    summary.delta_ci[1] if summary.delta_ci is not None else None
+                )
                 covers = None
                 if delta_ci_low is not None and delta_ci_high is not None:
                     covers = bool(delta_ci_low <= oracle_delta <= delta_ci_high)
 
-                diag = summary.diagnostics.to_dict() if summary.diagnostics is not None else {}
+                diag = (
+                    summary.diagnostics.to_dict()
+                    if summary.diagnostics is not None
+                    else {}
+                )
                 rows.append(
                     ValidationRunRow(
                         run_id=run_id,

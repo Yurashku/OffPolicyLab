@@ -45,6 +45,7 @@ __all__ = [
     "ate_from_values",
 ]
 
+
 def _is_binary_target_values(values: np.ndarray) -> bool:
     """Проверяет, что массив содержит только бинарные значения 0/1."""
     uniq = np.unique(values)
@@ -71,7 +72,9 @@ def infer_feature_columns(
         if pd.api.types.is_numeric_dtype(df[c]) or pd.api.types.is_bool_dtype(df[c]):
             cols.append(c)
     if not cols:
-        raise ValueError("Could not infer numeric feature columns. Pass feature_cols explicitly.")
+        raise ValueError(
+            "Could not infer numeric feature columns. Pass feature_cols explicitly."
+        )
     return cols
 
 
@@ -100,7 +103,15 @@ def _resolve_feature_cols(
     if feature_cols is not None:
         cols = list(feature_cols)
     else:
-        excluded = {action_col, target_col, propensity_col, cluster_col, "a_B", "propensity_A", "user_id"}
+        excluded = {
+            action_col,
+            target_col,
+            propensity_col,
+            cluster_col,
+            "a_B",
+            "propensity_A",
+            "user_id",
+        }
         excluded = {c for c in excluded if c is not None}
         # Heuristic: helper action columns often follow `a_*` naming.
         excluded.update(c for c in df.columns if c.startswith("a_") and c != action_col)
@@ -140,7 +151,9 @@ def ess(weights: np.ndarray) -> float:
     return float((s1 * s1) / s2)
 
 
-def _build_scaler(df: pd.DataFrame, feature_cols: Sequence[str]) -> tuple[np.ndarray, Optional[StandardScaler]]:
+def _build_scaler(
+    df: pd.DataFrame, feature_cols: Sequence[str]
+) -> tuple[np.ndarray, Optional[StandardScaler]]:
     X = df[list(feature_cols)].to_numpy()
     if X.shape[1] == 0:
         raise ValueError("feature_cols must contain at least one feature")
@@ -149,14 +162,18 @@ def _build_scaler(df: pd.DataFrame, feature_cols: Sequence[str]) -> tuple[np.nda
     return Xs, scaler
 
 
-def _transform_features(df: pd.DataFrame, feature_cols: Sequence[str], scaler: Optional[StandardScaler]) -> np.ndarray:
+def _transform_features(
+    df: pd.DataFrame, feature_cols: Sequence[str], scaler: Optional[StandardScaler]
+) -> np.ndarray:
     X = df[list(feature_cols)].to_numpy()
     return scaler.transform(X) if scaler is not None else X
 
 
 def _fit_one_hot(values: np.ndarray) -> OneHotEncoder:
     try:
-        oh = OneHotEncoder(categories="auto", sparse_output=False, handle_unknown="ignore")
+        oh = OneHotEncoder(
+            categories="auto", sparse_output=False, handle_unknown="ignore"
+        )
     except TypeError:  # sklearn < 1.2
         oh = OneHotEncoder(categories="auto", sparse=False, handle_unknown="ignore")
     oh.fit(values)
@@ -318,7 +335,9 @@ def train_mu_hat(
     )
     y = df[target].to_numpy()
     is_binary_target = _is_binary_target_values(y)
-    model = LogisticRegression(max_iter=1000) if is_binary_target else LinearRegression()
+    model = (
+        LogisticRegression(max_iter=1000) if is_binary_target else LinearRegression()
+    )
     model.fit(X, y)
     model._oh = oh  # type: ignore[attr-defined]
     model._scaler = scaler  # type: ignore[attr-defined]
@@ -328,7 +347,9 @@ def train_mu_hat(
     return model
 
 
-def mu_hat_predict(model, df: pd.DataFrame, action: np.ndarray, target: str) -> np.ndarray:
+def mu_hat_predict(
+    model, df: pd.DataFrame, action: np.ndarray, target: str
+) -> np.ndarray:
     """Предсказывает ``mu(x, a)`` для заданного действия.
 
     Args:
@@ -390,7 +411,9 @@ def replay_value(
     logging.info("[Replay] Начинаем оценку Replay для новой политики…")
     mask = df[action_col].to_numpy() == a_B
     if mask.sum() == 0:
-        logging.info("[Replay] Нет совпадающих действий – политика B вне области данных A")
+        logging.info(
+            "[Replay] Нет совпадающих действий – политика B вне области данных A"
+        )
         return float("nan")
     val = float(df.loc[mask, target].mean())
     logging.info(f"[Replay] Совпадающих действий: {mask.sum()} из {len(df)}")
@@ -508,7 +531,9 @@ def snips_value(
     return value, ess(w), clip_share
 
 
-def _action_values_from_probs(probsB: np.ndarray, action_space: Optional[Sequence]) -> list:
+def _action_values_from_probs(
+    probsB: np.ndarray, action_space: Optional[Sequence]
+) -> list:
     if action_space is None:
         return list(range(probsB.shape[1]))
     if len(action_space) != probsB.shape[1]:
@@ -543,7 +568,9 @@ def dm_value(
         pa = probsB[:, idx]
         if pa.sum() == 0:
             continue
-        mu = mu_hat_predict(mu_model, df, np.full(len(df), action, dtype=object), target)
+        mu = mu_hat_predict(
+            mu_model, df, np.full(len(df), action, dtype=object), target
+        )
         val += float(np.mean(pa * mu))
     return val
 
@@ -594,7 +621,9 @@ def dr_value(
         pa = probsB[:, idx]
         if pa.sum() == 0:
             continue
-        mu = mu_hat_predict(mu_model, df, np.full(len(df), action, dtype=object), target)
+        mu = mu_hat_predict(
+            mu_model, df, np.full(len(df), action, dtype=object), target
+        )
         dm_part += pa * mu
 
     piB_taken = take_action_probabilities(probsB, aA, action_space=actions_space)
@@ -654,7 +683,9 @@ def sndr_value(
         pa = probsB[:, idx]
         if pa.sum() == 0:
             continue
-        mu = mu_hat_predict(mu_model, df, np.full(len(df), action, dtype=object), target)
+        mu = mu_hat_predict(
+            mu_model, df, np.full(len(df), action, dtype=object), target
+        )
         dm_part += pa * mu
 
     piB_taken = take_action_probabilities(probsB, aA, action_space=actions_space)
@@ -715,7 +746,9 @@ def switch_dr_value(
         pa = probsB[:, idx]
         if pa.sum() == 0:
             continue
-        mu = mu_hat_predict(mu_model, df, np.full(len(df), action, dtype=object), target)
+        mu = mu_hat_predict(
+            mu_model, df, np.full(len(df), action, dtype=object), target
+        )
         dm_part += pa * mu
 
     piB_taken = take_action_probabilities(probsB, aA, action_space=actions_space)

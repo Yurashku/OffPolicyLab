@@ -71,7 +71,15 @@ def _weight_diagnostics(
     switch_share: Optional[float] = None,
 ) -> WeightDiagnostics:
     if weights is None or len(weights) == 0:
-        return WeightDiagnostics(None, None, None, None, None, clip_share=clip_share, switch_share=switch_share)
+        return WeightDiagnostics(
+            None,
+            None,
+            None,
+            None,
+            None,
+            clip_share=clip_share,
+            switch_share=switch_share,
+        )
     w = np.asarray(weights, dtype=float)
     return WeightDiagnostics(
         ess=float(ess(w)),
@@ -107,7 +115,9 @@ def compute_policy_diagnostics(
 ) -> PolicyDiagnostics:
     n = int(len(df))
     probsB = policyB.action_probs(df)
-    actions = np.asarray(action_space if action_space is not None else list(range(probsB.shape[1])))
+    actions = np.asarray(
+        action_space if action_space is not None else list(range(probsB.shape[1]))
+    )
     a_B = actions[np.argmax(probsB, axis=1)]
     overlap = float(np.mean(df[action_col].to_numpy() == a_B))
     overlap_diag = OverlapDiagnostics(replay_overlap=overlap, replay_coverage=overlap)
@@ -119,7 +129,12 @@ def compute_policy_diagnostics(
     used_propensity_col: Optional[str] = None
     if method in {"ips", "snips", "dr", "sndr", "switch_dr"}:
         if behavior_predictions is None:
-            behavior_predictions, used_propensity_source, used_propensity_col, source_notes = resolve_behavior_predictions(
+            (
+                behavior_predictions,
+                used_propensity_source,
+                used_propensity_col,
+                source_notes,
+            ) = resolve_behavior_predictions(
                 df,
                 policyB,
                 propensity_source=propensity_source,
@@ -136,14 +151,22 @@ def compute_policy_diagnostics(
         validate_behavior_predictions(behavior_predictions, n)
         with np.errstate(divide="ignore", invalid="ignore"):
             weights = behavior_predictions.piB_taken / behavior_predictions.pA_taken
-        weights = np.nan_to_num(weights, nan=0.0, posinf=np.finfo(float).max, neginf=0.0)
+        weights = np.nan_to_num(
+            weights, nan=0.0, posinf=np.finfo(float).max, neginf=0.0
+        )
         if weight_clip is not None and method in {"ips", "snips", "dr", "sndr"}:
             clip_share = float(np.mean(weights > weight_clip))
         if method == "switch_dr":
             switch_share = float(np.mean(weights > tau))
 
-    w_diag = _weight_diagnostics(weights, n=n, clip_share=clip_share, switch_share=switch_share)
-    warnings: list[str] = list(source_notes) if method in {"ips", "snips", "dr", "sndr", "switch_dr"} else []
+    w_diag = _weight_diagnostics(
+        weights, n=n, clip_share=clip_share, switch_share=switch_share
+    )
+    warnings: list[str] = (
+        list(source_notes)
+        if method in {"ips", "snips", "dr", "sndr", "switch_dr"}
+        else []
+    )
     if overlap_diag.replay_overlap < replay_overlap_warn_threshold:
         warnings.append("low_replay_overlap")
     if w_diag.ess_ratio is not None and w_diag.ess_ratio < ess_ratio_warn_threshold:
@@ -154,7 +177,10 @@ def compute_policy_diagnostics(
         warnings.append("heavy_weight_tail")
     if w_diag.clip_share is not None and w_diag.clip_share > clip_share_warn_threshold:
         warnings.append("large_clip_share")
-    if w_diag.switch_share is not None and w_diag.switch_share > switch_share_warn_threshold:
+    if (
+        w_diag.switch_share is not None
+        and w_diag.switch_share > switch_share_warn_threshold
+    ):
         warnings.append("large_switch_share")
 
     return PolicyDiagnostics(

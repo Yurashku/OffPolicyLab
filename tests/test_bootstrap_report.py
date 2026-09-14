@@ -80,8 +80,12 @@ def test_paired_bootstrap_ci_respects_alpha_width():
         vb = d["val_b"].mean()
         return va, vb, vb - va
 
-    res_95 = paired_bootstrap_ci(df, estimator_pair, cluster_col="user_id", n_boot=400, alpha=0.05, rng_seed=2)
-    res_80 = paired_bootstrap_ci(df, estimator_pair, cluster_col="user_id", n_boot=400, alpha=0.20, rng_seed=2)
+    res_95 = paired_bootstrap_ci(
+        df, estimator_pair, cluster_col="user_id", n_boot=400, alpha=0.05, rng_seed=2
+    )
+    res_80 = paired_bootstrap_ci(
+        df, estimator_pair, cluster_col="user_id", n_boot=400, alpha=0.20, rng_seed=2
+    )
     w95 = res_95["Delta_CI"][1] - res_95["Delta_CI"][0]
     w80 = res_80["Delta_CI"][1] - res_80["Delta_CI"][0]
     assert w80 <= w95
@@ -101,7 +105,9 @@ def test_paired_bootstrap_ci_matches_official_inference_wrapper():
         vb = d["val_b"].mean()
         return va, vb, vb - va
 
-    legacy = paired_bootstrap_ci(df, estimator_pair, cluster_col="user_id", n_boot=100, alpha=0.1, rng_seed=9)
+    legacy = paired_bootstrap_ci(
+        df, estimator_pair, cluster_col="user_id", n_boot=100, alpha=0.1, rng_seed=9
+    )
     official = infer_policy_comparison_bootstrap(
         df, estimator_pair, cluster_col="user_id", n_boot=100, alpha=0.1, rng_seed=9
     ).to_dict()
@@ -131,9 +137,21 @@ def test_centered_bootstrap_p_value_obvious_cases():
         vb = d["val_b"].mean()
         return va, vb, vb - va
 
-    eq = paired_bootstrap_ci(df_equal, estimator_pair, cluster_col="user_id", n_boot=400, alpha=0.05, rng_seed=5)
+    eq = paired_bootstrap_ci(
+        df_equal,
+        estimator_pair,
+        cluster_col="user_id",
+        n_boot=400,
+        alpha=0.05,
+        rng_seed=5,
+    )
     big = paired_bootstrap_ci(
-        df_large_effect, estimator_pair, cluster_col="user_id", n_boot=400, alpha=0.05, rng_seed=5
+        df_large_effect,
+        estimator_pair,
+        cluster_col="user_id",
+        n_boot=400,
+        alpha=0.05,
+        rng_seed=5,
     )
     assert eq["p_value"] > 0.3
     assert big["p_value"] < 0.05

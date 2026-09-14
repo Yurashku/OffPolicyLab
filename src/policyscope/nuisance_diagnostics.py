@@ -7,7 +7,14 @@ from typing import Optional, Sequence
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import brier_score_loss, log_loss, mean_absolute_error, mean_squared_error, r2_score, roc_auc_score
+from sklearn.metrics import (
+    brier_score_loss,
+    log_loss,
+    mean_absolute_error,
+    mean_squared_error,
+    r2_score,
+    roc_auc_score,
+)
 
 from policyscope.estimators import _is_binary_target_values, mu_hat_predict
 from policyscope.nuisance import (
@@ -105,7 +112,11 @@ def _compute_behavior_diagnostics(
     top1 = None
     if behavior_predictions.pA_all is not None:
         top_idx = np.argmax(behavior_predictions.pA_all, axis=1)
-        if behavior_predictions.action_space is not None and len(behavior_predictions.action_space) == behavior_predictions.pA_all.shape[1]:
+        if (
+            behavior_predictions.action_space is not None
+            and len(behavior_predictions.action_space)
+            == behavior_predictions.pA_all.shape[1]
+        ):
             labels = np.asarray(behavior_predictions.action_space, dtype=object)
             top_pred = labels[top_idx]
             top1 = float(np.mean(top_pred == y))
@@ -119,7 +130,9 @@ def _compute_behavior_diagnostics(
 
     return BehaviorModelDiagnostics(
         applicable=True,
-        propensity_source=propensity_source or behavior_predictions.propensity_source or "estimated",
+        propensity_source=propensity_source
+        or behavior_predictions.propensity_source
+        or "estimated",
         is_out_of_fold=bool(behavior_predictions.is_out_of_fold),
         multiclass_log_loss=ll,
         top1_accuracy=top1,
@@ -150,7 +163,9 @@ def _compute_outcome_diagnostics(
     is_binary = _is_binary_target_values(y)
 
     if outcome_predictions is None:
-        mu_bundle = fit_outcome_nuisance_bundle(df, target=target, feature_cols=feature_cols, action_col=action_col)
+        mu_bundle = fit_outcome_nuisance_bundle(
+            df, target=target, feature_cols=feature_cols, action_col=action_col
+        )
         pred = mu_hat_predict(mu_bundle.mu_model, df, df[action_col].to_numpy(), target)
         is_oof = False
     else:
@@ -214,7 +229,9 @@ def compute_nuisance_diagnostics(
     """Compute structured nuisance quality diagnostics for official outputs."""
     if behavior_predictions is None and nuisance_bundle is not None:
         behavior_predictions = nuisance_bundle.behavior
-    outcome_predictions = nuisance_bundle.outcome if nuisance_bundle is not None else None
+    outcome_predictions = (
+        nuisance_bundle.outcome if nuisance_bundle is not None else None
+    )
 
     behavior = _compute_behavior_diagnostics(
         df,

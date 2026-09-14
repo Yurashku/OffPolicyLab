@@ -39,13 +39,17 @@ from policyscope.nuisance import (
     resolve_behavior_predictions,
 )
 
-EstimatorName = Literal["on_policy", "replay", "ips", "snips", "dm", "dr", "sndr", "switch_dr"]
+EstimatorName = Literal[
+    "on_policy", "replay", "ips", "snips", "dm", "dr", "sndr", "switch_dr"
+]
 
 
 __all__ = ["estimate_value", "estimate_value_with_ci"]
 
 
-def _resolve_action_values(probsB: np.ndarray, action_space: Optional[Sequence]) -> list:
+def _resolve_action_values(
+    probsB: np.ndarray, action_space: Optional[Sequence]
+) -> list:
     if action_space is None:
         return list(range(probsB.shape[1]))
     return list(action_space)
@@ -77,7 +81,9 @@ def _dm_dr_family_from_predictions(
         return float(np.mean(dm_part))
 
     assert pA_taken is not None
-    piB_taken = prepare_piB_taken(df, policyB, action_col=action_col, action_space=action_space)
+    piB_taken = prepare_piB_taken(
+        df, policyB, action_col=action_col, action_space=action_space
+    )
     w = piB_taken / pA_taken
     if weight_clip is not None and method in {"dr", "sndr"}:
         w = np.minimum(w, weight_clip)
@@ -116,7 +122,9 @@ def _estimate_point(
 
     if method == "replay":
         probsB = policyB.action_probs(df)
-        actions = np.asarray(action_space if action_space is not None else list(range(probsB.shape[1])))
+        actions = np.asarray(
+            action_space if action_space is not None else list(range(probsB.shape[1]))
+        )
         a_B = actions[np.argmax(probsB, axis=1)]
         return replay_value(df, a_B, target=target, action_col=action_col)
 
@@ -181,7 +189,13 @@ def _estimate_point(
             feature_cols=feature_cols,
             action_col=action_col,
         )
-        return dm_value(df, policyB, outcome_bundle.mu_model, target=target, action_space=action_space)
+        return dm_value(
+            df,
+            policyB,
+            outcome_bundle.mu_model,
+            target=target,
+            action_space=action_space,
+        )
 
     if method == "dr":
         if nuisance_outcome is not None:

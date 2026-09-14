@@ -42,8 +42,12 @@ result = run_simulation_validation(
     estimators=("ips", "dr", "sndr"),
     modes=(
         ValidationMode(name="estimated", propensity_source="estimated"),
-        ValidationMode(name="logged", propensity_source="logged", propensity_col="propensity_A"),
-        ValidationMode(name="crossfit", propensity_source="estimated", use_crossfit=True),
+        ValidationMode(
+            name="logged", propensity_source="logged", propensity_col="propensity_A"
+        ),
+        ValidationMode(
+            name="crossfit", propensity_source="estimated", use_crossfit=True
+        ),
     ),
 )
 

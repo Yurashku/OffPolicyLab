@@ -49,7 +49,9 @@ def test_logged_bandit_dataset_missing_required_column_fails():
 
 def test_logged_bandit_dataset_missing_feature_column_fails():
     df = _base_df()
-    schema = BanditSchema(action_col="a_A", reward_col="accept", feature_cols=["f1", "f_missing"])
+    schema = BanditSchema(
+        action_col="a_A", reward_col="accept", feature_cols=["f1", "f_missing"]
+    )
     with pytest.raises(ValueError, match="Missing feature columns"):
         LoggedBanditDataset(df=df, schema=schema)
 

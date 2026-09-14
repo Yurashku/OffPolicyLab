@@ -13,8 +13,12 @@ if __name__ == "__main__":
         estimators=("ips", "dr", "sndr", "switch_dr"),
         modes=(
             ValidationMode(name="estimated", propensity_source="estimated"),
-            ValidationMode(name="logged", propensity_source="logged", propensity_col="propensity_A"),
-            ValidationMode(name="crossfit", propensity_source="estimated", use_crossfit=True),
+            ValidationMode(
+                name="logged", propensity_source="logged", propensity_col="propensity_A"
+            ),
+            ValidationMode(
+                name="crossfit", propensity_source="estimated", use_crossfit=True
+            ),
         ),
     )
     print(result.aggregate)

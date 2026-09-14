@@ -8,7 +8,9 @@ from policyscope.policy_adapters import DeterministicActionColumnPolicy
 
 def test_deterministic_adapter_integer_actions_one_hot_and_row_sums():
     df = pd.DataFrame({"action_B": [1, 0, 2, 1]})
-    policy = DeterministicActionColumnPolicy(action_col="action_B", action_space=[0, 1, 2])
+    policy = DeterministicActionColumnPolicy(
+        action_col="action_B", action_space=[0, 1, 2]
+    )
     probs = policy.action_probs(df)
 
     assert probs.shape == (4, 3)
@@ -30,7 +32,9 @@ def test_deterministic_adapter_string_actions_supported():
 
 def test_deterministic_adapter_unknown_action_raises():
     df = pd.DataFrame({"action_B": [0, 1, 99]})
-    policy = DeterministicActionColumnPolicy(action_col="action_B", action_space=[0, 1, 2])
+    policy = DeterministicActionColumnPolicy(
+        action_col="action_B", action_space=[0, 1, 2]
+    )
     with pytest.raises(ValueError, match="Unknown actions"):
         policy.action_probs(df)
 
@@ -49,10 +53,14 @@ def test_deterministic_adapter_integrates_with_compare_policies():
             "action_B": rng.choice([0, 1, 2], size=n),
         }
     )
-    df["reward"] = rng.binomial(1, 1.0 / (1.0 + np.exp(-(-0.5 + 0.8 * df["loyal"] - 0.6 * df["risk"]))))
+    df["reward"] = rng.binomial(
+        1, 1.0 / (1.0 + np.exp(-(-0.5 + 0.8 * df["loyal"] - 0.6 * df["risk"])))
+    )
     df["propensity_A"] = rng.uniform(0.1, 0.9, size=n)
 
-    policy_b = DeterministicActionColumnPolicy(action_col="action_B", action_space=[0, 1, 2])
+    policy_b = DeterministicActionColumnPolicy(
+        action_col="action_B", action_space=[0, 1, 2]
+    )
     summary = compare_policies(
         df,
         policy_b,

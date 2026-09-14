@@ -72,13 +72,16 @@ class GreedyUnknown(BasePolicy):
         age_z = (X["age"] - 40) / 12.0
         risk_z = (X["risk"] - 0.5) / 0.25
         income_z = (np.log(X["income"]) - 10.5) / 0.5
-        feats = np.stack([
-            np.ones(len(X)),
-            X["loyal"].values,
-            age_z.values,
-            risk_z.values,
-            income_z.values,
-        ], axis=1)  # (n,5)
+        feats = np.stack(
+            [
+                np.ones(len(X)),
+                X["loyal"].values,
+                age_z.values,
+                risk_z.values,
+                income_z.values,
+            ],
+            axis=1,
+        )  # (n,5)
         return feats @ self.W.T  # (n,4)
 
     def action_probs(self, X: pd.DataFrame) -> np.ndarray:
@@ -108,7 +111,7 @@ class EpsilonGreedy(BasePolicy):
         # равномерный шум
         p = np.full((n, k), self.eps / k, dtype=float)
         best = base_probs.argmax(axis=1)
-        p[np.arange(n), best] += (1.0 - self.eps)
+        p[np.arange(n), best] += 1.0 - self.eps
         return p
 
 

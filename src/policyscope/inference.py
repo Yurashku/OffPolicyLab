@@ -160,4 +160,6 @@ def infer_policy_comparison_bootstrap(
         method=f"{method}+centered_delta_test",
         warnings=tuple(warnings),
     )
-    return PolicyComparisonResult(v_a=float(v_a), v_b=float(v_b), delta=float(delta), inference=inference)
+    return PolicyComparisonResult(
+        v_a=float(v_a), v_b=float(v_b), delta=float(delta), inference=inference
+    )

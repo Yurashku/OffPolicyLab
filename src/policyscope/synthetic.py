@@ -70,20 +70,26 @@ class SyntheticRecommenderEnv:
 
         # Истинные коэффициенты для вероятности принятия (accept)
         # Вектор размера (n_actions, n_features+1). Первый элемент — свободный член.
-        self.beta = np.array([
-            [-0.2,  0.8,  0.2, -0.4,  0.1],  # действие 0
-            [-0.4,  0.5, -0.1, -0.2,  0.4],  # действие 1
-            [-0.1,  0.3,  0.1, -0.1,  0.2],  # действие 2
-            [-0.3,  0.4,  0.2,  0.1, -0.1],  # действие 3
-        ], dtype=float)
+        self.beta = np.array(
+            [
+                [-0.2, 0.8, 0.2, -0.4, 0.1],  # действие 0
+                [-0.4, 0.5, -0.1, -0.2, 0.4],  # действие 1
+                [-0.1, 0.3, 0.1, -0.1, 0.2],  # действие 2
+                [-0.3, 0.4, 0.2, 0.1, -0.1],  # действие 3
+            ],
+            dtype=float,
+        )
 
         # Истинные коэффициенты для приращения CLTV при принятии
-        self.gamma = np.array([
-            [200.0, 120.0,  80.0, -60.0,  50.0],   # действие 0
-            [300.0, 180.0, -30.0, -90.0,  70.0],   # действие 1
-            [150.0,  90.0,  40.0, -20.0,  30.0],   # действие 2
-            [100.0,  50.0,  60.0,  30.0, -10.0],   # действие 3
-        ], dtype=float)
+        self.gamma = np.array(
+            [
+                [200.0, 120.0, 80.0, -60.0, 50.0],  # действие 0
+                [300.0, 180.0, -30.0, -90.0, 70.0],  # действие 1
+                [150.0, 90.0, 40.0, -20.0, 30.0],  # действие 2
+                [100.0, 50.0, 60.0, 30.0, -10.0],  # действие 3
+            ],
+            dtype=float,
+        )
 
     def sample_users(self, n: Optional[int] = None) -> pd.DataFrame:
         """Генерирует DataFrame пользователей с признаками.
@@ -108,14 +114,16 @@ class SyntheticRecommenderEnv:
         income = r.lognormal(mean=10.5, sigma=0.5, size=n)
         region = r.integers(0, 5, size=n)
 
-        df = pd.DataFrame({
-            "user_id": np.arange(n, dtype=np.int64),
-            "loyal": loyal,
-            "age": age,
-            "risk": risk,
-            "income": income,
-            "region": region,
-        })
+        df = pd.DataFrame(
+            {
+                "user_id": np.arange(n, dtype=np.int64),
+                "loyal": loyal,
+                "age": age,
+                "risk": risk,
+                "income": income,
+                "region": region,
+            }
+        )
         return df
 
     def _features_row(self, row: pd.Series) -> np.ndarray:
@@ -128,13 +136,16 @@ class SyntheticRecommenderEnv:
         age_z = (row["age"] - 40) / 12.0
         risk_z = (row["risk"] - 0.5) / 0.25
         income_z = (np.log(row["income"]) - 10.5) / 0.5
-        return np.array([
-            1.0,
-            row["loyal"],
-            age_z,
-            risk_z,
-            income_z,
-        ], dtype=float)
+        return np.array(
+            [
+                1.0,
+                row["loyal"],
+                age_z,
+                risk_z,
+                income_z,
+            ],
+            dtype=float,
+        )
 
     def true_accept_prob(self, X: pd.DataFrame, a: np.ndarray) -> np.ndarray:
         """Истинная вероятность принятия для каждого пользователя и действия.
@@ -177,7 +188,9 @@ class SyntheticRecommenderEnv:
             upl[idx] = max(0.0, self.gamma[a[idx]].dot(feats))
         return upl
 
-    def draw_cltv(self, X: pd.DataFrame, a: np.ndarray, accepted: np.ndarray) -> np.ndarray:
+    def draw_cltv(
+        self, X: pd.DataFrame, a: np.ndarray, accepted: np.ndarray
+    ) -> np.ndarray:
         """Сэмплирует CLTV для каждой записи.
 
         CLTV = base_cltv + accepted * uplift + Gauss(0,25).
@@ -188,7 +201,9 @@ class SyntheticRecommenderEnv:
         noise = self.rng.normal(0, 25, size=len(X))
         return np.maximum(base + accepted * upl + noise, 10.0)
 
-    def oracle_value(self, policy, X: pd.DataFrame, metric: str = "accept", n_mc: int = 1) -> float:
+    def oracle_value(
+        self, policy, X: pd.DataFrame, metric: str = "accept", n_mc: int = 1
+    ) -> float:
         """Вычисляет истинное значение метрики под политикой.
 
         Для стохастических политик осуществляется MC‑семплирование.
@@ -211,10 +226,10 @@ class SyntheticRecommenderEnv:
         results = []
         for _ in range(n_mc):
             probs = policy.action_probs(X)  # (n, n_actions)
-            a = np.array([
-                self.rng.choice(self.ACTIONS, p=probs[i])
-                for i in range(len(X))
-            ], dtype=int)
+            a = np.array(
+                [self.rng.choice(self.ACTIONS, p=probs[i]) for i in range(len(X))],
+                dtype=int,
+            )
             p_accept = self.true_accept_prob(X, a)
             acc = self.draw_accept(p_accept)
             if metric == "accept":
@@ -240,10 +255,10 @@ class SyntheticRecommenderEnv:
             Логи со столбцами: a_A, accept, cltv + исходные признаки.
         """
         probs = policyA.action_probs(X)
-        a = np.array([
-            self.rng.choice(self.ACTIONS, p=probs[i])
-            for i in range(len(X))
-        ], dtype=int)
+        a = np.array(
+            [self.rng.choice(self.ACTIONS, p=probs[i]) for i in range(len(X))],
+            dtype=int,
+        )
         p_accept = self.true_accept_prob(X, a)
         acc = self.draw_accept(p_accept)
         cltv = self.draw_cltv(X, a, acc)

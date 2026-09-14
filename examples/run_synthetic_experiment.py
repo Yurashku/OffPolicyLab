@@ -45,19 +45,67 @@ from policyscope.report import decision_summary, dump_json
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--n_users", type=int, default=50_000, help="Количество пользователей в синтетике")
+    parser.add_argument(
+        "--n_users",
+        type=int,
+        default=50_000,
+        help="Количество пользователей в синтетике",
+    )
     parser.add_argument("--seed", type=int, default=42, help="Зерно генератора")
     parser.add_argument("--horizon", type=int, default=90, help="Горизонт для CLTV")
-    parser.add_argument("--policyA", type=str, default="epsilon_greedy", choices=["greedy", "epsilon_greedy", "softmax"], help="Тип политики A")
-    parser.add_argument("--epsilon", type=float, default=0.15, help="Параметр ε для ε‑жадной политики A")
-    parser.add_argument("--tau", type=float, default=0.7, help="Температура softmax политики A")
-    parser.add_argument("--policyB", type=str, default="softmax", choices=["greedy", "epsilon_greedy", "softmax"], help="Тип политики B")
-    parser.add_argument("--weight_clip", type=float, default=20.0, help="Порог клиппинга весов для IPS/SNIPS/DR")
-    parser.add_argument("--business_threshold_accept", type=float, default=0.0, help="Бизнес‑порог для метрики отклика")
-    parser.add_argument("--business_threshold_cltv", type=float, default=1.0, help="Бизнес‑порог для метрики CLTV")
-    parser.add_argument("--oracle_users", type=int, default=200_000, help="Число пользователей для оракула")
-    parser.add_argument("--oracle_mc", type=int, default=1, help="Число MC‑прогонов для оракула")
-    parser.add_argument("--artifacts_dir", type=str, default="artifacts", help="Каталог для сохранения артефактов")
+    parser.add_argument(
+        "--policyA",
+        type=str,
+        default="epsilon_greedy",
+        choices=["greedy", "epsilon_greedy", "softmax"],
+        help="Тип политики A",
+    )
+    parser.add_argument(
+        "--epsilon", type=float, default=0.15, help="Параметр ε для ε‑жадной политики A"
+    )
+    parser.add_argument(
+        "--tau", type=float, default=0.7, help="Температура softmax политики A"
+    )
+    parser.add_argument(
+        "--policyB",
+        type=str,
+        default="softmax",
+        choices=["greedy", "epsilon_greedy", "softmax"],
+        help="Тип политики B",
+    )
+    parser.add_argument(
+        "--weight_clip",
+        type=float,
+        default=20.0,
+        help="Порог клиппинга весов для IPS/SNIPS/DR",
+    )
+    parser.add_argument(
+        "--business_threshold_accept",
+        type=float,
+        default=0.0,
+        help="Бизнес‑порог для метрики отклика",
+    )
+    parser.add_argument(
+        "--business_threshold_cltv",
+        type=float,
+        default=1.0,
+        help="Бизнес‑порог для метрики CLTV",
+    )
+    parser.add_argument(
+        "--oracle_users",
+        type=int,
+        default=200_000,
+        help="Число пользователей для оракула",
+    )
+    parser.add_argument(
+        "--oracle_mc", type=int, default=1, help="Число MC‑прогонов для оракула"
+    )
+    parser.add_argument(
+        "--artifacts_dir",
+        type=str,
+        default="artifacts",
+        help="Каталог для сохранения артефактов",
+    )
     args = parser.parse_args()
 
     os.makedirs(args.artifacts_dir, exist_ok=True)
@@ -87,18 +135,28 @@ def main() -> None:
     mu_cltv = train_mu_hat(logsA, target="cltv")
     pi_model = train_pi_hat(logsA)
     pA_all = pi_hat_predict(pi_model, logsA)
-    pA_taken = take_action_probabilities(pA_all, logsA["a_A"].values, action_space=pi_model.classes_)
+    pA_taken = take_action_probabilities(
+        pA_all, logsA["a_A"].values, action_space=pi_model.classes_
+    )
 
     # Replay (на совпадающих действиях)
     vB_replay_accept = replay_value(logsA, policyB.action_argmax(X), target="accept")
     vB_replay_cltv = replay_value(logsA, policyB.action_argmax(X), target="cltv")
 
     # IPS и SNIPS
-    vB_ips_accept, ess_ips_accept, clip_ips_accept = ips_value(logsA, piB_taken, pA_taken, target="accept", weight_clip=args.weight_clip)
-    vB_ips_cltv, ess_ips_cltv, clip_ips_cltv = ips_value(logsA, piB_taken, pA_taken, target="cltv", weight_clip=args.weight_clip)
+    vB_ips_accept, ess_ips_accept, clip_ips_accept = ips_value(
+        logsA, piB_taken, pA_taken, target="accept", weight_clip=args.weight_clip
+    )
+    vB_ips_cltv, ess_ips_cltv, clip_ips_cltv = ips_value(
+        logsA, piB_taken, pA_taken, target="cltv", weight_clip=args.weight_clip
+    )
 
-    vB_snips_accept, ess_snips_accept, clip_snips_accept = snips_value(logsA, piB_taken, pA_taken, target="accept", weight_clip=args.weight_clip)
-    vB_snips_cltv, ess_snips_cltv, clip_snips_cltv = snips_value(logsA, piB_taken, pA_taken, target="cltv", weight_clip=args.weight_clip)
+    vB_snips_accept, ess_snips_accept, clip_snips_accept = snips_value(
+        logsA, piB_taken, pA_taken, target="accept", weight_clip=args.weight_clip
+    )
+    vB_snips_cltv, ess_snips_cltv, clip_snips_cltv = snips_value(
+        logsA, piB_taken, pA_taken, target="cltv", weight_clip=args.weight_clip
+    )
 
     # Direct Method
     vB_dm_accept = dm_value(logsA, policyB, mu_accept, target="accept")
@@ -106,7 +164,12 @@ def main() -> None:
 
     # Doubly Robust
     vB_dr_accept, ess_dr_accept, clip_dr_accept = dr_value(
-        logsA, policyB, mu_accept, pA_taken, target="accept", weight_clip=args.weight_clip
+        logsA,
+        policyB,
+        mu_accept,
+        pA_taken,
+        target="accept",
+        weight_clip=args.weight_clip,
     )
     vB_dr_cltv, ess_dr_cltv, clip_dr_cltv = dr_value(
         logsA, policyB, mu_cltv, pA_taken, target="cltv", weight_clip=args.weight_clip
@@ -213,8 +276,12 @@ def main() -> None:
     }
 
     # Отчёт
-    report_accept = decision_summary(res_accept, "Отклик", business_threshold=args.business_threshold_accept)
-    report_cltv = decision_summary(res_cltv, "CLTV", business_threshold=args.business_threshold_cltv)
+    report_accept = decision_summary(
+        res_accept, "Отклик", business_threshold=args.business_threshold_accept
+    )
+    report_cltv = decision_summary(
+        res_cltv, "CLTV", business_threshold=args.business_threshold_cltv
+    )
 
     # Сохраняем артефакты
     logs_path = os.path.join(args.artifacts_dir, "logs_A.csv")
@@ -222,7 +289,9 @@ def main() -> None:
     dump_json(os.path.join(args.artifacts_dir, "diagnostics.json"), diagnostics)
     dump_json(os.path.join(args.artifacts_dir, "summary.json"), summary)
     # записываем отчёт
-    with open(os.path.join(args.artifacts_dir, "report.txt"), "w", encoding="utf-8") as f:
+    with open(
+        os.path.join(args.artifacts_dir, "report.txt"), "w", encoding="utf-8"
+    ) as f:
         f.write("# Итоговый отчёт (DR как основной оценщик)\n\n")
         f.write("## Метрика: Отклик\n")
         f.write(report_accept + "\n")
@@ -237,8 +306,12 @@ def main() -> None:
     print("\n==== DR (CLTV) ====")
     print(report_cltv)
     print("\n==== Оракул ====")
-    print(f"Accept: V_A_true={vA_accept_true:.6f}, V_B_true={vB_accept_true:.6f}, Delta_true={vB_accept_true - vA_accept_true:.6f}")
-    print(f"CLTV  : V_A_true={vA_cltv_true:.6f}, V_B_true={vB_cltv_true:.6f}, Delta_true={vB_cltv_true - vA_cltv_true:.6f}")
+    print(
+        f"Accept: V_A_true={vA_accept_true:.6f}, V_B_true={vB_accept_true:.6f}, Delta_true={vB_accept_true - vA_accept_true:.6f}"
+    )
+    print(
+        f"CLTV  : V_A_true={vA_cltv_true:.6f}, V_B_true={vB_cltv_true:.6f}, Delta_true={vB_cltv_true - vA_cltv_true:.6f}"
+    )
     print(f"\nАртефакты сохранены в: {args.artifacts_dir}")
 
 

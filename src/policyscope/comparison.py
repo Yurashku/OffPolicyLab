@@ -12,7 +12,10 @@ from policyscope.data import LoggedBanditDataset
 from policyscope.diagnostics import compute_policy_diagnostics, PolicyDiagnostics
 from policyscope.inference import infer_policy_comparison_bootstrap
 from policyscope.estimators import value_on_policy
-from policyscope.nuisance_diagnostics import NuisanceDiagnostics, compute_nuisance_diagnostics
+from policyscope.nuisance_diagnostics import (
+    NuisanceDiagnostics,
+    compute_nuisance_diagnostics,
+)
 from policyscope.nuisance import (
     CrossFitNuisanceBundle,
     PropensitySource,
@@ -69,7 +72,9 @@ class PolicyComparisonSummary:
             "V_A": self.v_a,
             "V_B": self.v_b,
             "Delta": self.delta,
-            "diagnostics": self.diagnostics.to_dict() if self.diagnostics is not None else {},
+            "diagnostics": self.diagnostics.to_dict()
+            if self.diagnostics is not None
+            else {},
             "notes": list(self.notes),
             "info_notes": list(self.info_notes),
             "diagnostic_warnings": list(self.diagnostic_warnings),
@@ -114,7 +119,8 @@ def _recommended_defaults(estimator: str) -> dict[str, object]:
         "preferred_estimator_general_use": RECOMMENDED_ESTIMATOR,
         "preferred_propensity_mode_when_logged_available": RECOMMENDED_PROPENSITY_SOURCE_WITH_LOGGED,
         "preferred_propensity_fallback_when_logged_unavailable": RECOMMENDED_PROPENSITY_SOURCE_FALLBACK,
-        "crossfit_recommended_for_estimator": estimator in RECOMMENDED_CROSSFIT_ESTIMATORS,
+        "crossfit_recommended_for_estimator": estimator
+        in RECOMMENDED_CROSSFIT_ESTIMATORS,
     }
 
 
@@ -137,7 +143,10 @@ def _build_trust_metadata(
         trust_notes.append("inference_warnings_present_ci_and_p_value_less_stable")
     if estimator in RECOMMENDED_CROSSFIT_ESTIMATORS and not use_crossfit:
         info_notes.append("crossfit_optional_recommendation_for_bias_hardening")
-    if any(w in {"low_ess_ratio", "heavy_weight_tail", "extreme_max_weight"} for w in diagnostic_warnings):
+    if any(
+        w in {"low_ess_ratio", "heavy_weight_tail", "extreme_max_weight"}
+        for w in diagnostic_warnings
+    ):
         risk_score += 1
         trust_notes.append("trust_elevated_concern_unstable_importance_weights")
 
@@ -148,7 +157,9 @@ def _build_trust_metadata(
         recommendation = "Treat comparison as directional; improve overlap/weights or collect more representative logs."
     elif risk_score > 0:
         trust_level = "caution"
-        recommendation = "Review diagnostics and inference warnings before making product decisions."
+        recommendation = (
+            "Review diagnostics and inference warnings before making product decisions."
+        )
     return tuple(info_notes), tuple(trust_notes), trust_level, recommendation
 
 
@@ -164,7 +175,6 @@ class MultiMetricComparisonResult:
         }
 
 
-
 def _unwrap_dataset_input(
     df_or_dataset: pd.DataFrame | LoggedBanditDataset,
     *,
@@ -173,7 +183,9 @@ def _unwrap_dataset_input(
     cluster_col: Optional[str],
     propensity_col: Optional[str],
     feature_cols: Optional[Sequence[str]],
-) -> tuple[pd.DataFrame, str, str, Optional[str], Optional[str], Optional[Sequence[str]]]:
+) -> tuple[
+    pd.DataFrame, str, str, Optional[str], Optional[str], Optional[Sequence[str]]
+]:
     if isinstance(df_or_dataset, LoggedBanditDataset):
         ds = df_or_dataset
         return (
@@ -209,13 +221,15 @@ def compare_policies(
     propensity_source: PropensitySource = "auto",
     propensity_col: Optional[str] = None,
 ) -> PolicyComparisonSummary:
-    df, target, action_col, cluster_col, propensity_col, feature_cols = _unwrap_dataset_input(
-        df,
-        target=target,
-        action_col=action_col,
-        cluster_col=cluster_col,
-        propensity_col=propensity_col,
-        feature_cols=feature_cols,
+    df, target, action_col, cluster_col, propensity_col, feature_cols = (
+        _unwrap_dataset_input(
+            df,
+            target=target,
+            action_col=action_col,
+            cluster_col=cluster_col,
+            propensity_col=propensity_col,
+            feature_cols=feature_cols,
+        )
     )
 
     if use_crossfit and nuisance_bundle is None:
@@ -239,7 +253,12 @@ def compare_policies(
     if estimator in {"ips", "snips", "dr", "sndr", "switch_dr"} and (
         nuisance_bundle is None or nuisance_bundle.behavior is None
     ):
-        resolved_behavior, resolved_source, resolved_propensity_col, propensity_notes = resolve_behavior_predictions(
+        (
+            resolved_behavior,
+            resolved_source,
+            resolved_propensity_col,
+            propensity_notes,
+        ) = resolve_behavior_predictions(
             df,
             policyB,
             propensity_source=propensity_source,
@@ -251,11 +270,15 @@ def compare_policies(
             cluster_col=cluster_col,
         )
 
-    external_nuisance_bootstrap_warning = (
-        "external_nuisance_not_reused_in_bootstrap_resamples_fallback_to_internal_nuisance_fit"
-    )
+    external_nuisance_bootstrap_warning = "external_nuisance_not_reused_in_bootstrap_resamples_fallback_to_internal_nuisance_fit"
     external_nuisance_observed = bool(
-        (nuisance_bundle is not None and (nuisance_bundle.behavior is not None or nuisance_bundle.outcome is not None))
+        (
+            nuisance_bundle is not None
+            and (
+                nuisance_bundle.behavior is not None
+                or nuisance_bundle.outcome is not None
+            )
+        )
         or resolved_behavior is not None
     )
     fallback_triggered = {"value": False}
@@ -309,7 +332,9 @@ def compare_policies(
         weight_clip=weight_clip,
         tau=tau,
         behavior_predictions=(
-            nuisance_bundle.behavior if nuisance_bundle is not None and nuisance_bundle.behavior is not None else resolved_behavior
+            nuisance_bundle.behavior
+            if nuisance_bundle is not None and nuisance_bundle.behavior is not None
+            else resolved_behavior
         ),
         propensity_source=propensity_source,
         propensity_col=propensity_col,
@@ -323,7 +348,9 @@ def compare_policies(
         action_col=action_col,
         propensity_source=diag.propensity_source or resolved_source,
         behavior_predictions=(
-            nuisance_bundle.behavior if nuisance_bundle is not None and nuisance_bundle.behavior is not None else resolved_behavior
+            nuisance_bundle.behavior
+            if nuisance_bundle is not None and nuisance_bundle.behavior is not None
+            else resolved_behavior
         ),
         nuisance_bundle=nuisance_bundle,
     )
@@ -380,7 +407,9 @@ def compare_policies(
         diagnostic_warnings=diag_warnings,
         inference_warnings=inference_warnings,
     )
-    notes = tuple(dict.fromkeys(info_notes + diag_warnings + inference_warnings + trust_notes))
+    notes = tuple(
+        dict.fromkeys(info_notes + diag_warnings + inference_warnings + trust_notes)
+    )
     return PolicyComparisonSummary(
         estimator=estimator,
         target=target,
@@ -436,9 +465,15 @@ def compare_policies_multi_target(
     if isinstance(df, LoggedBanditDataset):
         base_df = df.df
         base_action_col = df.schema.action_col if action_col == "a_A" else action_col
-        base_cluster_col = df.schema.cluster_col if cluster_col == "user_id" else cluster_col
-        base_propensity_col = df.schema.propensity_col if propensity_col is None else propensity_col
-        base_feature_cols = df.schema.feature_cols if feature_cols is None else feature_cols
+        base_cluster_col = (
+            df.schema.cluster_col if cluster_col == "user_id" else cluster_col
+        )
+        base_propensity_col = (
+            df.schema.propensity_col if propensity_col is None else propensity_col
+        )
+        base_feature_cols = (
+            df.schema.feature_cols if feature_cols is None else feature_cols
+        )
     else:
         base_df = df
         base_action_col = action_col

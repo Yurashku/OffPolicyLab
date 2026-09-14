@@ -9,7 +9,11 @@ from policyscope.comparison import (
 )
 from policyscope.evaluator import OPEEvaluator
 from policyscope.data import BanditSchema, LoggedBanditDataset
-from policyscope.nuisance import CrossFitNuisanceBundle, generate_oof_behavior_predictions, resolve_behavior_predictions
+from policyscope.nuisance import (
+    CrossFitNuisanceBundle,
+    generate_oof_behavior_predictions,
+    resolve_behavior_predictions,
+)
 from policyscope.policies import make_policy
 from policyscope.report import decision_summary
 from policyscope.synthetic import SynthConfig, SyntheticRecommenderEnv
@@ -84,7 +88,10 @@ def test_evaluator_delegates_to_official_comparison_path():
     out = evaluator.evaluate("dr")
     assert isinstance(summary, PolicyComparisonSummary)
     assert np.isclose(summary.delta, out["Delta"])
-    assert summary.to_dict()["diagnostics"]["replay_overlap"] == out["diagnostics"]["replay_overlap"]
+    assert (
+        summary.to_dict()["diagnostics"]["replay_overlap"]
+        == out["diagnostics"]["replay_overlap"]
+    )
 
 
 def test_report_accepts_structured_summary_object():
@@ -312,7 +319,9 @@ def test_logged_bandit_dataset_input_with_propensity_column():
         lambda n: np.concatenate([np.arange(1, n), [1]]),  # omitted + duplicated row
     ],
 )
-def test_bootstrap_does_not_reuse_external_nuisance_on_non_identical_rows(monkeypatch, index_builder):
+def test_bootstrap_does_not_reuse_external_nuisance_on_non_identical_rows(
+    monkeypatch, index_builder
+):
     logs, policyB = _prepare_env(112)
     behavior = generate_oof_behavior_predictions(
         logs,
@@ -328,7 +337,12 @@ def test_bootstrap_does_not_reuse_external_nuisance_on_non_identical_rows(monkey
     captured: list[tuple[bool, bool]] = []
 
     def wrapped_estimate(*args, **kwargs):
-        captured.append((kwargs.get("nuisance_behavior") is not None, kwargs.get("nuisance_outcome") is not None))
+        captured.append(
+            (
+                kwargs.get("nuisance_behavior") is not None,
+                kwargs.get("nuisance_outcome") is not None,
+            )
+        )
         return original_estimate(*args, **kwargs)
 
     class _FakeInferenceResult:
@@ -372,8 +386,14 @@ def test_bootstrap_does_not_reuse_external_nuisance_on_non_identical_rows(monkey
 
     assert captured[0] == (True, False)
     assert captured[-1] == (False, False)
-    assert "external_nuisance_not_reused_in_bootstrap_resamples_fallback_to_internal_nuisance_fit" in summary.inference_warnings
-    assert "external_nuisance_not_reused_in_bootstrap_resamples_fallback_to_internal_nuisance_fit" in summary.notes
+    assert (
+        "external_nuisance_not_reused_in_bootstrap_resamples_fallback_to_internal_nuisance_fit"
+        in summary.inference_warnings
+    )
+    assert (
+        "external_nuisance_not_reused_in_bootstrap_resamples_fallback_to_internal_nuisance_fit"
+        in summary.notes
+    )
 
 
 def test_with_ci_external_nuisance_fallback_warning_present():
@@ -397,4 +417,7 @@ def test_with_ci_external_nuisance_fallback_warning_present():
         nuisance_bundle=CrossFitNuisanceBundle(behavior=behavior, n_splits=3),
         n_boot=10,
     )
-    assert "external_nuisance_not_reused_in_bootstrap_resamples_fallback_to_internal_nuisance_fit" in summary.inference_warnings
+    assert (
+        "external_nuisance_not_reused_in_bootstrap_resamples_fallback_to_internal_nuisance_fit"
+        in summary.inference_warnings
+    )

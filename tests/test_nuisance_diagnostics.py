@@ -2,7 +2,11 @@ import numpy as np
 import pandas as pd
 
 from policyscope.comparison import compare_policies
-from policyscope.nuisance import BehaviorPredictions, fit_crossfit_nuisance_bundle, resolve_behavior_predictions
+from policyscope.nuisance import (
+    BehaviorPredictions,
+    fit_crossfit_nuisance_bundle,
+    resolve_behavior_predictions,
+)
 from policyscope.nuisance_diagnostics import _compute_behavior_diagnostics
 from policyscope.policies import make_policy
 from policyscope.synthetic import SynthConfig, SyntheticRecommenderEnv

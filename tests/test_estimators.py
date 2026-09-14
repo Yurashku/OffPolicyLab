@@ -39,13 +39,25 @@ def test_estimators_run_on_synthetic():
     piB_taken = prepare_piB_taken(logsA, policyB)
     pi_model = train_pi_hat(logsA)
     pA_all = pi_hat_predict(pi_model, logsA)
-    pA_taken = take_action_probabilities(pA_all, logsA["a_A"].values, action_space=pi_model.classes_)
+    pA_taken = take_action_probabilities(
+        pA_all, logsA["a_A"].values, action_space=pi_model.classes_
+    )
     mu_accept = train_mu_hat(logsA, target="accept")
-    v_ips, ess, _ = ips_value(logsA, piB_taken, pA_taken, target="accept", weight_clip=20)
-    v_snips, _, _ = snips_value(logsA, piB_taken, pA_taken, target="accept", weight_clip=20)
-    v_dr, _, _ = dr_value(logsA, policyB, mu_accept, pA_taken, target="accept", weight_clip=20)
-    v_sndr, _, _ = sndr_value(logsA, policyB, mu_accept, pA_taken, target="accept", weight_clip=20)
-    v_switch, _, _ = switch_dr_value(logsA, policyB, mu_accept, pA_taken, tau=20, target="accept")
+    v_ips, ess, _ = ips_value(
+        logsA, piB_taken, pA_taken, target="accept", weight_clip=20
+    )
+    v_snips, _, _ = snips_value(
+        logsA, piB_taken, pA_taken, target="accept", weight_clip=20
+    )
+    v_dr, _, _ = dr_value(
+        logsA, policyB, mu_accept, pA_taken, target="accept", weight_clip=20
+    )
+    v_sndr, _, _ = sndr_value(
+        logsA, policyB, mu_accept, pA_taken, target="accept", weight_clip=20
+    )
+    v_switch, _, _ = switch_dr_value(
+        logsA, policyB, mu_accept, pA_taken, tau=20, target="accept"
+    )
 
     assert np.isfinite(v_ips)
     assert np.isfinite(v_snips)
@@ -64,14 +76,18 @@ def test_invalid_inputs_raise_errors():
 
     df_missing = pd.DataFrame({"accept": [1]})
     pA2 = np.array([0.5])
-    dummy_policy = type("P", (), {"action_probs": lambda self, d: np.ones((len(d), 1))})()
+    dummy_policy = type(
+        "P", (), {"action_probs": lambda self, d: np.ones((len(d), 1))}
+    )()
     dummy_model = object()
     with pytest.raises(ValueError):
         dr_value(df_missing, dummy_policy, dummy_model, pA2, target="accept")
     with pytest.raises(ValueError):
         sndr_value(df_missing, dummy_policy, dummy_model, pA2, target="accept")
     with pytest.raises(ValueError):
-        switch_dr_value(df_missing, dummy_policy, dummy_model, pA2, tau=1.0, target="accept")
+        switch_dr_value(
+            df_missing, dummy_policy, dummy_model, pA2, tau=1.0, target="accept"
+        )
 
 
 def test_estimators_support_custom_columns():
@@ -79,13 +95,26 @@ def test_estimators_support_custom_columns():
     env = SyntheticRecommenderEnv(cfg)
     X = env.sample_users()
     policyA = make_policy("epsilon_greedy", epsilon=0.2, seed=7)
-    logs = env.simulate_logs_A(policyA, X).rename(columns={"a_A": "action_logged", "accept": "reward"})
+    logs = env.simulate_logs_A(policyA, X).rename(
+        columns={"a_A": "action_logged", "accept": "reward"}
+    )
     policyB = make_policy("softmax", tau=0.9, seed=8)
     piB_taken = prepare_piB_taken(logs, policyB, action_col="action_logged")
-    pi_model = train_pi_hat(logs, feature_cols=["loyal", "age", "risk", "income"], action_col="action_logged")
+    pi_model = train_pi_hat(
+        logs,
+        feature_cols=["loyal", "age", "risk", "income"],
+        action_col="action_logged",
+    )
     pA_all = pi_hat_predict(pi_model, logs)
-    pA_taken = take_action_probabilities(pA_all, logs["action_logged"].values, action_space=pi_model.classes_)
-    mu = train_mu_hat(logs, target="reward", feature_cols=["loyal", "age", "risk", "income"], action_col="action_logged")
+    pA_taken = take_action_probabilities(
+        pA_all, logs["action_logged"].values, action_space=pi_model.classes_
+    )
+    mu = train_mu_hat(
+        logs,
+        target="reward",
+        feature_cols=["loyal", "age", "risk", "income"],
+        action_col="action_logged",
+    )
 
     v_dr, _, _ = dr_value(
         logs,
@@ -208,13 +237,17 @@ def test_structured_inference_result_shape():
         )
         return v_a, v_b, v_b - v_a
 
-    res = infer_policy_comparison_bootstrap(logs, estimator_pair, cluster_col="user_id", n_boot=20, alpha=0.1)
+    res = infer_policy_comparison_bootstrap(
+        logs, estimator_pair, cluster_col="user_id", n_boot=20, alpha=0.1
+    )
     assert isinstance(res, PolicyComparisonResult)
     assert isinstance(res.inference, ComparisonInferenceResult)
     assert isinstance(res.inference.delta_ci, IntervalResult)
     assert 0.0 <= res.inference.p_value <= 1.0
     assert isinstance(res.inference.is_significant, bool)
-    assert res.inference.significance_rule == "centered_paired_bootstrap_p_value_lt_alpha"
+    assert (
+        res.inference.significance_rule == "centered_paired_bootstrap_p_value_lt_alpha"
+    )
     out = res.to_dict()
     assert "Delta_CI" in out and "is_significant" in out
 
