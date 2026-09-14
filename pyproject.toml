@@ -15,7 +15,8 @@ dependencies = [
     "pandas>=1.4",
     "scikit-learn>=1.1",
     "scipy>=1.8",
-    "matplotlib>=3.5"
+    "matplotlib>=3.5",
+    "ruff (>=0.16.7,<0.17.0)"
 ]
 
 [tool.setuptools]
