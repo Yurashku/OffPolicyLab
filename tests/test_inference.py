@@ -1,208 +1,127 @@
-"""Проверка слоя инференса: ресэмплинг, интервалы, значимость, покрытие."""
+"""Инференс: кластерно-робастная SE, bootstrap, Romano–Wolf."""
 
 from __future__ import annotations
 
 import numpy as np
-import pandas as pd
 import pytest
+from scipy import stats
 
-from policyscope.comparison import compare_policies
 from policyscope.inference import (
-    ClusterResampler,
-    cluster_robust_se,
-    infer_comparison_bootstrap,
-    infer_comparison_influence,
+    analytic_summary,
+    bootstrap_positions,
+    centered_pvalue,
+    cluster_members,
+    cluster_se,
+    cluster_sums,
+    multiplier_tstats,
+    romano_wolf,
+    run_bootstrap,
+    t_critical,
 )
 
-from conftest import make_controlled_bandit
+
+class TestAnalytic:
+    def test_unclustered_se_is_sample_sd_over_sqrt_n(self):
+        x = np.random.default_rng(0).normal(size=500)
+        se = cluster_se(cluster_sums(x, np.arange(500), 500), 500)[0]
+        assert se == pytest.approx(np.std(x, ddof=1) / np.sqrt(500))
+
+    def test_clustered_se_matches_manual_cr1(self):
+        rng = np.random.default_rng(1)
+        clusters = rng.integers(0, 30, 600)
+        x = rng.normal(size=600) + rng.normal(size=30)[clusters]
+        s = (x - x.mean())
+        sums = np.array([s[clusters == g].sum() for g in range(30)])
+        expected = np.sqrt(30 / 29 * np.sum(sums**2)) / 600
+        assert cluster_se(cluster_sums(x, clusters, 30), 600)[0] == pytest.approx(expected)
+
+    def test_t_critical_uses_cluster_df(self):
+        assert t_critical(0.05, 11) == pytest.approx(stats.t.ppf(0.975, 10))
+
+    def test_ci_and_p_value_agree(self):
+        rng = np.random.default_rng(2)
+        for shift in (0.0, 0.05, 0.2):
+            x = rng.normal(shift, 1, 400)
+            s = analytic_summary(x, np.arange(400), 400, 0.05)
+            excludes = s["low"][0] > 0 or s["high"][0] < 0
+            assert excludes == (s["p_value"][0] < 0.05)
 
 
-class TestClusterResampler:
-    def test_row_bootstrap_preserves_size(self):
-        df = pd.DataFrame({"x": np.arange(50)})
-        r = ClusterResampler(df, None)
-        part = r.resample(df, np.random.default_rng(0))
-        assert len(part) == 50
-        assert r.n_clusters is None
+class TestRomanoWolf:
+    def null(self, rho, j, b=4000, seed=0):
+        rng = np.random.default_rng(seed)
+        cov = np.full((j, j), rho) + (1 - rho) * np.eye(j)
+        return rng.multivariate_normal(np.zeros(j), cov, size=b)
 
-    def test_cluster_bootstrap_keeps_clusters_intact(self):
-        """Кластер попадает в реплику целиком: это и есть смысл кластерного bootstrap."""
-        df = pd.DataFrame({"user_id": [1, 1, 1, 2, 2, 3], "x": range(6)})
-        r = ClusterResampler(df, "user_id")
-        assert r.n_clusters == 3
-        rng = np.random.default_rng(0)
-        for _ in range(20):
-            part = r.resample(df, rng)
-            sizes = part.groupby("user_id").size()
-            for user, size in sizes.items():
-                original = int((df["user_id"] == user).sum())
-                assert size % original == 0, "кластер попал в выборку частично"
+    def test_single_hypothesis_equals_bootstrap_p(self):
+        t_null = self.null(0, 1)
+        p = romano_wolf(np.array([2.0]), t_null)[0]
+        assert p == pytest.approx(2 * stats.norm.sf(2.0), abs=0.01)
 
-    def test_missing_cluster_column_raises(self):
-        """Молчаливый откат к построчному bootstrap недопустим: он занижает CI."""
-        df = pd.DataFrame({"x": [1, 2, 3]})
-        with pytest.raises(ValueError, match="Колонка кластеров"):
-            ClusterResampler(df, "user_id")
+    def test_perfectly_correlated_tests_need_no_correction(self):
+        t_null = self.null(0.999, 4)
+        p = romano_wolf(np.array([2.5, 0.5, 0.3, 0.1]), t_null)
+        assert p[0] == pytest.approx(2 * stats.norm.sf(2.5), abs=0.01)
 
-    def test_resampling_is_reproducible(self):
-        df = pd.DataFrame({"user_id": [1, 1, 2, 2, 3, 3], "x": range(6)})
-        r = ClusterResampler(df, "user_id")
-        a = r.positions(np.random.default_rng(42))
-        b = r.positions(np.random.default_rng(42))
-        assert np.array_equal(a, b)
+    def test_independent_tests_close_to_sidak(self):
+        t_null = self.null(0.0, 5, b=20000)
+        p = romano_wolf(np.array([2.8, 0.1, 0.2, 0.3, 0.4]), t_null)
+        raw = 2 * stats.norm.sf(2.8)
+        assert p[0] == pytest.approx(1 - (1 - raw) ** 5, abs=0.01)
 
+    def test_monotone_in_statistic_and_not_below_raw(self):
+        t_obs = np.array([3.0, 2.5, 1.0, 0.2])
+        p = romano_wolf(t_obs, self.null(0.3, 4))
+        assert np.all(np.diff(p) >= 0)
+        assert np.all(p >= 2 * stats.norm.sf(np.abs(t_obs)) - 0.01)
 
-class TestClusterRobustSE:
-    def test_reduces_to_standard_error_without_clusters(self):
-        x = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
-        expected = float(np.std(x, ddof=0) / np.sqrt(len(x)))
-        assert cluster_robust_se(x) == pytest.approx(expected)
+    def test_nan_statistics_are_ignored(self):
+        p = romano_wolf(np.array([np.nan, 2.0]), self.null(0, 2))
+        assert np.isnan(p[0]) and np.isfinite(p[1])
 
-    def test_perfectly_correlated_clusters_inflate_se(self):
-        """Дублирование строк внутри кластера не должно «создавать» информацию."""
-        base = np.array([1.0, 2.0, 3.0, 4.0])
-        duplicated = np.repeat(base, 3)
-        clusters = np.repeat(np.arange(4), 3)
-        naive = cluster_robust_se(duplicated)
-        clustered = cluster_robust_se(duplicated, clusters=clusters)
-        assert clustered > naive
-        # При полной корреляции внутри кластера SE равна SE по 4 независимым точкам.
-        assert clustered == pytest.approx(cluster_robust_se(base), rel=1e-9)
+    def test_multiplier_preserves_correlation(self):
+        rng = np.random.default_rng(3)
+        z = rng.normal(size=1000)
+        psi = np.column_stack([z, z + 0.1 * rng.normal(size=1000)])
+        sums = cluster_sums(psi, np.arange(1000), 1000)
+        se = cluster_se(sums, 1000)
+        t = multiplier_tstats(sums, se, 1000, 3000, rng)
+        assert np.std(t, axis=0) == pytest.approx([1, 1], abs=0.05)
+        assert np.corrcoef(t.T)[0, 1] > 0.98
 
 
-class TestInfluenceInference:
-    def test_delta_uses_paired_contributions(self):
-        """Если вклад B равен награде, delta ровно ноль и SE ноль."""
-        r = np.array([1.0, 0.0, 1.0, 1.0])
-        out = infer_comparison_influence(r, r)
-        assert out.delta == pytest.approx(0.0)
-        assert out.se_delta == pytest.approx(0.0)
+class TestBootstrap:
+    def test_cluster_resampling_keeps_whole_clusters(self):
+        clusters = np.repeat(np.arange(10), [1, 2, 3, 4, 5, 1, 2, 3, 4, 5])
+        members = cluster_members(clusters, 10)
+        pos = bootstrap_positions(clusters, 10, np.random.default_rng(0), members)
+        counts = np.bincount(clusters[pos], minlength=10)
+        sizes = np.bincount(clusters, minlength=10)
+        assert all(c % s == 0 for c, s in zip(counts, sizes))
 
-    def test_detects_obvious_difference(self):
-        rng = np.random.default_rng(0)
-        r = rng.normal(0, 1, size=2000)
-        psi_b = r + 0.5
-        out = infer_comparison_influence(psi_b, r)
-        assert out.delta == pytest.approx(0.5, abs=1e-9)
-        assert out.p_value < 1e-6
-        assert out.is_significant
-        assert out.ci_excludes_zero
+    def test_reproducible_and_independent_of_n_jobs(self):
+        x = np.random.default_rng(0).normal(size=200)
 
-    def test_length_mismatch_raises(self):
-        with pytest.raises(ValueError):
-            infer_comparison_influence(np.zeros(3), np.zeros(4))
+        def mean_rep(positions, seed):
+            return np.array([x[positions].mean()])
 
+        kw = dict(clusters=np.arange(200), n_clusters=200, clustered=False, n_boot=30, seed=5)
+        a = run_bootstrap(mean_rep, n_jobs=1, **kw)
+        b = run_bootstrap(mean_rep, n_jobs=2, **kw)
+        np.testing.assert_allclose(a, b)
 
-class TestBootstrapInference:
-    def test_reuses_observed_point_estimate(self):
-        """Переданная точечная оценка не должна пересчитываться."""
-        df = pd.DataFrame({"user_id": range(60), "r": np.linspace(0, 1, 60)})
-        calls = {"n": 0}
+    def test_failed_replicates_become_nan(self):
+        def flaky(positions, seed):
+            if seed % 2:
+                raise ValueError("вырожденная реплика")
+            return np.array([1.0])
 
-        def pair(part):
-            calls["n"] += 1
-            return float(part["r"].mean()), float(part["r"].mean()) + 0.1
+        out = run_bootstrap(flaky, clusters=np.arange(10), n_clusters=10, clustered=False,
+                            n_boot=40, seed=0, n_jobs=1)
+        assert np.isnan(out).any() and np.isfinite(out).any()
 
-        out = infer_comparison_bootstrap(
-            df, pair, cluster_col="user_id", n_boot=20, observed=(0.5, 0.6)
-        )
-        assert out.v_a == 0.5 and out.v_b == 0.6
-        assert calls["n"] == 20, "точечная оценка была посчитана лишний раз"
-
-    def test_failed_replicates_are_dropped_not_propagated(self):
-        """Одна упавшая реплика не должна превращать весь интервал в NaN."""
-        df = pd.DataFrame({"user_id": range(60), "r": np.linspace(0, 1, 60)})
-        state = {"n": 0}
-
-        def pair(part):
-            state["n"] += 1
-            if state["n"] == 3:
-                raise ValueError("смоделированный сбой реплики")
-            return 0.5, 0.6
-
-        out = infer_comparison_bootstrap(df, pair, cluster_col="user_id", n_boot=40)
-        assert np.isfinite(out.delta_ci.low)
-        assert "bootstrap_replicates_with_nan_dropped" in out.warnings
-
-    def test_warns_on_few_clusters_and_low_n_boot(self):
-        df = pd.DataFrame({"user_id": [1, 2, 3, 4], "r": [0.0, 1.0, 0.0, 1.0]})
-        out = infer_comparison_bootstrap(
-            df, lambda p: (0.5, 0.6), cluster_col="user_id", n_boot=10
-        )
-        assert "few_clusters_inference_unreliable" in out.warnings
-        assert "low_n_boot_ci_tails_unstable" in out.warnings
-
-
-class TestSignificanceConsistency:
-    def test_ci_and_p_value_are_reported_separately(self):
-        """Два правила значимости приводятся раздельно, а не смешиваются."""
-        bandit = make_controlled_bandit(n=800, seed=5)
-        policy = bandit.policy_b()
-        result = compare_policies(
-            bandit.df, policy, estimator="ips", target="reward", action_col="action",
-            action_space=bandit.action_space, feature_cols=["x1", "x2"],
-            propensity_col="propensity", propensity_source="logged",
-            cluster_col=None, inference="influence",
-        )
-        assert result.is_significant is not None
-        assert result.ci_excludes_zero is not None
-        assert result.significance_rule
-
-
-@pytest.mark.slow
-class TestCoverage:
-    """Фактическое покрытие 95% интервала должно быть близко к номинальному."""
-
-    @pytest.mark.parametrize(
-        "method, estimator, n_reps",
-        [
-            ("influence", "ips", 300),
-            ("influence", "dr", 150),
-            ("bootstrap", "ips", 150),
-        ],
-    )
-    def test_delta_ci_covers_truth(self, method, estimator, n_reps):
-        covered = 0
-        for seed in range(n_reps):
-            bandit = make_controlled_bandit(n=1500, seed=9000 + seed)
-            result = compare_policies(
-                bandit.df, bandit.policy_b(), estimator=estimator, target="reward",
-                action_col="action", action_space=bandit.action_space,
-                feature_cols=["x1", "x2"], propensity_col="propensity",
-                propensity_source="logged", cluster_col=None,
-                inference=method, n_boot=200, rng_seed=seed * 31 + 1,
-                honest_outcome_metrics=False,
-            )
-            low, high = result.delta_ci
-            covered += int(low <= bandit.true_delta <= high)
-        coverage = covered / n_reps
-        assert 0.88 <= coverage <= 1.0, (
-            f"{method}/{estimator}: покрытие {coverage:.3f} вне [0.88, 1.0] "
-            f"({covered}/{n_reps})"
-        )
-
-    def test_influence_ci_is_anticonservative_for_dm(self):
-        """Задокументированное ограничение должно подтверждаться эмпирически.
-
-        Для DM ошибка модели исхода входит в оценку первым порядком, а
-        аналитический интервал её не учитывает. Если этот тест начнёт падать
-        «в хорошую сторону», предупреждение в отчёте нужно пересмотреть.
-        """
-        n_reps = 100
-        covered = 0
-        for seed in range(n_reps):
-            bandit = make_controlled_bandit(n=1500, seed=7000 + seed)
-            result = compare_policies(
-                bandit.df, bandit.policy_b(), estimator="dm", target="reward",
-                action_col="action", action_space=bandit.action_space,
-                feature_cols=["x1", "x2"], propensity_col="propensity",
-                propensity_source="logged", cluster_col=None, inference="influence",
-                honest_outcome_metrics=False,
-            )
-            low, high = result.delta_ci
-            covered += int(low <= bandit.true_delta <= high)
-        coverage = covered / n_reps
-        assert coverage < 0.9, (
-            f"покрытие DM {coverage:.3f} неожиданно высоко — проверьте, "
-            "актуально ли предупреждение influence_ci_anticonservative_for_dm"
-        )
+    def test_centered_p_value(self):
+        samples = np.random.default_rng(1).normal(0.0, 1.0, size=(2000, 1))
+        assert centered_pvalue(samples, np.array([0.0]))[0] == pytest.approx(1.0)
+        # Реплики разбросаны вокруг оценки 3.5: ноль далеко в хвосте.
+        assert centered_pvalue(samples + 3.5, np.array([3.5]))[0] < 0.01

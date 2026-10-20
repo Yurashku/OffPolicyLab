@@ -1,265 +1,239 @@
-"""
-policyscope.synthetic
-=====================
+"""Синтетический банк с офферами — среда, где истинное значение политики известно.
 
-Синтетическая среда для проверки OPE-оценщиков против **известной истины**.
+Нужна, чтобы проверять оценщики против истины (на реальных логах её нет) и чтобы
+туториалы были воспроизводимы. Устроена как реальные логи:
 
-Пользователи описываются признаками (лояльность, возраст, риск, доход), доступны
-четыре действия. Для каждого действия задан свой вектор коэффициентов отклика и
-приращения CLTV — то есть эффект действительно зависит от действия, и модель
-исхода без взаимодействий ``x*a`` выразить его не может (это и проверяется).
+- четыре оффера со строковыми метками (``card``, ``deposit``, ``loan``, ``insurance``);
+- признаки клиента, включая категориальный регион;
+- две метрики: принятие оффера (0/1) и выручка (непрерывная, ноль при отказе);
+- клиент может приходить несколько раз (``visits``), и у него есть ненаблюдаемая
+  склонность соглашаться (``client_effect``) — строки одного клиента зависимы, как
+  в жизни. Именно это проверяет кластерный инференс.
 
-Ключевое свойство: :meth:`SyntheticRecommenderEnv.oracle_value` считает истинное
-значение политики **аналитически**, а не сэмплированием. Раньше оракул тянул
-действие из политики и бернуллиевский отклик, усредняя реализации; при малом числе
-прогонов его собственная стандартная ошибка была сопоставима с измеряемым смещением
-оценщиков, и все числа bias/coverage были зашумлены самим эталоном.
+:meth:`OfferSimulator.true_value` считает истинное значение политики **аналитически**:
+вероятности принятия интегрируются по распределению клиентского эффекта квадратурой
+Гаусса–Эрмита, а не сэмплированием, поэтому у эталона нет собственного шума.
 
 Example:
-    >>> cfg = SynthConfig(n_users=10_000, seed=42)
-    >>> env = SyntheticRecommenderEnv(cfg)
-    >>> X = env.sample_users()
-    >>> logs = env.simulate_logs_A(policyA, X)
-    >>> truth = env.oracle_value(policyB, X, metric="accept")
+    >>> sim = ps.synthetic.OfferSimulator(seed=0)
+    >>> clients = sim.sample_clients(5000)
+    >>> policy_a = sim.policy("epsilon_greedy", epsilon=0.2, seed=1)
+    >>> logs = sim.simulate(clients, policy_a)
+    >>> sim.true_value(logs, policy_a, "accepted")
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any
 
 import numpy as np
 import pandas as pd
 
-__all__ = ["SynthConfig", "SyntheticRecommenderEnv"]
+from policyscope.policy import epsilon_greedy, greedy, softmax
+
+__all__ = ["OfferSimulator", "SimPolicy"]
+
+ACTIONS = ("card", "deposit", "loan", "insurance")
+REGIONS = ("center", "east", "north", "south", "west")
+_GH_NODES, _GH_WEIGHTS = np.polynomial.hermite_e.hermegauss(40)
+_GH_WEIGHTS = _GH_WEIGHTS / _GH_WEIGHTS.sum()
+
+
+def _sigmoid(z: np.ndarray) -> np.ndarray:
+    return 1.0 / (1.0 + np.exp(-z))
 
 
 @dataclass
-class SynthConfig:
-    """Конфигурация синтетической среды.
+class SimPolicy:
+    """Политика симулятора: линейные скоры по признакам клиента + правило выбора.
 
-    Attributes:
-        n_users: Количество пользователей в выборке.
-        horizon_days: Горизонт CLTV в днях (сохранён для совместимости).
-        seed: Случайное зерно.
+    Вызов :meth:`action_probs` возвращает таблицу вероятностей (колонки — офферы),
+    то есть ровно тот формат, который принимает :meth:`policyscope.Evaluator.evaluate`.
     """
 
-    n_users: int = 50_000
-    horizon_days: int = 90
-    seed: int = 42
+    simulator: "OfferSimulator"
+    kind: str
+    weights: np.ndarray
+    epsilon: float = 0.1
+    temperature: float = 1.0
+
+    def scores(self, df: pd.DataFrame) -> pd.DataFrame:
+        values = self.simulator.design(df) @ self.weights.T
+        return pd.DataFrame(values, index=df.index, columns=list(ACTIONS))
+
+    def action_probs(self, df: pd.DataFrame) -> pd.DataFrame:
+        s = self.scores(df)
+        if self.kind == "greedy":
+            return greedy(s)
+        if self.kind == "epsilon_greedy":
+            return epsilon_greedy(s, self.epsilon)
+        if self.kind == "softmax":
+            return softmax(s, self.temperature)
+        if self.kind == "uniform":
+            return pd.DataFrame(1.0 / len(ACTIONS), index=df.index, columns=list(ACTIONS))
+        raise ValueError(f"Неизвестный тип политики: {self.kind}")
 
 
-class SyntheticRecommenderEnv:
-    """Синтетическая среда с известными истинными значениями политик."""
+class OfferSimulator:
+    """Генератор логов и оракул истинного значения политик.
 
-    #: Четыре действия — например, разные офферы.
-    ACTIONS = np.array([0, 1, 2, 3], dtype=int)
+    Args:
+        seed: Зерно генерации клиентов и откликов.
+        client_effect: Стандартное отклонение ненаблюдаемой склонности клиента
+            соглашаться (на шкале логитов). ``0`` — строки независимы.
+    """
 
-    def __init__(self, config: SynthConfig) -> None:
-        self.cfg = config
-        # Отдельные потоки случайности: вызов оракула не должен сдвигать
-        # генерацию данных, иначе результат зависит от порядка вызовов.
-        self.rng = np.random.default_rng(config.seed)
-        self._oracle_rng = np.random.default_rng(config.seed + 10_000)
+    actions = ACTIONS
 
-        # Истинные коэффициенты вероятности принятия: (n_actions, 1 + n_features).
+    def __init__(self, seed: int = 0, client_effect: float = 0.0) -> None:
+        if client_effect < 0:
+            raise ValueError("client_effect не может быть отрицательным")
+        self.rng = np.random.default_rng(seed)
+        self.client_effect = float(client_effect)
+        self._effects = np.zeros(0)
+        # Логит принятия: [1, loyal, age_z, risk_z, income_z] + эффект региона, по офферу.
         self.beta = np.array([
-            [-0.2,  0.8,  0.2, -0.4,  0.1],   # действие 0
-            [-0.4,  0.5, -0.1, -0.2,  0.4],   # действие 1
-            [-0.1,  0.3,  0.1, -0.1,  0.2],   # действие 2
-            [-0.3,  0.4,  0.2,  0.1, -0.1],   # действие 3
-        ], dtype=float)
-
-        # Истинные коэффициенты приращения CLTV при принятии.
+            [-1.2, 0.8, -0.4, -0.6, 0.5],    # card
+            [-1.6, 1.0, 0.6, -0.2, 0.7],     # deposit
+            [-1.4, 0.3, -0.2, 0.9, -0.4],    # loan
+            [-1.8, 0.5, 0.5, 0.3, 0.2],      # insurance
+        ])
+        self.region_effect = np.array([
+            [0.0, 0.2, -0.3, 0.1, 0.0],
+            [0.0, -0.1, 0.3, -0.2, 0.1],
+            [0.0, 0.3, 0.1, 0.2, -0.3],
+            [0.0, -0.2, 0.0, 0.3, 0.2],
+        ])
+        # Выручка при принятии: 100 * exp(gamma_a · [1, loyal, age_z, risk_z, income_z]).
         self.gamma = np.array([
-            [200.0, 120.0,  80.0, -60.0,  50.0],
-            [300.0, 180.0, -30.0, -90.0,  70.0],
-            [150.0,  90.0,  40.0, -20.0,  30.0],
-            [100.0,  50.0,  60.0,  30.0, -10.0],
-        ], dtype=float)
-
-    # ------------------------------------------------------------------
-    # Пользователи и признаки
-    # ------------------------------------------------------------------
-
-    def sample_users(self, n: Optional[int] = None) -> pd.DataFrame:
-        """Генерирует таблицу пользователей.
-
-        Returns:
-            DataFrame с колонками ``user_id, loyal, age, risk, income, region``.
-        """
-        n = n or self.cfg.n_users
-        r = self.rng
-        return pd.DataFrame({
-            "user_id": np.arange(n, dtype=np.int64),
-            "loyal": r.binomial(1, 0.55, size=n),
-            "age": r.integers(18, 70, size=n),
-            "risk": r.uniform(0, 1, size=n),
-            "income": r.lognormal(mean=10.5, sigma=0.5, size=n),
-            "region": r.integers(0, 5, size=n),
-        })
-
-    def feature_matrix(self, X: pd.DataFrame) -> np.ndarray:
-        """Матрица признаков ``(n, 5)``: ``[1, loyal, age_z, risk_z, income_z]``."""
-        age_z = (X["age"].to_numpy(dtype=float) - 40) / 12.0
-        risk_z = (X["risk"].to_numpy(dtype=float) - 0.5) / 0.25
-        income_z = (np.log(X["income"].to_numpy(dtype=float)) - 10.5) / 0.5
-        return np.column_stack([
-            np.ones(len(X)),
-            X["loyal"].to_numpy(dtype=float),
-            age_z,
-            risk_z,
-            income_z,
+            [0.0, 0.2, -0.1, 0.1, 0.3],
+            [0.4, 0.3, 0.2, -0.2, 0.5],
+            [0.7, -0.1, -0.2, 0.3, 0.2],
+            [-0.2, 0.2, 0.3, 0.0, 0.1],
         ])
 
     # ------------------------------------------------------------------
-    # Истинные величины
+    # Клиенты и признаки
     # ------------------------------------------------------------------
 
-    def accept_prob_all_actions(self, X: pd.DataFrame) -> np.ndarray:
-        """Истинная ``P(accept=1 | x, a)`` для всех действий: матрица ``(n, k)``."""
-        feats = self.feature_matrix(X)
-        logits = feats @ self.beta.T
-        return np.clip(1.0 / (1.0 + np.exp(-logits)), 1e-6, 1 - 1e-6)
+    def sample_clients(self, n_clients: int, visits: int = 1) -> pd.DataFrame:
+        """Клиенты с признаками; при ``visits > 1`` каждый клиент — несколько строк."""
+        if n_clients < 1 or visits < 1:
+            raise ValueError("n_clients и visits должны быть положительными")
+        r = self.rng
+        start = len(self._effects)
+        self._effects = np.concatenate([
+            self._effects, r.normal(0.0, self.client_effect, size=n_clients)
+        ])
+        clients = pd.DataFrame({
+            "client_id": np.arange(start, start + n_clients),
+            "age": r.integers(18, 75, size=n_clients),
+            "income": np.round(r.lognormal(mean=11.0, sigma=0.5, size=n_clients), -2),
+            "loyal": r.binomial(1, 0.45, size=n_clients),
+            "risk": np.round(r.uniform(0, 1, size=n_clients), 3),
+            "region": r.choice(REGIONS, size=n_clients),
+        })
+        if visits > 1:
+            clients = clients.loc[clients.index.repeat(visits)].reset_index(drop=True)
+        return clients
 
-    def true_accept_prob(self, X: pd.DataFrame, a: np.ndarray) -> np.ndarray:
-        """Истинная вероятность принятия для фактически выбранных действий."""
-        all_probs = self.accept_prob_all_actions(X)
-        idx = np.asarray(a, dtype=int)
-        return all_probs[np.arange(len(X)), idx]
+    def design(self, df: pd.DataFrame) -> np.ndarray:
+        """Признаки для скоров политик: ``[1, loyal, age_z, risk_z, income_z, onehot(region)]``."""
+        return np.column_stack([self._core(df), self._region_onehot(df)])
 
-    def uplift_all_actions(self, X: pd.DataFrame) -> np.ndarray:
-        """Приращение CLTV при принятии для всех действий: матрица ``(n, k)``."""
-        return np.maximum(0.0, self.feature_matrix(X) @ self.gamma.T)
+    @staticmethod
+    def _core(df: pd.DataFrame) -> np.ndarray:
+        return np.column_stack([
+            np.ones(len(df)),
+            df["loyal"].to_numpy(dtype=float),
+            (df["age"].to_numpy(dtype=float) - 45.0) / 15.0,
+            (df["risk"].to_numpy(dtype=float) - 0.5) / 0.29,
+            (np.log(df["income"].to_numpy(dtype=float)) - 11.0) / 0.5,
+        ])
 
-    def uplift_if_accepted(self, X: pd.DataFrame, a: np.ndarray) -> np.ndarray:
-        """Приращение CLTV при принятии выбранного действия."""
-        all_uplift = self.uplift_all_actions(X)
-        return all_uplift[np.arange(len(X)), np.asarray(a, dtype=int)]
+    @staticmethod
+    def _region_onehot(df: pd.DataFrame) -> np.ndarray:
+        codes = pd.Categorical(df["region"], categories=REGIONS).codes
+        out = np.zeros((len(df), len(REGIONS)))
+        out[np.arange(len(df)), codes] = 1.0
+        return out
 
-    def draw_accept(self, p: np.ndarray) -> np.ndarray:
-        """Сэмплирует бинарный отклик по заданным вероятностям."""
-        return self.rng.binomial(1, p).astype(int)
+    def _logits(self, df: pd.DataFrame) -> np.ndarray:
+        return self._core(df) @ self.beta.T + self._region_onehot(df) @ self.region_effect.T
 
-    def _base_cltv_mean(self, X: pd.DataFrame) -> np.ndarray:
-        """Детерминированная часть базового CLTV (без шума и усечения)."""
-        income_z = (np.log(X["income"].to_numpy(dtype=float)) - 10.5) / 0.5
-        return 300.0 + 400.0 * X["loyal"].to_numpy(dtype=float) + 120.0 * np.maximum(income_z, -1)
+    def _client_effect(self, df: pd.DataFrame) -> np.ndarray:
+        return self._effects[df["client_id"].to_numpy()]
 
-    def base_cltv(self, X: pd.DataFrame) -> np.ndarray:
-        """Базовый CLTV с шумом (до uplift)."""
-        noise = self.rng.normal(0, 30, size=len(X))
-        return np.maximum(self._base_cltv_mean(X) + noise, 50.0)
+    def accept_probability(self, df: pd.DataFrame) -> np.ndarray:
+        """Средняя по клиентскому эффекту вероятность принятия ``(n, k)``."""
+        z = self._logits(df)
+        if self.client_effect == 0:
+            return _sigmoid(z)
+        nodes = self.client_effect * _GH_NODES
+        return np.tensordot(_sigmoid(z[..., None] + nodes), _GH_WEIGHTS, axes=([-1], [0]))
 
-    def draw_cltv(self, X: pd.DataFrame, a: np.ndarray, accepted: np.ndarray) -> np.ndarray:
-        """Сэмплирует CLTV: ``base + accepted * uplift + N(0, 25)``, усечённый снизу."""
-        base = self.base_cltv(X)
-        upl = self.uplift_if_accepted(X, a)
-        noise = self.rng.normal(0, 25, size=len(X))
-        return np.maximum(base + accepted * upl + noise, 10.0)
+    def revenue_if_accepted(self, df: pd.DataFrame) -> np.ndarray:
+        """Ожидаемая выручка при принятии ``(n, k)``."""
+        return 100.0 * np.exp(self._core(df) @ self.gamma.T)
 
     # ------------------------------------------------------------------
-    # Оракул
+    # Политики, логи, истина
     # ------------------------------------------------------------------
 
-    def _policy_probs(self, policy, X: pd.DataFrame) -> np.ndarray:
-        probs = np.asarray(policy.action_probs(X), dtype=float)
-        if probs.shape != (len(X), len(self.ACTIONS)):
-            raise ValueError(
-                f"Политика вернула форму {probs.shape}, ожидалось "
-                f"{(len(X), len(self.ACTIONS))}"
-            )
-        return probs
-
-    def oracle_value(
-        self,
-        policy,
-        X: pd.DataFrame,
-        metric: str = "accept",
-        n_mc: int = 64,
-    ) -> float:
-        """Истинное значение метрики под политикой на выборке ``X``.
-
-        Для ``accept`` результат **точный**: ``mean_i sum_a pi(a|x_i) p(x_i, a)``.
-        Сэмплирование не используется, ``n_mc`` игнорируется.
-
-        Для ``cltv`` интегрирование по действиям и по бернуллиевскому отклику тоже
-        аналитическое; методом Монте-Карло берётся только гауссовский шум, который
-        не убирается аналитически из-за усечения ``max(..., 10)``. Используется
-        отдельный генератор, поэтому вызов оракула не влияет на генерацию данных.
+    def policy(
+        self, kind: str, *, seed: int = 0, epsilon: float = 0.1, temperature: float = 1.0
+    ) -> SimPolicy:
+        """Политика со случайными (по ``seed``) линейными скорами.
 
         Args:
-            policy: Политика с методом ``action_probs``.
-            X: Выборка пользователей.
-            metric: ``accept`` или ``cltv``.
-            n_mc: Число прогонов Монте-Карло для шума CLTV.
-
-        Returns:
-            Истинное ожидаемое значение метрики.
+            kind: ``greedy``, ``epsilon_greedy``, ``softmax`` или ``uniform``.
+            seed: Разные зёрна — разные «модели» ранжирования.
         """
-        probs = self._policy_probs(policy, X)
+        if kind not in ("greedy", "epsilon_greedy", "softmax", "uniform"):
+            raise ValueError(f"Неизвестный тип политики: {kind}")
+        r = np.random.default_rng(seed)
+        weights = r.normal(0.0, 1.0, size=(len(ACTIONS), 5 + len(REGIONS)))
+        return SimPolicy(self, kind, weights, epsilon=epsilon, temperature=temperature)
 
-        if metric == "accept":
-            return float(np.mean(np.sum(probs * self.accept_prob_all_actions(X), axis=1)))
+    def _probs(self, policy: Any, df: pd.DataFrame) -> np.ndarray:
+        probs = policy.action_probs(df) if hasattr(policy, "action_probs") else policy
+        if isinstance(probs, pd.DataFrame):
+            return probs.reindex(columns=list(ACTIONS), fill_value=0.0).to_numpy(dtype=float)
+        return np.asarray(probs, dtype=float)
 
-        if metric != "cltv":
-            raise ValueError(f"Неизвестная метрика: {metric}")
-
-        n = len(X)
-        base_mean = self._base_cltv_mean(X)
-        accept_probs = self.accept_prob_all_actions(X)
-        uplift = self.uplift_all_actions(X)
-
-        rng = self._oracle_rng
-        totals = np.zeros(n, dtype=float)
-        for _ in range(max(n_mc, 1)):
-            base = np.maximum(base_mean + rng.normal(0, 30, size=n), 50.0)
-            noise = rng.normal(0, 25, size=n)
-            # Аналитическое усреднение по действиям и по отклику accept in {0, 1}.
-            accepted_value = np.maximum(base[:, None] + uplift + noise[:, None], 10.0)
-            rejected_value = np.maximum(base + noise, 10.0)[:, None]
-            per_action = accept_probs * accepted_value + (1 - accept_probs) * rejected_value
-            totals += np.sum(probs * per_action, axis=1)
-        return float(np.mean(totals / max(n_mc, 1)))
-
-    # ------------------------------------------------------------------
-    # Логи
-    # ------------------------------------------------------------------
-
-    def simulate_logs_A(
-        self,
-        policyA,
-        X: pd.DataFrame,
-        *,
-        propensity_col: Optional[str] = "propensity_A",
-    ) -> pd.DataFrame:
-        """Генерирует логи под политикой A.
-
-        Args:
-            policyA: Логирующая политика.
-            X: Выборка пользователей.
-            propensity_col: Куда записать истинное ``pi_A(a|x)``. ``None`` — не писать.
-                Логированные пропенсити известны точно, и именно так их и следует
-                использовать в OPE: оценка пропенсити моделью — запасной вариант.
-
-        Returns:
-            DataFrame с колонками ``a_A``, ``accept``, ``cltv`` (+ пропенсити) и признаками.
-        """
-        probs = self._policy_probs(policyA, X)
-        n = len(X)
-        # Векторизованный выбор действия: обратное преобразование по кумулятивной сумме.
-        cumulative = np.cumsum(probs, axis=1)
+    def simulate(self, df: pd.DataFrame, policy: Any, *, log_propensity: bool = True) -> pd.DataFrame:
+        """Логи политики: к строкам ``df`` добавляются ``offer``, ``propensity``,
+        ``accepted`` и ``revenue``."""
+        probs = self._probs(policy, df)
+        n = len(df)
         draws = self.rng.random(n)[:, None]
-        a = (draws > cumulative).sum(axis=1).clip(0, probs.shape[1] - 1)
+        a = (draws > np.cumsum(probs, axis=1)).sum(axis=1).clip(0, len(ACTIONS) - 1)
+        rows = np.arange(n)
+        z = self._logits(df)[rows, a] + self._client_effect(df)
+        accepted = (self.rng.random(n) < _sigmoid(z)).astype(int)
+        noise = self.rng.lognormal(mean=-0.045, sigma=0.3, size=n)  # E[noise] = 1
+        revenue = accepted * self.revenue_if_accepted(df)[rows, a] * noise
+        logs = df.copy()
+        logs["offer"] = np.asarray(ACTIONS, dtype=object)[a]
+        if log_propensity:
+            logs["propensity"] = probs[rows, a]
+        logs["accepted"] = accepted
+        logs["revenue"] = np.round(revenue, 2)
+        return logs
 
-        p_accept = self.true_accept_prob(X, a)
-        acc = self.draw_accept(p_accept)
-        cltv = self.draw_cltv(X, a, acc)
+    def true_value(self, df: pd.DataFrame, policy: Any, metric: str = "accepted") -> float:
+        """Истинное значение метрики под политикой на строках ``df``.
 
-        df = X.copy()
-        df["a_A"] = a.astype(int)
-        df["accept"] = acc
-        df["cltv"] = cltv
-        if propensity_col is not None:
-            df[propensity_col] = probs[np.arange(n), a]
-        return df
+        Аналитически: ``mean_i sum_a pi(a|x_i) E[metric | x_i, a]``, где ожидание взято
+        по отклику и по распределению клиентского эффекта.
+        """
+        probs = self._probs(policy, df)
+        p = self.accept_probability(df)
+        if metric == "accepted":
+            per_action = p
+        elif metric == "revenue":
+            per_action = p * self.revenue_if_accepted(df)
+        else:
+            raise ValueError("metric: 'accepted' или 'revenue'")
+        return float(np.mean(np.sum(probs * per_action, axis=1)))

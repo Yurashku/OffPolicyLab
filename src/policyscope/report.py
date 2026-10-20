@@ -1,288 +1,541 @@
-"""
-policyscope.report
-==================
+"""Результаты оценки и их представление.
 
-Рендеринг результата сравнения в читаемый вид.
+:class:`Report` — результат :meth:`Evaluator.evaluate`: по одной политике B и
+нескольким метрикам. :class:`Leaderboard` — результат :meth:`Evaluator.compare`.
 
-Главное здесь — **вердикт доверия**: значимый p-value сам по себе ничего не
-гарантирует, если данные не поддерживают оценку (нет перекрытия политик, веса
-вырождены, модель исхода не работает). Отчёт сводит эти сигналы вместе и
-расшифровывает коды предупреждений человеческим текстом.
+Представления:
+
+- ``report`` в Jupyter рендерится сам (``_repr_markdown_``);
+- :meth:`Report.to_markdown` — отчёт для людей (Confluence, письмо);
+- :meth:`Report.summary` — ``DataFrame``, строка на метрику;
+- :meth:`Report.to_dict` / :meth:`Report.to_json` — стабильная схема для пайплайнов:
+  все ключи присутствуют всегда, отсутствующие значения — ``None``.
 """
 
 from __future__ import annotations
 
 import json
 import math
-from typing import TYPE_CHECKING, Any, Optional
+from dataclasses import dataclass, field
+from typing import Any, Optional
 
-if TYPE_CHECKING:  # pragma: no cover
-    from policyscope.comparison import PolicyComparison
+import pandas as pd
 
-__all__ = [
-    "TRUST_UNRELIABLE",
-    "TRUST_CAUTION",
-    "TRUST_OK",
-    "WARNING_EXPLANATIONS",
-    "trust_verdict",
-    "render_summary",
-    "dump_json",
-]
+from policyscope.diagnostics import Check, Finding, Overlap
 
-TRUST_OK = "надёжно"
-TRUST_CAUTION = "с осторожностью"
-TRUST_UNRELIABLE = "ненадёжно"
+__all__ = ["Estimate", "EstimatorRow", "MetricReport", "Report", "Leaderboard"]
 
-#: Предупреждения, при которых оценке верить нельзя вообще: нарушены предпосылки,
-#: без которых ни один OPE-оценщик не восстановит значение политики из данных.
-BLOCKING_WARNINGS = frozenset({
-    "policy_b_recommends_unsupported_actions",
-    "logged_actions_unknown_to_behavior_model",
-    "critically_low_ess",
-    "too_many_failed_bootstrap_replicates",
-})
-
-#: Предупреждения, требующие внимания, но не отменяющие результат.
-CAUTION_WARNINGS = frozenset({
-    "low_ess_ratio",
-    "low_replay_overlap",
-    "extreme_max_weight",
-    "heavy_weight_tail",
-    "mean_weight_far_from_one",
-    "large_clip_share",
-    "large_switch_share",
-    "few_clusters_inference_unreliable",
-    "low_n_boot_ci_tails_unstable",
-    "weak_behavior_log_loss",
-    "weak_outcome_log_loss",
-    "weak_outcome_brier",
-    "weak_outcome_auc",
-    "weak_outcome_r2",
-    "bootstrap_replicates_with_nan_dropped",
-    "influence_ci_anticonservative_for_dm",
-    "influence_ci_ignores_nuisance_uncertainty_without_crossfit",
-    "replay_valid_only_under_uniform_logging",
-    "behavior_metrics_in_sample_optimistic",
-    "outcome_metrics_in_sample_optimistic",
-})
-
-WARNING_EXPLANATIONS: dict[str, str] = {
-    "policy_b_recommends_unsupported_actions":
-        "Политика B заметную часть массы кладёт на действия, которых политика A почти "
-        "не совершала. Данные не содержат информации об этих действиях — оценка "
-        "экстраполирует, а не измеряет.",
-    "logged_actions_unknown_to_behavior_model":
-        "В логах есть действия, неизвестные модели поведения; им подставлено "
-        "минимальное пропенсити, что порождает экстремальные веса важности.",
-    "low_ess_ratio":
-        "Эффективная доля выборки мала: вес сосредоточен в части наблюдений. "
-        "Смотрите на абсолютный ESS — при большой выборке это может быть приемлемо.",
-    "critically_low_ess":
-        "Эффективный размер выборки критически мал: оценка фактически опирается "
-        "на несколько наблюдений, и её разброс не контролируется.",
-    "low_replay_overlap":
-        "Политики A и B редко выбирают одно и то же действие — прямых свидетельств "
-        "о поведении B в логах мало.",
-    "extreme_max_weight":
-        "Есть наблюдение с очень большим весом важности: одна строка способна "
-        "сдвинуть всю оценку.",
-    "heavy_weight_tail":
-        "Тяжёлый хвост весов (99-й процентиль высок): оценка неустойчива, "
-        "рассмотрите weight_clip или switch_dr.",
-    "mean_weight_far_from_one":
-        "Средний вес заметно отличается от 1, хотя для корректных пропенсити "
-        "E[w] = 1. Признак несоответствия модели пропенсити или нарушенного перекрытия.",
-    "large_clip_share":
-        "Обрезана большая доля весов: снижена дисперсия, но добавлено смещение.",
-    "large_switch_share":
-        "Switch-DR отключил IPS-поправку на большой доле наблюдений — результат "
-        "близок к DM и наследует его смещение.",
-    "few_clusters_inference_unreliable":
-        "Независимых кластеров мало; доверительный интервал оптимистичен.",
-    "low_n_boot_ci_tails_unstable":
-        "Мало bootstrap-реплик: границы интервала оценены грубо. Увеличьте n_boot.",
-    "bootstrap_replicates_with_nan_dropped":
-        "Часть bootstrap-реплик не удалось посчитать, они исключены из интервала.",
-    "too_many_failed_bootstrap_replicates":
-        "Слишком много неудачных bootstrap-реплик — интервал не определён.",
-    "weak_behavior_log_loss":
-        "Модель поведения почти не лучше равномерного угадывания: оценённые "
-        "пропенсити малоинформативны.",
-    "weak_outcome_log_loss":
-        "Модель исхода почти не лучше константы.",
-    "weak_outcome_brier": "Модель исхода плохо откалибрована (высокий Brier score).",
-    "weak_outcome_auc": "Модель исхода слабо ранжирует (низкий ROC AUC).",
-    "weak_outcome_r2": "Модель исхода объясняет меньше дисперсии, чем константа.",
-    "influence_ci_anticonservative_for_dm":
-        "Для DM аналитический CI не учитывает ошибку модели исхода и потому слишком "
-        "узок. Для честного интервала используйте inference='bootstrap'.",
-    "influence_ci_ignores_nuisance_uncertainty_without_crossfit":
-        "Аналитический CI не учитывает неопределённость nuisance. Он асимптотически "
-        "корректен для DR при use_crossfit=True; иначе интервал может быть занижен.",
-    "replay_valid_only_under_uniform_logging":
-        "Replay несмещён только при равномерной логирующей политике и не сопоставим "
-        "с остальными оценщиками.",
-    "behavior_metrics_in_sample_optimistic":
-        "Метрики модели поведения посчитаны in-sample и завышены.",
-    "outcome_metrics_in_sample_optimistic":
-        "Метрики модели исхода посчитаны in-sample и завышены.",
-    "estimated_propensity_from_behavior_model":
-        "Пропенсити оценены моделью, а не взяты из логов.",
-    "logged_propensity_missing_fallback_to_estimated":
-        "Колонка логированных пропенсити не задана — использована оценка моделью.",
-    "logged_propensity_invalid_fallback_to_estimated":
-        "Логированные пропенсити невалидны — использована оценка моделью.",
-    "auto_selected_logged_propensity": "Использованы логированные пропенсити из логов.",
-    "crossfit_folds_grouped_by_cluster": "Фолды cross-fitting сформированы по кластерам.",
+TRUST_LABELS = {"reliable": "надёжно", "caution": "с осторожностью", "unreliable": "ненадёжно"}
+DECISION_LABELS = {
+    "better": "B лучше",
+    "worse": "B хуже",
+    "no_difference": "разница не обнаружена",
+    "inconclusive": "вывод сделать нельзя",
+    "not_computed": "интервал не считался",
 }
+ESTIMATOR_LABELS = {
+    "dr": "DR (doubly robust)",
+    "sndr": "SNDR (самонормированный DR)",
+    "ips": "IPS",
+    "snips": "SNIPS (самонормированный IPS)",
+    "dm": "DM (только модель исхода)",
+}
+SEVERITY_ICONS = {"block": "⛔", "caution": "⚠️", "info": "ℹ️"}
 
 
-def trust_verdict(warnings: tuple[str, ...] | list[str]) -> tuple[str, list[str]]:
-    """Возвращает вердикт доверия и список причин.
+# ---------------------------------------------------------------------------
+# Форматирование
+# ---------------------------------------------------------------------------
 
-    Returns:
-        ``(вердикт, причины)``, где вердикт — один из :data:`TRUST_OK`,
-        :data:`TRUST_CAUTION`, :data:`TRUST_UNRELIABLE`.
+
+def _finite(x: Optional[float]) -> bool:
+    return x is not None and isinstance(x, (int, float)) and math.isfinite(x)
+
+
+def _num(x: Optional[float], signed: bool = False) -> str:
+    if not _finite(x):
+        return "—"
+    sign = "+" if signed and x > 0 else ""
+    ax = abs(x)
+    if ax >= 1000:
+        body = f"{x:,.0f}".replace(",", " ")
+    elif ax >= 100:
+        body = f"{x:.1f}"
+    elif ax >= 1:
+        body = f"{x:.2f}"
+    elif ax == 0:
+        body = "0"
+    else:
+        body = f"{x:.3g}"
+    return sign + body.replace("-", "−")
+
+
+def _value(x: Optional[float], binary: bool) -> str:
+    if binary and _finite(x):
+        return f"{100 * x:.2f}%"
+    return _num(x)
+
+
+def _diff(x: Optional[float], binary: bool) -> str:
+    if binary and _finite(x):
+        return f"{100 * x:+.2f} п.п.".replace("-", "−")
+    return _num(x, signed=True)
+
+
+def _pct(x: Optional[float]) -> str:
+    if not _finite(x):
+        return "—"
+    return f"{100 * x:+.1f}%".replace("-", "−")
+
+
+def _p(x: Optional[float]) -> str:
+    if not _finite(x):
+        return "—"
+    return "<0.001" if x < 0.001 else f"{x:.3f}"
+
+
+def _interval(low: Optional[float], high: Optional[float], fmt) -> str:
+    if not (_finite(low) and _finite(high)):
+        return "—"
+    return f"[{fmt(low)}; {fmt(high)}]"
+
+
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    """Русское склонение существительного после числа: 1 действие, 2 действия, 5 действий."""
+    n = abs(int(n))
+    if n % 10 == 1 and n % 100 != 11:
+        word = one
+    elif 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        word = few
+    else:
+        word = many
+    return f"{n:,}".replace(",", " ") + " " + word
+
+
+def _clean(value: Any) -> Any:
+    """Приводит значение к JSON-безопасному виду (NaN -> None, numpy -> python)."""
+    if isinstance(value, dict):
+        return {str(k): _clean(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_clean(v) for v in value]
+    if hasattr(value, "item") and not isinstance(value, (str, bytes)):
+        try:
+            value = value.item()
+        except (ValueError, AttributeError):
+            pass
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
+# ---------------------------------------------------------------------------
+# Структуры
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Estimate:
+    """Оценка с интервалом. ``low``/``high``/``se`` — ``None``, если не считались."""
+
+    value: float
+    low: Optional[float] = None
+    high: Optional[float] = None
+    se: Optional[float] = None
+
+    def to_dict(self) -> dict:
+        return {"value": self.value, "low": self.low, "high": self.high, "se": self.se}
+
+
+@dataclass(frozen=True)
+class EstimatorRow:
+    """Строка таблицы согласия оценщиков."""
+
+    estimator: str
+    v_b: Estimate
+    delta: Estimate
+    p_value: Optional[float]
+
+
+@dataclass(frozen=True)
+class MetricReport:
+    """Результат по одной метрике.
+
+    Attributes:
+        decision: ``better`` / ``worse`` / ``no_difference`` / ``inconclusive`` /
+            ``not_computed``. «Лучше» учитывает направление метрики (``lower_is_better``).
+        trust: ``reliable`` / ``caution`` / ``unreliable``.
+        p_value_adj: p-value с поправкой Romano–Wolf на все метрики отчёта
+            (в рейтинге — на все пары «кандидат × метрика»).
+        lift: Относительный прирост ``V(B)/V(A) − 1``; ``None``, если V не положительны.
+        mde: Минимальный эффект, который был бы обнаружен с мощностью 80%.
     """
-    codes = list(dict.fromkeys(warnings))
-    blocking = [c for c in codes if c in BLOCKING_WARNINGS]
-    caution = [c for c in codes if c in CAUTION_WARNINGS]
-    if blocking:
-        return TRUST_UNRELIABLE, blocking + caution
-    if caution:
-        return TRUST_CAUTION, caution
-    return TRUST_OK, []
+
+    metric: str
+    estimator: str
+    binary: bool
+    lower_is_better: bool
+    v_a: Estimate
+    v_b: Estimate
+    delta: Estimate
+    p_value: Optional[float]
+    p_value_adj: Optional[float]
+    lift: Optional[Estimate]
+    mde: Optional[float]
+    decision: str
+    trust: str
+    findings: tuple[Finding, ...]
+    checks: tuple[Check, ...]
+    rows: tuple[EstimatorRow, ...]
+    outcome_quality: dict[str, float]
+    floor_sensitivity: Optional[dict[str, float]] = None
+
+    @property
+    def estimators(self) -> pd.DataFrame:
+        """Таблица согласия оценщиков: строка на оценщик."""
+        return pd.DataFrame([{
+            "estimator": row.estimator,
+            "V_B": row.v_b.value,
+            "V_B_low": row.v_b.low,
+            "V_B_high": row.v_b.high,
+            "delta": row.delta.value,
+            "delta_low": row.delta.low,
+            "delta_high": row.delta.high,
+            "p_value": row.p_value,
+        } for row in self.rows])
+
+    @property
+    def decision_label(self) -> str:
+        return DECISION_LABELS[self.decision]
+
+    @property
+    def trust_label(self) -> str:
+        return TRUST_LABELS[self.trust]
+
+    def sentence(self, policy: str = "B", baseline: str = "A") -> str:
+        """Вывод одной фразой."""
+        fmt_d = lambda x: _diff(x, self.binary)  # noqa: E731
+        delta = fmt_d(self.delta.value)
+        lift = f" ({_pct(self.lift.value)})" if self.lift is not None else ""
+        ci = _interval(self.delta.low, self.delta.high, fmt_d)
+        if self.decision == "inconclusive":
+            return (f"вывод сделать нельзя: оценка Δ = {delta}{lift} ненадёжна "
+                    "(причины ниже).")
+        if self.decision == "not_computed":
+            return f"Δ = {delta}{lift}; доверительный интервал не считался."
+        if self.decision in ("better", "worse"):
+            word = "лучше" if self.decision == "better" else "хуже"
+            return f"{policy} {word} {baseline}: Δ = {delta}{lift}, ДИ {ci}."
+        mde = f"; эффект больше ±{_diff(self.mde, self.binary).lstrip('+')} был бы обнаружен" \
+            if _finite(self.mde) else ""
+        return f"значимой разницы нет: Δ = {delta}{lift}, ДИ {ci}{mde}."
+
+    def to_dict(self) -> dict:
+        return {
+            "metric": self.metric,
+            "estimator": self.estimator,
+            "binary": self.binary,
+            "lower_is_better": self.lower_is_better,
+            "V_A": self.v_a.to_dict(),
+            "V_B": self.v_b.to_dict(),
+            "delta": self.delta.to_dict(),
+            "p_value": self.p_value,
+            "p_value_adj": self.p_value_adj,
+            "lift": self.lift.to_dict() if self.lift is not None else None,
+            "mde": self.mde,
+            "decision": self.decision,
+            "trust": self.trust,
+            "findings": [f.to_dict() for f in self.findings],
+            "checks": [c.to_dict() for c in self.checks],
+            "estimators": [{
+                "estimator": r.estimator, "V_B": r.v_b.to_dict(),
+                "delta": r.delta.to_dict(), "p_value": r.p_value,
+            } for r in self.rows],
+            "outcome_quality": dict(self.outcome_quality),
+            "floor_sensitivity": self.floor_sensitivity,
+        }
 
 
-def _fmt(value: Optional[float], digits: int = 6) -> str:
-    if value is None or (isinstance(value, float) and math.isnan(value)):
-        return "н/д"
-    return f"{value:.{digits}f}"
+@dataclass(frozen=True)
+class Report:
+    """Отчёт об оценке политики B по логам политики A.
 
-
-def _fmt_ci(ci: Optional[tuple[float, float]], level: str, digits: int = 6) -> str:
-    if ci is None:
-        return "(CI не считался)"
-    return f"({level} CI: {_fmt(ci[0], digits)} .. {_fmt(ci[1], digits)})"
-
-
-def render_summary(
-    result: "PolicyComparison",
-    *,
-    metric_name: Optional[str] = None,
-    business_threshold: float = 0.0,
-) -> str:
-    """Формирует текстовый отчёт по результату сравнения.
-
-    Args:
-        result: Результат :func:`~policyscope.comparison.compare_policies`.
-        metric_name: Человеческое название метрики (по умолчанию — имя колонки).
-        business_threshold: Минимальный прирост, который считается значимым для бизнеса.
-            Решение принимается по нижней границе CI, а не только по p-value.
+    Доступ к метрике: ``report["revenue"]`` -> :class:`MetricReport`.
     """
-    name = metric_name or result.target
-    alpha = result.alpha if result.alpha is not None else 0.05
-    level = f"{100 * (1 - alpha):.0f}%"
-    digits = 6
 
-    header = f"Оценщик: `{result.estimator}`  |  наблюдений: {result.n_samples}"
-    if result.n_clusters is not None:
-        header += f"  |  кластеров: {result.n_clusters}"
+    policy: str
+    baseline: str
+    metrics: dict[str, MetricReport]
+    overlap: Overlap
+    findings: tuple[Finding, ...]
+    settings: dict[str, Any] = field(default_factory=dict)
 
-    lines: list[str] = [
-        f"## Off-policy оценка: {name}",
-        "",
-        header,
-        "",
-        f"- V(A) = {_fmt(result.v_a, digits)} {_fmt_ci(result.v_a_ci, level, digits)}",
-        f"- V(B) = {_fmt(result.v_b, digits)} {_fmt_ci(result.v_b_ci, level, digits)}",
-        f"- Delta (B − A) = {_fmt(result.delta, digits)} "
-        f"{_fmt_ci(result.delta_ci, level, digits)}",
-    ]
+    def __getitem__(self, metric: str) -> MetricReport:
+        try:
+            return self.metrics[metric]
+        except KeyError:
+            raise KeyError(f"Метрики '{metric}' нет в отчёте; есть: {list(self.metrics)}") from None
 
-    if result.p_value is not None:
-        lines.append(
-            f"- p-value = {_fmt(result.p_value, 4)} "
-            f"(значимо: {'да' if result.is_significant else 'нет'}; "
-            f"правило: `{result.significance_rule}`)"
-        )
-        if result.ci_excludes_zero is not None and result.is_significant is not None:
-            if result.ci_excludes_zero != result.is_significant:
+    @property
+    def trust(self) -> str:
+        """Худший уровень доверия среди метрик."""
+        order = ["reliable", "caution", "unreliable"]
+        return max((m.trust for m in self.metrics.values()), key=order.index)
+
+    def summary(self) -> pd.DataFrame:
+        """Строка на метрику: значения, Δ, интервалы, p-value, вывод, доверие."""
+        rows = []
+        for m in self.metrics.values():
+            rows.append({
+                "metric": m.metric,
+                "V_A": m.v_a.value,
+                "V_B": m.v_b.value,
+                "delta": m.delta.value,
+                "delta_low": m.delta.low,
+                "delta_high": m.delta.high,
+                "lift": m.lift.value if m.lift else None,
+                "lift_low": m.lift.low if m.lift else None,
+                "lift_high": m.lift.high if m.lift else None,
+                "p_value": m.p_value,
+                "p_value_adj": m.p_value_adj,
+                "mde": m.mde,
+                "decision": m.decision,
+                "trust": m.trust,
+                "estimator": m.estimator,
+            })
+        return pd.DataFrame(rows).set_index("metric")
+
+    def to_dict(self) -> dict:
+        return _clean({
+            "policy": self.policy,
+            "baseline": self.baseline,
+            "trust": self.trust,
+            "metrics": {k: v.to_dict() for k, v in self.metrics.items()},
+            "overlap": self.overlap.to_dict(),
+            "findings": [f.to_dict() for f in self.findings],
+            "settings": self.settings,
+        })
+
+    def to_json(self, path: Optional[str] = None) -> str:
+        """JSON-представление; при ``path`` ещё и записывает его в файл."""
+        text = json.dumps(self.to_dict(), ensure_ascii=False, indent=2, allow_nan=False)
+        if path is not None:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+        return text
+
+    def _repr_markdown_(self) -> str:
+        return self.to_markdown()
+
+    def __repr__(self) -> str:
+        lines = [f"Report({self.policy} vs {self.baseline}, доверие: {TRUST_LABELS[self.trust]})"]
+        for m in self.metrics.values():
+            lines.append(f"  {m.metric}: {m.sentence(self.policy, self.baseline)}")
+        return "\n".join(lines)
+
+    # -- markdown -----------------------------------------------------------------
+
+    def to_markdown(self) -> str:
+        """Отчёт для людей: вывод, доверие, согласие оценщиков, перекрытие, настройки."""
+        s = self.settings
+        level = f"{100 * (1 - s.get('alpha', 0.05)):.0f}%"
+        out = [f"## Off-policy оценка: {self.policy} против {self.baseline}", ""]
+        for m in self.metrics.values():
+            icon = {"reliable": "✅", "caution": "⚠️", "unreliable": "⛔"}[m.trust]
+            out.append(
+                f"- **{m.metric}** — {m.sentence(self.policy, self.baseline)} "
+                f"Доверие: {icon} {m.trust_label}."
+            )
+        out += ["", self._metric_table(level), "", self._settings_line()]
+        if len(self.metrics) > 1 and s.get("inference") != "none":
+            out.append(
+                f"p (RW) — p-value с поправкой Romano–Wolf на {len(self.metrics)} метрики: "
+                "вероятность хотя бы одного ложного «значимо» по всем метрикам не выше α."
+            )
+        out += ["", "### Можно ли верить оценке", *self._findings_block()]
+        out += ["", "### Согласие оценщиков", *self._estimators_block(level)]
+        out += ["", "### Перекрытие политик", *self._overlap_block()]
+        out += ["", "### Настройки и предпосылки", *self._settings_block()]
+        return "\n".join(out)
+
+    def _metric_table(self, level: str) -> str:
+        head = (f"| Метрика | V({self.baseline}) | V({self.policy}) | Δ | Δ, % | {level} ДИ для Δ "
+                "| p | p (RW) | Вывод | Доверие |")
+        lines = [head, "|---|---|---|---|---|---|---|---|---|---|"]
+        for m in self.metrics.values():
+            fd = lambda x, b=m.binary: _diff(x, b)  # noqa: E731
+            lines.append(
+                f"| {m.metric} | {_value(m.v_a.value, m.binary)} | {_value(m.v_b.value, m.binary)} "
+                f"| {fd(m.delta.value)} | {_pct(m.lift.value) if m.lift else '—'} "
+                f"| {_interval(m.delta.low, m.delta.high, fd)} | {_p(m.p_value)} "
+                f"| {_p(m.p_value_adj)} | {m.decision_label} | {m.trust_label} |"
+            )
+        return "\n".join(lines)
+
+    def _settings_line(self) -> str:
+        s = self.settings
+        inference = {
+            "influence": "аналитический ДИ",
+            "bootstrap": f"bootstrap ДИ ({s.get('n_boot')} реплик с переобучением моделей)",
+            "none": "без ДИ",
+        }[s["inference"]]
+        clusters = (f", кластеры «{s['cluster']}»: {self.overlap.n_clusters}"
+                    if s.get("cluster") else "")
+        source = (f"пропенсити из логов («{s['propensity']}»)" if s.get("propensity")
+                  else "пропенсити оценены моделью")
+        return (f"Оценщик {ESTIMATOR_LABELS[s['estimator']]} · {inference}{clusters} · {source} · "
+                f"{_plural(self.overlap.n, 'строка', 'строки', 'строк')}, "
+                f"{_plural(self.overlap.k, 'действие', 'действия', 'действий')}.")
+
+    def _findings_block(self) -> list[str]:
+        items: list[Finding] = list(self.findings)
+        for m in self.metrics.values():
+            items.extend(f for f in m.findings if f.metric is not None)
+        items.sort(key=lambda f: {"block": 0, "caution": 1, "info": 2}[f.severity])
+        if not any(f.severity != "info" for f in items):
+            lines = ["Проверки перекрытия, пропенсити и модели исхода серьёзных проблем не выявили."]
+        else:
+            lines = []
+        for f in items:
+            where = f" [{f.metric}]" if f.metric and len(self.metrics) > 1 else ""
+            advice = f" *Что делать:* {f.advice}" if f.advice else ""
+            lines.append(f"- {SEVERITY_ICONS[f.severity]} **{f.title}**{where}. {f.detail}{advice}")
+        return lines
+
+    def _estimators_block(self, level: str) -> list[str]:
+        lines = [
+            "IPS опирается только на пропенсити, DM — только на модель исхода, DR — на обе. "
+            "Если они согласны, оценка устойчива к ошибке любой из моделей.",
+            "",
+            f"| Метрика | Оценщик | V({self.policy}) | Δ | {level} ДИ для Δ |",
+            "|---|---|---|---|---|",
+        ]
+        for m in self.metrics.values():
+            for row in m.rows:
+                fd = lambda x, b=m.binary: _diff(x, b)  # noqa: E731
+                mark = " (основной)" if row.estimator == m.estimator else ""
                 lines.append(
-                    "- ⚠ p-value и доверительный интервал расходятся: это разные "
-                    "процедуры, и на скошенном распределении они могут не совпадать. "
-                    "Считайте результат пограничным."
+                    f"| {m.metric} | {row.estimator}{mark} | {_value(row.v_b.value, m.binary)} "
+                    f"| {fd(row.delta.value)} | {_interval(row.delta.low, row.delta.high, fd)} |"
                 )
-    if result.inference_method:
-        lines.append(f"- Метод инференса: `{result.inference_method}`")
-
-    lines.append("")
-    lines.append("### Решение")
-    if result.delta_ci is None:
-        lines.append(
-            "Доверительный интервал не считался — статистический вывод сделать нельзя."
-        )
-    elif result.delta_ci[0] > business_threshold:
-        lines.append(
-            f"Политика B лучше A: нижняя граница CI превышает порог {business_threshold}."
-        )
-    elif result.delta_ci[1] < -business_threshold:
-        lines.append(
-            f"Политика A лучше B: верхняя граница CI ниже −{business_threshold}."
-        )
-    else:
-        lines.append(
-            "Значимого отличия не обнаружено либо эффект меньше бизнес-порога."
-        )
-
-    verdict, reasons = trust_verdict(result.warnings)
-    lines.append("")
-    lines.append(f"### Доверие к оценке: **{verdict}**")
-    if not reasons:
-        lines.append("Проверки перекрытия, весов и качества nuisance-моделей пройдены.")
-    else:
-        for code in reasons:
-            lines.append(f"- {WARNING_EXPLANATIONS.get(code, code)}  \n  `{code}`")
-
-    diag = result.diagnostics.to_dict() if result.diagnostics else {}
-    if diag.get("weight_ess_ratio") is not None:
         lines.append("")
-        lines.append("### Диагностика")
-        lines.append(
-            f"- ESS/N = {_fmt(diag.get('weight_ess_ratio'), 3)}  |  "
-            f"средний вес = {_fmt(diag.get('weight_mean'), 3)}  |  "
-            f"p99 веса = {_fmt(diag.get('weight_p99'), 3)}"
-        )
-        lines.append(
-            f"- Перекрытие действий (replay) = {_fmt(diag.get('replay_overlap'), 3)}  |  "
-            f"масса B на неподдержанных действиях = "
-            f"{_fmt(diag.get('unsupported_action_mass'), 3)}"
-        )
-        if result.propensity_source:
-            source = result.propensity_source
-            col = result.propensity_column
-            lines.append(f"- Источник пропенсити: `{source}`" + (f" (`{col}`)" if col else ""))
+        lines.append("DM показан без интервала: его ДИ не учитывает смещение модели исхода.")
+        meaning = {"propensity": "пропенсити", "outcome": "модель исхода"}
+        for m in self.metrics.values():
+            for c in m.checks:
+                fd = lambda x, b=m.binary: _diff(x, b)  # noqa: E731
+                bound = fd(max(abs(c.low), abs(c.high))).lstrip("+")
+                verdict = {
+                    "ok": f"значимого расхождения нет (не исключено до ±{bound})",
+                    "fail": "значимое и существенное расхождение",
+                    "inconclusive": "мало данных для проверки",
+                }[c.status]
+                lines.append(
+                    f"- {m.metric}, {meaning[c.name]} ({c.label}): {fd(c.discrepancy)} "
+                    f"[{fd(c.low)}; {fd(c.high)}] — {verdict}."
+                )
+            if m.floor_sensitivity:
+                fs = m.floor_sensitivity
+                lines.append(
+                    f"- {m.metric}, чувствительность Δ к полу пропенсити: ×0.5 → {_diff(fs['x0.5'], m.binary)}, "
+                    f"×1 → {_diff(fs['x1'], m.binary)}, ×2 → {_diff(fs['x2'], m.binary)}."
+                )
+        return lines
 
-    return "\n".join(lines)
+    def _overlap_block(self) -> list[str]:
+        o = self.overlap
+        explore = "оценка по модели" if o.exploration_estimated else "по логированным пропенсити"
+        lines = [
+            f"- Эффективный размер выборки: {o.ess:,.0f} из {o.n:,} ({100 * o.ess_ratio:.0f}%).".replace(",", " "),
+            f"- Средний вес важности {o.mean_weight:.3f} [{o.mean_weight_low:.3f}; {o.mean_weight_high:.3f}] "
+            f"(при полном перекрытии — 1); максимальный {_num(o.max_weight)}, 99-й перцентиль {_num(o.p99_weight)}.",
+            f"- A в среднем оставляет шанс {min(o.exploration, o.k):.1f} "
+            f"из {o.k} действий ({explore}); {self.policy} совпадает с залогированным действием "
+            f"в {100 * o.match:.0f}% случаев.",
+            "",
+            f"| Действие | Доля в логах | Доля у {self.policy} | Средний вес |",
+            "|---|---|---|---|",
+        ]
+        for row in o.actions:
+            lines.append(
+                f"| {row['action']} | {100 * row['logged_share']:.1f}% | {100 * row['policy_share']:.1f}% "
+                f"| {_num(row['mean_weight'])} |"
+            )
+        return lines
+
+    def _settings_block(self) -> list[str]:
+        s = self.settings
+        features = ", ".join(s.get("features", [])) or "нет (оценка без контекста)"
+        auto = " (выбраны автоматически)" if s.get("features_auto") else ""
+        lines = [
+            f"- Признаки{auto}: {features}.",
+            f"- Модель пропенсити: {s.get('propensity_model')}; модель исхода: {s.get('outcome_model')}; "
+            f"cross-fitting: {s.get('n_folds')} фолдов.",
+        ]
+        quality = []
+        for m in self.metrics.values():
+            q = m.outcome_quality
+            if "roc_auc" in q:
+                quality.append(f"{m.metric}: ROC AUC {_num(q['roc_auc'])}")
+            elif "r2" in q:
+                quality.append(f"{m.metric}: R² {_num(q['r2'])}")
+        if quality:
+            lines.append("- Качество модели исхода (out-of-fold): " + "; ".join(quality) + ".")
+        lines += [
+            "- Предпосылки, которые нельзя проверить по данным: все факторы, влиявшие и на "
+            "выбор A, и на метрику, есть среди признаков; политика B не обучалась на этих же "
+            "логах (иначе оценка завышена).",
+        ]
+        return lines
 
 
-def dump_json(path: str, obj: Any) -> None:
-    """Записывает объект в JSON-файл.
+@dataclass(frozen=True)
+class Leaderboard:
+    """Сравнение нескольких кандидатов с одной базой.
 
-    Принимает как словарь, так и объект с методом ``to_dict``. NaN сериализуются в
-    ``null``, чтобы результат оставался валидным JSON.
+    ``table`` — строка на пару «кандидат × метрика»; ``reports`` — полный отчёт
+    по каждому кандидату. p-value скорректированы методом Romano–Wolf на всё семейство.
     """
-    if hasattr(obj, "to_dict"):
-        obj = obj.to_dict()
 
-    def clean(value: Any) -> Any:
-        if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
-            return None
-        if isinstance(value, dict):
-            return {k: clean(v) for k, v in value.items()}
-        if isinstance(value, (list, tuple)):
-            return [clean(v) for v in value]
-        return value
+    table: pd.DataFrame
+    reports: dict[str, Report]
+    baseline: str
+    alpha: float
 
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(clean(obj), f, ensure_ascii=False, indent=2, allow_nan=False)
+    def __getitem__(self, name: str) -> Report:
+        return self.reports[name]
+
+    def _repr_markdown_(self) -> str:
+        return self.to_markdown()
+
+    def to_markdown(self) -> str:
+        level = f"{100 * (1 - self.alpha):.0f}%"
+        lines = [
+            f"## Сравнение кандидатов с {self.baseline}",
+            "",
+            f"| Кандидат | Метрика | Δ | Δ, % | {level} ДИ для Δ | p | p (RW) | Вывод | Доверие |",
+            "|---|---|---|---|---|---|---|---|---|",
+        ]
+        for name, report in self.reports.items():
+            for m in report.metrics.values():
+                fd = lambda x, b=m.binary: _diff(x, b)  # noqa: E731
+                lines.append(
+                    f"| {name} | {m.metric} | {fd(m.delta.value)} | {_pct(m.lift.value) if m.lift else '—'} "
+                    f"| {_interval(m.delta.low, m.delta.high, fd)} | {_p(m.p_value)} "
+                    f"| {_p(m.p_value_adj)} | {m.decision_label} | {m.trust_label} |"
+                )
+        n = len(self.table)
+        lines += [
+            "",
+            f"p (RW) скорректированы методом Romano–Wolf на все {n} пар «кандидат × метрика». "
+            "Оценка лучшего из многих кандидатов систематически завышена (winner's curse): "
+            "перед внедрением подтвердите победителя на свежих логах или в A/B-тесте.",
+        ]
+        return "\n".join(lines)
+
+    def to_dict(self) -> dict:
+        return _clean({
+            "baseline": self.baseline,
+            "alpha": self.alpha,
+            "table": self.table.to_dict(orient="records"),
+            "reports": {k: v.to_dict() for k, v in self.reports.items()},
+        })

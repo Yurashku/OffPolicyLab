@@ -1,246 +1,165 @@
-"""
-policyscope.inference
-=====================
+"""Доверительные интервалы, p-value и поправка на множественность.
 
-Слой инференса: доверительные интервалы и значимость для ``V_A``, ``V_B`` и
-``delta = V_B - V_A``.
+Два метода:
 
-Доступны два взаимодополняющих метода:
+**Аналитический** (influence function). Оценка — среднее построчных вкладов ``psi``,
+поэтому её дисперсия — дисперсия среднего. Стандартная ошибка кластерно-робастная
+(CR1, с поправкой ``G/(G-1)``), критические значения — распределение Стьюдента с
+``G-1`` степенями свободы, где ``G`` — число кластеров (без кластеризации — строк).
+Корректен, когда пропенсити известны: ошибка модели исхода в DR входит лишь вторым
+порядком. Не учитывает ошибку *оценки* пропенсити — для этого случая есть bootstrap.
 
-``bootstrap``
-    Парный (кластерный) percentile bootstrap. Nuisance-модели переобучаются внутри
-    каждой реплики, поэтому интервал учитывает и неопределённость оценки nuisance.
-    Дороже, но консервативнее; работает для любого оценщика.
+**Bootstrap** с переобучением nuisance-моделей на каждой реплике. Ресэмплируются
+кластеры целиком, поэтому зависимость строк одного клиента сохраняется. Интервал —
+percentile, p-value — центрированный (доля реплик с ``|θ* - θ̂| >= |θ̂|``).
 
-``influence``
-    Аналитический интервал по построчным вкладам ``psi_i`` с кластерно-робастной
-    («сэндвич») дисперсией. Один проход по данным вместо сотен переобучений.
-    **Не** учитывает неопределённость nuisance: асимптотически корректен для
-    DR-семейства при cross-fitting (свойство Неймановой ортогональности), но
-    антиконсервативен для DM, где ошибка модели исхода входит в оценку первым порядком.
+**Romano–Wolf** — stepdown-поправка на множественность по бутстреп-распределению
+максимума |t|-статистик (Romano, Wolf, 2005, 2016). Контролирует вероятность хотя бы
+одного ложного открытия (FWER) и, в отличие от Holm/Bonferroni, учитывает зависимость
+гипотез: метрики и кандидаты оцениваются на одних и тех же логах. Нулевое
+распределение берётся из multiplier bootstrap по кластерным суммам вкладов (для
+аналитического метода — без переобучения) или из тех же bootstrap-реплик.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Sequence
+from typing import Callable, Optional
 
 import numpy as np
-import pandas as pd
 from scipy import stats
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "Interval",
-    "ComparisonInference",
-    "ClusterResampler",
-    "cluster_robust_se",
-    "infer_comparison_bootstrap",
-    "infer_comparison_influence",
+    "cluster_sums",
+    "cluster_se",
+    "t_critical",
+    "analytic_summary",
+    "multiplier_tstats",
+    "romano_wolf",
+    "bootstrap_positions",
+    "cluster_members",
+    "run_bootstrap",
+    "percentile_interval",
+    "centered_pvalue",
 ]
 
-#: Ниже этого числа реплик percentile-хвосты оцениваются слишком грубо.
-MIN_BOOT_FOR_CI = 500
-#: Ниже этого числа независимых кластеров любой CI ненадёжен.
-MIN_CLUSTERS = 20
-#: Доля NaN-реплик, выше которой интервал объявляется неопределённым.
-MAX_NAN_SHARE = 0.1
-
-
-@dataclass(frozen=True)
-class Interval:
-    """Доверительный интервал."""
-
-    low: float
-    high: float
-
-    def as_tuple(self) -> tuple[float, float]:
-        return (self.low, self.high)
-
-    def excludes(self, value: float = 0.0) -> bool:
-        """Лежит ли ``value`` вне интервала."""
-        if not np.isfinite(self.low) or not np.isfinite(self.high):
-            return False
-        return value < self.low or value > self.high
-
-
-@dataclass(frozen=True)
-class ComparisonInference:
-    """Результат инференса для пары политик.
-
-    Attributes:
-        p_value: Двусторонний p-value для ``H0: delta = 0``.
-        is_significant: Решение по p-value на уровне ``alpha``.
-        ci_excludes_zero: Решение по доверительному интервалу для delta.
-            Приводится отдельно, потому что это **другая процедура**: на скошенном
-            распределении percentile-интервал и центрированный тест могут расходиться.
-        se_delta: Стандартная ошибка delta (только для аналитического метода).
-    """
-
-    v_a: float
-    v_b: float
-    delta: float
-    v_a_ci: Interval
-    v_b_ci: Interval
-    delta_ci: Interval
-    p_value: float
-    is_significant: bool
-    ci_excludes_zero: bool
-    significance_rule: str
-    alpha: float
-    method: str
-    n_samples: int
-    n_clusters: Optional[int] = None
-    n_boot: Optional[int] = None
-    se_delta: Optional[float] = None
-    warnings: tuple[str, ...] = field(default_factory=tuple)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "V_A": self.v_a,
-            "V_A_CI": self.v_a_ci.as_tuple(),
-            "V_B": self.v_b,
-            "V_B_CI": self.v_b_ci.as_tuple(),
-            "Delta": self.delta,
-            "Delta_CI": self.delta_ci.as_tuple(),
-            "p_value": self.p_value,
-            "is_significant": self.is_significant,
-            "ci_excludes_zero": self.ci_excludes_zero,
-            "significance_rule": self.significance_rule,
-            "alpha": self.alpha,
-            "inference_method": self.method,
-            "n_samples": self.n_samples,
-            "n_clusters": self.n_clusters,
-            "n_boot": self.n_boot,
-            "se_delta": self.se_delta,
-            "inference_warnings": list(self.warnings),
-        }
-
 
 # ---------------------------------------------------------------------------
-# Ресэмплинг
+# Аналитический метод
 # ---------------------------------------------------------------------------
 
 
-class ClusterResampler:
-    """Кластерный (или построчный) bootstrap-ресэмплер.
+def cluster_sums(psi: np.ndarray, clusters: np.ndarray, n_clusters: int) -> np.ndarray:
+    """Суммы центрированных вкладов по кластерам: ``(G, J)``."""
+    psi = np.asarray(psi, dtype=float)
+    if psi.ndim == 1:
+        psi = psi[:, None]
+    centered = psi - psi.mean(axis=0, keepdims=True)
+    return np.column_stack([
+        np.bincount(clusters, weights=centered[:, j], minlength=n_clusters)
+        for j in range(psi.shape[1])
+    ])
 
-    Позиции строк внутри каждого кластера вычисляются **один раз** при создании
-    объекта, поэтому каждая реплика стоит ``O(n)``. Наивная реализация
-    ``pd.concat([df[df[col] == c] for c in sampled])`` делает полный проход по
-    таблице на каждый выбранный кластер, то есть ``O(C*n)`` на реплику, и на
-    реальных объёмах не заканчивается за разумное время.
+
+def cluster_se(sums: np.ndarray, n: int) -> np.ndarray:
+    """CR1-стандартная ошибка среднего по кластерным суммам."""
+    g = sums.shape[0]
+    if g < 2:
+        return np.full(sums.shape[1], np.nan)
+    return np.sqrt(g / (g - 1) * np.sum(sums**2, axis=0)) / n
+
+
+def t_critical(alpha: float, n_clusters: int) -> float:
+    """Двусторонний критический уровень Стьюдента с ``G-1`` степенями свободы."""
+    return float(stats.t.ppf(1.0 - alpha / 2.0, df=max(n_clusters - 1, 1)))
+
+
+def analytic_summary(
+    psi: np.ndarray, clusters: np.ndarray, n_clusters: int, alpha: float
+) -> dict[str, np.ndarray]:
+    """Оценки, SE, интервалы и p-value (для H0: оценка = 0) по столбцам ``psi``.
+
+    Returns:
+        Словарь массивов длины ``J``: ``estimate, se, low, high, p_value``, а также
+        ``sums`` — кластерные суммы для поправки Romano–Wolf.
     """
-
-    def __init__(self, df: pd.DataFrame, cluster_col: Optional[str]) -> None:
-        self.n = len(df)
-        self.cluster_col = cluster_col
-        self._groups: Optional[list[np.ndarray]] = None
-
-        if cluster_col is None:
-            return
-        if cluster_col not in df.columns:
-            raise ValueError(
-                f"Колонка кластеров '{cluster_col}' отсутствует в данных. "
-                "Передайте существующую колонку или cluster_col=None для построчного "
-                "bootstrap. Молчаливый откат недопустим: без кластеризации интервалы "
-                "получаются антиконсервативными."
-            )
-        codes, uniques = pd.factorize(df[cluster_col], sort=False)
-        order = np.argsort(codes, kind="stable")
-        sorted_codes = codes[order]
-        bounds = np.searchsorted(sorted_codes, np.arange(len(uniques) + 1))
-        self._groups = [order[bounds[i]:bounds[i + 1]] for i in range(len(uniques))]
-
-    @property
-    def n_clusters(self) -> Optional[int]:
-        return None if self._groups is None else len(self._groups)
-
-    def positions(self, rng: np.random.Generator) -> np.ndarray:
-        """Возвращает позиционные индексы одной bootstrap-реплики."""
-        if self._groups is None:
-            return rng.integers(0, self.n, size=self.n)
-        picked = rng.integers(0, len(self._groups), size=len(self._groups))
-        return np.concatenate([self._groups[i] for i in picked])
-
-    def resample(self, df: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
-        """Возвращает одну bootstrap-реплику данных."""
-        return df.take(self.positions(rng))
+    psi = np.asarray(psi, dtype=float)
+    if psi.ndim == 1:
+        psi = psi[:, None]
+    n = psi.shape[0]
+    est = psi.mean(axis=0)
+    sums = cluster_sums(psi, clusters, n_clusters)
+    se = cluster_se(sums, n)
+    tc = t_critical(alpha, n_clusters)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t = np.where(se > 0, est / se, np.nan)
+    p = 2.0 * stats.t.sf(np.abs(t), df=max(n_clusters - 1, 1))
+    return {
+        "estimate": est,
+        "se": se,
+        "low": est - tc * se,
+        "high": est + tc * se,
+        "p_value": p,
+        "sums": sums,
+    }
 
 
 # ---------------------------------------------------------------------------
-# Общие вспомогательные функции
+# Romano–Wolf
 # ---------------------------------------------------------------------------
 
 
-def _percentile_interval(samples: np.ndarray, alpha: float) -> Interval:
-    """Percentile-интервал, устойчивый к NaN-репликам."""
-    finite = samples[np.isfinite(samples)]
-    if finite.size == 0:
-        return Interval(float("nan"), float("nan"))
-    return Interval(
-        low=float(np.percentile(finite, 100 * alpha / 2)),
-        high=float(np.percentile(finite, 100 * (1 - alpha / 2))),
-    )
+def multiplier_tstats(
+    sums: np.ndarray, se: np.ndarray, n: int, n_draws: int, rng: np.random.Generator
+) -> np.ndarray:
+    """Нулевое распределение t-статистик через multiplier bootstrap: ``(n_draws, J)``.
 
-
-def _centered_bootstrap_pvalue(delta_boot: np.ndarray, delta_hat: float) -> float:
-    """Двусторонний центрированный bootstrap p-value для ``H0: delta = 0``.
-
-    Считает долю реплик, где ``|b* - b_hat| >= |b_hat|``, со сглаживанием
-    «плюс один» для конечного числа реплик.
+    ``t*_j = sum_g xi_g S_gj / (n se_j)``, ``xi ~ N(0, 1)``. Совместное распределение
+    сохраняет корреляцию между гипотезами — ровно то, что нужно Romano–Wolf.
     """
-    finite = delta_boot[np.isfinite(delta_boot)]
-    if finite.size == 0 or not np.isfinite(delta_hat):
-        return float("nan")
-    n_extreme = int(np.count_nonzero(np.abs(finite - delta_hat) >= abs(delta_hat)))
-    return float((n_extreme + 1) / (finite.size + 1))
+    g = sums.shape[0]
+    scale = np.sqrt(g / max(g - 1, 1)) / (n * se)
+    out = np.empty((n_draws, sums.shape[1]))
+    batch = max(1, min(n_draws, 20_000_000 // max(g, 1)))
+    for start in range(0, n_draws, batch):
+        stop = min(start + batch, n_draws)
+        xi = rng.standard_normal((stop - start, g))
+        out[start:stop] = (xi @ sums) * scale
+    return out
 
 
-def cluster_robust_se(
-    contributions: np.ndarray,
-    *,
-    clusters: Optional[Sequence] = None,
-) -> float:
-    """Кластерно-робастная («сэндвич») стандартная ошибка среднего от ``contributions``.
+def romano_wolf(t_obs: np.ndarray, t_null: np.ndarray) -> np.ndarray:
+    """Скорректированные p-value Romano–Wolf (stepdown по max |t|).
 
-    ``SE^2 = n^-2 * sum_c (sum_{i in c} (psi_i - mean(psi)))^2``.
+    Args:
+        t_obs: Наблюдённые t-статистики ``(J,)``.
+        t_null: Центрированные бутстреп-статистики ``(B, J)``.
 
-    При ``clusters=None`` каждая строка считается независимой, и формула сводится
-    к обычной ``sd(psi)/sqrt(n)``.
+    Returns:
+        Скорректированные p-value ``(J,)``; монотонны по |t| и не меньше
+        нескорректированных бутстреп-p. Для гипотез с NaN — NaN.
     """
-    psi = np.asarray(contributions, dtype=float)
-    n = psi.size
-    if n == 0 or not np.isfinite(psi).all():
-        return float("nan")
-    centered = psi - psi.mean()
-    if clusters is None:
-        total = float(np.sum(centered**2))
-    else:
-        codes, uniques = pd.factorize(pd.Series(clusters), sort=False)
-        per_cluster = np.bincount(codes, weights=centered, minlength=len(uniques))
-        total = float(np.sum(per_cluster**2))
-    if total < 0 or not np.isfinite(total):
-        return float("nan")
-    return float(np.sqrt(total) / n)
-
-
-def _quality_warnings(
-    *,
-    n_clusters: Optional[int],
-    n_boot: Optional[int] = None,
-    nan_share: float = 0.0,
-) -> list[str]:
-    warns: list[str] = []
-    if n_boot is not None and n_boot < MIN_BOOT_FOR_CI:
-        warns.append("low_n_boot_ci_tails_unstable")
-    if n_clusters is not None and n_clusters < MIN_CLUSTERS:
-        warns.append("few_clusters_inference_unreliable")
-    if nan_share > 0.0:
-        warns.append("bootstrap_replicates_with_nan_dropped")
-    return warns
+    t_obs = np.asarray(t_obs, dtype=float)
+    p_adj = np.full(t_obs.shape, np.nan)
+    valid = np.flatnonzero(np.isfinite(t_obs))
+    if valid.size == 0:
+        return p_adj
+    null_abs = np.abs(t_null[:, valid])
+    null_abs = null_abs[np.isfinite(null_abs).all(axis=1)]
+    n_draws = null_abs.shape[0]
+    if n_draws == 0:
+        return p_adj
+    obs_abs = np.abs(t_obs[valid])
+    order = np.argsort(-obs_abs)
+    running = 0.0
+    for step, j in enumerate(order):
+        max_null = null_abs[:, order[step:]].max(axis=1)
+        p = (1.0 + np.sum(max_null >= obs_abs[j])) / (n_draws + 1.0)
+        running = max(running, p)
+        p_adj[valid[j]] = running
+    return p_adj
 
 
 # ---------------------------------------------------------------------------
@@ -248,162 +167,76 @@ def _quality_warnings(
 # ---------------------------------------------------------------------------
 
 
-def infer_comparison_bootstrap(
-    df: pd.DataFrame,
-    estimator_pair: Callable[[pd.DataFrame], tuple[float, float]],
+def bootstrap_positions(
+    clusters: np.ndarray, n_clusters: int, rng: np.random.Generator,
+    members: Optional[list[np.ndarray]] = None,
+) -> np.ndarray:
+    """Позиции строк одной реплики: кластеры выбираются с возвращением целиком."""
+    if members is None:
+        return rng.integers(0, len(clusters), size=len(clusters))
+    picked = rng.integers(0, n_clusters, size=n_clusters)
+    return np.concatenate([members[c] for c in picked])
+
+
+def cluster_members(clusters: np.ndarray, n_clusters: int) -> list[np.ndarray]:
+    """Позиции строк каждого кластера (считаются один раз — реплика стоит O(n))."""
+    order = np.argsort(clusters, kind="stable")
+    bounds = np.searchsorted(clusters[order], np.arange(n_clusters + 1))
+    return [order[bounds[i]:bounds[i + 1]] for i in range(n_clusters)]
+
+
+def run_bootstrap(
+    replicate: Callable[[np.ndarray, int], np.ndarray],
     *,
-    cluster_col: Optional[str] = "user_id",
-    n_boot: int = 500,
-    alpha: float = 0.05,
-    rng_seed: int = 4321,
-    observed: Optional[tuple[float, float]] = None,
-) -> ComparisonInference:
-    """Парный кластерный percentile bootstrap для ``(V_A, V_B, delta)``.
+    clusters: np.ndarray,
+    n_clusters: int,
+    clustered: bool,
+    n_boot: int,
+    seed: int,
+    n_jobs: Optional[int] = None,
+) -> np.ndarray:
+    """Считает ``n_boot`` реплик функции ``replicate(positions, seed) -> (J,)``.
 
-    Пара значений считается на **одной и той же** реплике, поэтому корреляция между
-    ``V_A`` и ``V_B`` учитывается, и интервал для delta уже, чем разность
-    независимых интервалов.
-
-    Args:
-        df: Исходные логи.
-        estimator_pair: Функция ``part -> (V_A, V_B)`` на переданной выборке.
-        cluster_col: Колонка кластеров; ``None`` — построчный bootstrap.
-        n_boot: Число реплик.
-        alpha: Уровень значимости.
-        rng_seed: Зерно генератора.
-        observed: Уже посчитанная пара ``(V_A, V_B)`` на исходных данных. Позволяет
-            не пересчитывать точечную оценку (полный fit nuisance) второй раз.
+    Зёрна реплик порождаются из ``seed`` детерминированно, поэтому результат не
+    зависит от ``n_jobs``. Неудавшаяся реплика (например, вырожденный фолд)
+    возвращает NaN и учитывается в отчёте.
     """
-    if n_boot < 2:
-        raise ValueError("n_boot должен быть не меньше 2")
-    resampler = ClusterResampler(df, cluster_col)
-    rng = np.random.default_rng(rng_seed)
+    members = cluster_members(clusters, n_clusters) if clustered else None
+    children = np.random.SeedSequence(seed).spawn(n_boot)
 
-    v_a, v_b = observed if observed is not None else estimator_pair(df)
-    delta = float(v_b) - float(v_a)
-
-    boot = np.empty((n_boot, 3), dtype=float)
-    for i in range(n_boot):
-        part = resampler.resample(df, rng)
+    def one(child: np.random.SeedSequence) -> Optional[np.ndarray]:
+        rng = np.random.default_rng(child)
+        positions = bootstrap_positions(clusters, n_clusters, rng, members)
         try:
-            a, b = estimator_pair(part)
+            return np.asarray(replicate(positions, int(rng.integers(2**31 - 1))), dtype=float)
         except (ValueError, np.linalg.LinAlgError) as exc:
-            logger.debug("Bootstrap-реплика %d отброшена: %s", i, exc)
-            boot[i] = np.nan
-            continue
-        boot[i] = (a, b, b - a)
+            logger.debug("Bootstrap-реплика отброшена: %s", exc)
+            return None
 
-    nan_share = float(np.mean(~np.isfinite(boot[:, 2])))
-    warns = _quality_warnings(n_clusters=resampler.n_clusters, n_boot=n_boot, nan_share=nan_share)
-
-    if nan_share > MAX_NAN_SHARE:
-        logger.warning(
-            "%.0f%% bootstrap-реплик не удалось посчитать; интервалы неопределены",
-            100 * nan_share,
-        )
-        warns.append("too_many_failed_bootstrap_replicates")
-        nan_interval = Interval(float("nan"), float("nan"))
-        return ComparisonInference(
-            v_a=float(v_a), v_b=float(v_b), delta=delta,
-            v_a_ci=nan_interval, v_b_ci=nan_interval, delta_ci=nan_interval,
-            p_value=float("nan"), is_significant=False, ci_excludes_zero=False,
-            significance_rule="centered_paired_bootstrap_p_value_lt_alpha",
-            alpha=alpha, method="paired_percentile_bootstrap",
-            n_samples=len(df), n_clusters=resampler.n_clusters, n_boot=n_boot,
-            warnings=tuple(warns),
-        )
-
-    delta_ci = _percentile_interval(boot[:, 2], alpha)
-    p_value = _centered_bootstrap_pvalue(boot[:, 2], delta)
-
-    return ComparisonInference(
-        v_a=float(v_a),
-        v_b=float(v_b),
-        delta=delta,
-        v_a_ci=_percentile_interval(boot[:, 0], alpha),
-        v_b_ci=_percentile_interval(boot[:, 1], alpha),
-        delta_ci=delta_ci,
-        p_value=p_value,
-        is_significant=bool(np.isfinite(p_value) and p_value < alpha),
-        ci_excludes_zero=delta_ci.excludes(0.0),
-        significance_rule="centered_paired_bootstrap_p_value_lt_alpha",
-        alpha=alpha,
-        method="paired_percentile_bootstrap",
-        n_samples=len(df),
-        n_clusters=resampler.n_clusters,
-        n_boot=n_boot,
-        warnings=tuple(warns),
-    )
-
-
-# ---------------------------------------------------------------------------
-# Аналитический (influence function) инференс
-# ---------------------------------------------------------------------------
-
-
-def infer_comparison_influence(
-    contributions_b: np.ndarray,
-    rewards: np.ndarray,
-    *,
-    clusters: Optional[Sequence] = None,
-    alpha: float = 0.05,
-) -> ComparisonInference:
-    """Аналитический CI по построчным вкладам с кластерно-робастной дисперсией.
-
-    ``V_A`` — среднее наблюдённой награды (вклад ``psi^A_i = r_i``), ``V_B`` — среднее
-    вкладов оценщика, ``delta`` использует парный вклад ``psi^delta_i = psi^B_i - r_i``,
-    поэтому корреляция между плечами учитывается точно, без ресэмплинга.
-
-    Args:
-        contributions_b: Построчные вклады оценщика для политики B.
-        rewards: Наблюдённая награда.
-        clusters: Значения кластерной колонки; ``None`` — независимые строки.
-        alpha: Уровень значимости.
-    """
-    psi_b = np.asarray(contributions_b, dtype=float)
-    r = np.asarray(rewards, dtype=float)
-    if psi_b.shape != r.shape:
-        raise ValueError("contributions_b и rewards должны быть одной длины")
-
-    n = psi_b.size
-    psi_delta = psi_b - r
-    v_a, v_b = float(np.mean(r)), float(np.mean(psi_b))
-    delta = float(np.mean(psi_delta))
-
-    se_a = cluster_robust_se(r, clusters=clusters)
-    se_b = cluster_robust_se(psi_b, clusters=clusters)
-    se_d = cluster_robust_se(psi_delta, clusters=clusters)
-
-    z = float(stats.norm.ppf(1 - alpha / 2))
-
-    def interval(center: float, se: float) -> Interval:
-        if not np.isfinite(se):
-            return Interval(float("nan"), float("nan"))
-        return Interval(center - z * se, center + z * se)
-
-    if np.isfinite(se_d) and se_d > 0:
-        p_value = float(2 * stats.norm.sf(abs(delta) / se_d))
+    if n_jobs in (None, 1):
+        results = [one(c) for c in children]
     else:
-        p_value = float("nan")
+        from joblib import Parallel, delayed
 
-    delta_ci = interval(delta, se_d)
-    n_clusters = None if clusters is None else int(pd.Series(clusters).nunique())
+        results = Parallel(n_jobs=n_jobs)(delayed(one)(c) for c in children)
+    width = next((len(r) for r in results if r is not None), 0)
+    out = np.full((n_boot, width), np.nan)
+    for i, r in enumerate(results):
+        if r is not None:
+            out[i] = r
+    return out
 
-    return ComparisonInference(
-        v_a=v_a,
-        v_b=v_b,
-        delta=delta,
-        v_a_ci=interval(v_a, se_a),
-        v_b_ci=interval(v_b, se_b),
-        delta_ci=delta_ci,
-        p_value=p_value,
-        is_significant=bool(np.isfinite(p_value) and p_value < alpha),
-        ci_excludes_zero=delta_ci.excludes(0.0),
-        significance_rule="cluster_robust_normal_p_value_lt_alpha",
-        alpha=alpha,
-        method="influence_function_cluster_robust",
-        n_samples=n,
-        n_clusters=n_clusters,
-        se_delta=se_d if np.isfinite(se_d) else None,
-        warnings=tuple(_quality_warnings(n_clusters=n_clusters)),
-    )
+
+def percentile_interval(samples: np.ndarray, alpha: float) -> tuple[np.ndarray, np.ndarray]:
+    """Percentile-интервалы по столбцам, игнорируя NaN-реплики."""
+    with np.errstate(all="ignore"):
+        low = np.nanpercentile(samples, 100 * alpha / 2, axis=0)
+        high = np.nanpercentile(samples, 100 * (1 - alpha / 2), axis=0)
+    return low, high
+
+
+def centered_pvalue(samples: np.ndarray, estimate: np.ndarray) -> np.ndarray:
+    """Двусторонний центрированный bootstrap p-value для H0: параметр = 0."""
+    finite = np.isfinite(samples)
+    extreme = (np.abs(samples - estimate) >= np.abs(estimate)) & finite
+    return (1.0 + extreme.sum(axis=0)) / (1.0 + finite.sum(axis=0))

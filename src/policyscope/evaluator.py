@@ -1,120 +1,660 @@
-"""Объектная обёртка над :func:`~policyscope.comparison.compare_policies`.
+"""Точка входа: :class:`Evaluator` и :func:`evaluate`.
 
-Удобна, когда одни и те же данные и настройки прогоняются несколькими оценщиками:
-конфигурация задаётся один раз, а меняется только имя метода.
+Сценарий::
+
+    ev = ps.Evaluator(logs, action="offer", reward=["accepted", "revenue"],
+                      propensity="p_offer", cluster="client_id")
+    report = ev.evaluate(policy_b)              # B против политики A из логов
+    board = ev.compare({"мягкий": b1, "жёсткий": b2})   # несколько кандидатов
+
+Nuisance-модели (пропенсити и модель исхода) от кандидата не зависят: они обучаются
+один раз при первом вызове и переиспользуются, поэтому каждый следующий кандидат
+оценивается за доли секунды (при аналитическом интервале).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Optional, Sequence
+import logging
+import os
+from functools import partial
+from typing import Any, Mapping, Optional, Sequence, Union
 
+import numpy as np
 import pandas as pd
 
-from policyscope.comparison import (
-    InferenceMethod,
-    MultiTargetComparison,
-    PolicyComparison,
-    compare_policies,
-    compare_policies_multi_estimator,
-    compare_policies_multi_target,
+from policyscope.data import LogData, prepare_logs
+from policyscope.diagnostics import (
+    Finding,
+    Thresholds,
+    overlap_summary,
+    policy_findings,
+    triangulate,
+    trust_level,
+    variance_concentration,
 )
-from policyscope.data import LoggedBanditDataset
-from policyscope.diagnostics import DiagnosticThresholds
-from policyscope.estimate import EstimatorName
-from policyscope.estimators import DEFAULT_NUISANCE_SPEC, NuisanceSpec
-from policyscope.nuisance import PropensitySource
+from policyscope.estimators import ESTIMATORS, PolicyTerms, contributions, ess, policy_terms
+from policyscope.inference import (
+    analytic_summary,
+    centered_pvalue,
+    cluster_sums,
+    multiplier_tstats,
+    percentile_interval,
+    romano_wolf,
+    run_bootstrap,
+    t_critical,
+)
+from policyscope.nuisance import Nuisance, NuisanceConfig, fit_nuisance
+from policyscope.policy import policy_matrix
+from policyscope.report import Estimate, EstimatorRow, Leaderboard, MetricReport, Report
 
-__all__ = ["OPEEvaluator"]
+logger = logging.getLogger(__name__)
+
+__all__ = ["Evaluator", "evaluate", "PRIMARY_ESTIMATORS"]
+
+#: Оценщики, которые могут быть основными. DM — только для сверки: его интервал
+#: не учитывает смещение модели исхода и потому систематически недопокрывает.
+PRIMARY_ESTIMATORS = ("dr", "sndr", "ips", "snips")
+_Z_POWER_80 = 0.8416
+_RW_DRAWS = 2000
 
 
-@dataclass
-class OPEEvaluator:
-    """Единый объект оценки политик.
+def _model_name(model: Any, default: str) -> str:
+    if model is None:
+        return default
+    steps = getattr(model, "steps", None)
+    if steps:
+        return " → ".join(type(step).__name__ for _, step in steps)
+    return type(model).__name__
 
-    Поля повторяют аргументы :func:`~policyscope.comparison.compare_policies`, так что
-    объекту доступны все возможности библиотеки, включая логированные пропенсити,
-    cross-fitting, выбор метода инференса и подключаемые nuisance-модели.
 
-    Example:
-        >>> ev = OPEEvaluator(df, policy_b, target="reward", cluster_col="user_id")
-        >>> print(ev.compare("dr").to_markdown())
-        >>> ev.compare_all()          # таблица по всем оценщикам
+def _terms(
+    data: LogData, nuis: Nuisance, idx: np.ndarray, pi: np.ndarray, metric: str,
+    p_taken: Optional[np.ndarray] = None,
+) -> PolicyTerms:
+    p = nuis.p_taken if p_taken is None else p_taken
+    return policy_terms(pi[idx], data.a[idx], p, nuis.mu[metric])
+
+
+def _values(
+    data: LogData, nuis: Nuisance, idx: np.ndarray, pis: list[np.ndarray], base: Optional[np.ndarray]
+) -> np.ndarray:
+    """Значения (V_B, V_base) для всех кандидатов, метрик и оценщиков: ``(P, M, E, 2)``."""
+    out = np.empty((len(pis), len(data.reward_cols), len(ESTIMATORS), 2))
+    for m, metric in enumerate(data.reward_cols):
+        r = data.rewards[metric][idx]
+        base_terms = _terms(data, nuis, idx, base, metric) if base is not None else None
+        for e, est in enumerate(ESTIMATORS):
+            out[:, m, e, 1] = (
+                r.mean() if base_terms is None else contributions(est, r, base_terms).mean()
+            )
+        for i, pi in enumerate(pis):
+            terms = _terms(data, nuis, idx, pi, metric)
+            for e, est in enumerate(ESTIMATORS):
+                out[i, m, e, 0] = contributions(est, r, terms).mean()
+    return out
+
+
+def _replicate(
+    data: LogData, config: NuisanceConfig, pis: list[np.ndarray], base: Optional[np.ndarray],
+    positions: np.ndarray, seed: int,
+) -> np.ndarray:
+    """Одна bootstrap-реплика: переобучение nuisance на реплике и все оценки."""
+    nuis = fit_nuisance(data, config, seed=seed, positions=positions)
+    return _values(data, nuis, positions, pis, base).reshape(-1)
+
+
+class Evaluator:
+    """Оценка политик-кандидатов по логам политики A.
+
+    Args:
+        logs: Логи A: строка — одно решение (контекст, действие, награда).
+        action: Колонка с действием, которое выбрала A.
+        reward: Колонка метрики или список колонок.
+        propensity: Колонка с вероятностью, с которой A выбрала залогированное действие.
+            ``None`` — пропенсити оцениваются моделью (тогда по умолчанию включается
+            bootstrap: аналитический интервал не учитывает ошибку их оценки).
+        cluster: Колонка единицы наблюдения (клиент), если на неё приходится несколько
+            строк. ``None`` — строки независимы.
+        features: Признаки контекста. ``None`` — авто-выбор (список попадает в отчёт).
+        propensity_model: sklearn-классификатор для пропенсити (по умолчанию —
+            логистическая регрессия).
+        outcome_model: sklearn-модель для ``E[r|x, a]`` (по умолчанию — логистическая
+            регрессия или Ridge с взаимодействиями признаков и действия).
+        n_folds: Число фолдов cross-fitting.
+        propensity_floor: Пол оценённого пропенсити как доля частоты действия.
+        lower_is_better: Метрики, где меньше — лучше (отток, расходы).
+        thresholds: Пороги диагностики.
+        random_state: Зерно (фолды, bootstrap, поправка на множественность).
+        n_jobs: Параллелизм bootstrap (как в joblib; ``-1`` — все ядра).
     """
 
-    data: pd.DataFrame | LoggedBanditDataset
-    policyB: object
-    target: Any = None
-    feature_cols: Optional[Sequence[str]] = None
-    action_col: Any = None
-    action_space: Optional[Sequence] = None
-    cluster_col: Any = None
-    propensity_col: Any = None
-    propensity_source: PropensitySource = "auto"
-    inference: InferenceMethod = "bootstrap"
-    n_boot: int = 500
-    alpha: float = 0.05
-    rng_seed: int = 4321
-    weight_clip: Optional[float] = None
-    tau: float = 20.0
-    use_crossfit: bool = False
-    crossfit_n_splits: int = 5
-    crossfit_random_state: int = 123
-    nuisance_spec: NuisanceSpec = DEFAULT_NUISANCE_SPEC
-    honest_outcome_metrics: bool = True
-    thresholds: DiagnosticThresholds = field(default_factory=DiagnosticThresholds)
+    def __init__(
+        self,
+        logs: pd.DataFrame,
+        *,
+        action: str,
+        reward: Union[str, Sequence[str]],
+        propensity: Optional[str] = None,
+        cluster: Optional[str] = None,
+        features: Optional[Sequence[str]] = None,
+        propensity_model: Any = None,
+        outcome_model: Any = None,
+        n_folds: int = 5,
+        propensity_floor: float = 0.1,
+        lower_is_better: Sequence[str] = (),
+        thresholds: Optional[Thresholds] = None,
+        random_state: int = 0,
+        n_jobs: Optional[int] = -1,
+    ) -> None:
+        self.data: LogData = prepare_logs(
+            logs, action=action, reward=reward, propensity=propensity,
+            cluster=cluster, features=features,
+        )
+        unknown = sorted(set(lower_is_better) - set(self.data.reward_cols))
+        if unknown:
+            raise ValueError(f"lower_is_better содержит метрики, которых нет в reward: {unknown}")
+        self.lower_is_better = frozenset(lower_is_better)
+        hidden = list(self.data.reward_cols) + ([propensity] if propensity else [])
+        # Политике показываются логи без наград и пропенсити — она не должна их видеть.
+        self._frame = logs.drop(columns=hidden).copy()
+        self.config = NuisanceConfig(
+            propensity_model=propensity_model,
+            outcome_model=outcome_model,
+            n_folds=n_folds,
+            propensity_floor=propensity_floor,
+        )
+        self.thresholds = thresholds or Thresholds()
+        self.random_state = int(random_state)
+        self.n_jobs = n_jobs
+        self._nuisance: Optional[Nuisance] = None
 
-    def _kwargs(self) -> dict[str, Any]:
-        from policyscope.comparison import UNSET
+    # ------------------------------------------------------------------
+    # Публичный API
+    # ------------------------------------------------------------------
 
-        out: dict[str, Any] = {
-            "action_space": self.action_space,
-            "propensity_source": self.propensity_source,
-            "inference": self.inference,
-            "n_boot": self.n_boot,
-            "alpha": self.alpha,
-            "rng_seed": self.rng_seed,
-            "weight_clip": self.weight_clip,
-            "tau": self.tau,
-            "use_crossfit": self.use_crossfit,
-            "crossfit_n_splits": self.crossfit_n_splits,
-            "crossfit_random_state": self.crossfit_random_state,
-            "nuisance_spec": self.nuisance_spec,
-            "honest_outcome_metrics": self.honest_outcome_metrics,
-            "thresholds": self.thresholds,
-        }
-        # None означает «не задано» и должно уступать схеме датасета,
-        # поэтому такие поля передаются только когда указаны явно.
-        for name in ("target", "action_col", "cluster_col", "propensity_col", "feature_cols"):
-            value = getattr(self, name)
-            out[name] = UNSET if value is None else value
+    @property
+    def nuisance(self) -> Nuisance:
+        """Out-of-fold прогнозы nuisance-моделей (обучаются при первом обращении)."""
+        if self._nuisance is None:
+            self._nuisance = fit_nuisance(self.data, self.config, seed=self.random_state)
+        return self._nuisance
+
+    def evaluate(
+        self,
+        policy: Any,
+        *,
+        baseline: Any = None,
+        estimator: str = "dr",
+        inference: str = "auto",
+        alpha: float = 0.05,
+        n_boot: int = 200,
+        name: str = "B",
+        baseline_name: Optional[str] = None,
+    ) -> Report:
+        """Оценивает политику ``policy`` относительно ``baseline``.
+
+        Args:
+            policy: Политика-кандидат: ``DataFrame`` вероятностей с метками действий в
+                колонках (см. :func:`policyscope.softmax` и др.), имя колонки с действием
+                кандидата, ``Series`` действий или объект с ``action_probs(df)``.
+            baseline: С чем сравнивать. ``None`` — с политикой A, как она есть в логах
+                (``V(A)`` = средняя награда). Политика в том же формате — с ней (например,
+                с прод-версией A без исследования); её значение оценивается тем же оценщиком.
+            estimator: Основной оценщик: ``dr`` (по умолчанию), ``sndr``, ``ips``, ``snips``.
+                Остальные считаются для сверки на тех же моделях.
+            inference: ``auto`` — аналитический интервал при логированных пропенсити и
+                bootstrap при оценённых; ``influence``, ``bootstrap`` или ``none``.
+            alpha: Уровень значимости (интервалы ``1 - alpha``).
+            n_boot: Число bootstrap-реплик.
+            name: Имя кандидата в отчёте.
+            baseline_name: Имя базы в отчёте (по умолчанию ``A`` или ``база``).
+        """
+        board = self._run(
+            {name: policy}, baseline=baseline, estimator=estimator, inference=inference,
+            alpha=alpha, n_boot=n_boot, baseline_name=baseline_name,
+        )
+        return board.reports[name]
+
+    def compare(
+        self,
+        candidates: Mapping[str, Any],
+        *,
+        baseline: Any = None,
+        estimator: str = "dr",
+        inference: str = "auto",
+        alpha: float = 0.05,
+        n_boot: int = 200,
+        baseline_name: Optional[str] = None,
+    ) -> Leaderboard:
+        """Оценивает несколько кандидатов за один проход и строит рейтинг.
+
+        Все кандидаты считаются на одних и тех же моделях и bootstrap-репликах, а
+        p-value корректируются методом Romano–Wolf на всё семейство
+        «кандидат × метрика».
+        """
+        if not candidates:
+            raise ValueError("Передайте хотя бы одного кандидата")
+        return self._run(
+            dict(candidates), baseline=baseline, estimator=estimator, inference=inference,
+            alpha=alpha, n_boot=n_boot, baseline_name=baseline_name,
+        )
+
+    # ------------------------------------------------------------------
+    # Расчёт
+    # ------------------------------------------------------------------
+
+    def _validate(self, estimator: str, inference: str, alpha: float, n_boot: int) -> str:
+        if estimator == "dm":
+            raise ValueError(
+                "DM не может быть основным оценщиком: его интервал не учитывает смещение "
+                "модели исхода. DM всё равно считается и показывается в таблице согласия."
+            )
+        if estimator not in PRIMARY_ESTIMATORS:
+            raise ValueError(f"Неизвестный оценщик '{estimator}'. Доступны: {PRIMARY_ESTIMATORS}")
+        if self.data.propensity is None and estimator in ("ips", "snips"):
+            raise ValueError(
+                f"При оценённых пропенсити '{estimator}' не может быть основным: смещение от "
+                "ошибки модели пропенсити входит в него напрямую. Используйте 'dr' или 'sndr'."
+            )
+        if not 0.0 < alpha < 1.0:
+            raise ValueError("alpha должна лежать в (0, 1)")
+        if inference == "auto":
+            inference = "influence" if self.data.propensity is not None else "bootstrap"
+        if inference not in ("influence", "bootstrap", "none"):
+            raise ValueError("inference: 'auto', 'influence', 'bootstrap' или 'none'")
+        if inference == "bootstrap" and n_boot < 50:
+            raise ValueError("n_boot должен быть не меньше 50")
+        return inference
+
+    def _bootstrap_eta(self, n_boot: int) -> None:
+        if self.n_jobs is None:
+            jobs = 1
+        elif self.n_jobs < 0:
+            jobs = max(1, (os.cpu_count() or 1) + 1 + self.n_jobs)
+        else:
+            jobs = max(1, int(self.n_jobs))
+        # Реплики на всех ядрах мешают друг другу, плюс старт процессов-воркеров.
+        speedup = max(1.0, jobs / 2) if jobs > 1 else 1.0
+        eta = self.nuisance.fit_seconds * n_boot / speedup + (5.0 if jobs > 1 else 0.0)
+        if eta > 30:
+            logger.warning(
+                "Bootstrap: %d реплик с переобучением моделей, ориентировочно %.1f мин. "
+                "Логированные пропенсити позволили бы обойтись аналитическим интервалом.",
+                n_boot, eta / 60,
+            )
+
+    def _run(
+        self,
+        candidates: dict[str, Any],
+        *,
+        baseline: Any,
+        estimator: str,
+        inference: str,
+        alpha: float,
+        n_boot: int,
+        baseline_name: Optional[str],
+    ) -> Leaderboard:
+        inference = self._validate(estimator, inference, alpha, n_boot)
+        data, th = self.data, self.thresholds
+        base_label = baseline_name or ("A" if baseline is None else "база")
+        if base_label in candidates:
+            raise ValueError(f"Имя базы '{base_label}' совпадает с именем кандидата")
+        names = list(candidates)
+        pis = [policy_matrix(candidates[n], data, self._frame, role=n) for n in names]
+        base = policy_matrix(baseline, data, self._frame, role=base_label) if baseline is not None else None
+
+        nuis = self.nuisance
+        full = np.arange(data.n)
+        metrics = data.reward_cols
+        e_primary = ESTIMATORS.index(estimator)
+        P, M, E = len(names), len(metrics), len(ESTIMATORS)
+
+        # Построчные вклады на полной выборке.
+        psi_b = np.empty((P, M, E, data.n))
+        psi_a = np.empty((M, E, data.n))
+        terms_b: dict[tuple[int, int], PolicyTerms] = {}
+        for m, metric in enumerate(metrics):
+            r = data.rewards[metric]
+            base_terms = _terms(data, nuis, full, base, metric) if base is not None else None
+            for e, est in enumerate(ESTIMATORS):
+                psi_a[m, e] = r if base_terms is None else contributions(est, r, base_terms)
+            for i, pi in enumerate(pis):
+                terms_b[i, m] = _terms(data, nuis, full, pi, metric)
+                for e, est in enumerate(ESTIMATORS):
+                    psi_b[i, m, e] = contributions(est, r, terms_b[i, m])
+
+        v_b = psi_b.mean(axis=-1)
+        v_a = psi_a.mean(axis=-1)
+        stats: dict[str, np.ndarray] = {}
+        extra_findings: list[Finding] = []
+        rw_t_obs = np.full((P, M), np.nan)
+        rw_null: Optional[np.ndarray] = None
+        rng = np.random.default_rng(self.random_state + 1)
+
+        if inference == "influence":
+            stats = self._influence(psi_b, psi_a, v_b, v_a, alpha)
+            se_family = stats["delta_se"][:, :, e_primary]
+            delta_family = v_b[:, :, e_primary] - v_a[None, :, e_primary]
+            with np.errstate(divide="ignore", invalid="ignore"):
+                rw_t_obs = np.where(se_family > 0, delta_family / se_family, np.nan)
+            if P * M > 1:
+                psi_family = (psi_b[:, :, e_primary] - psi_a[None, :, e_primary]).reshape(P * M, -1)
+                sums = cluster_sums(psi_family.T, data.clusters, data.n_clusters)
+                rw_null = multiplier_tstats(sums, se_family.reshape(-1), data.n, _RW_DRAWS, rng)
+            if nuis.source == "estimated":
+                extra_findings.append(Finding(
+                    code="influence_with_estimated_propensity",
+                    severity="caution",
+                    title="Аналитический интервал при оценённых пропенсити",
+                    detail="Интервал не учитывает ошибку оценки пропенсити и может быть занижен.",
+                    advice="Используйте inference='auto' (bootstrap) для честного интервала.",
+                ))
+        elif inference == "bootstrap":
+            self._bootstrap_eta(n_boot)
+
+            samples = run_bootstrap(
+                partial(_replicate, data, self.config, pis, base), clusters=data.clusters, n_clusters=data.n_clusters,
+                clustered=data.is_clustered, n_boot=n_boot,
+                seed=self.random_state + 2, n_jobs=self.n_jobs,
+            ).reshape(n_boot, P, M, E, 2)
+            stats = self._bootstrap_stats(samples, v_b, v_a, alpha)
+            failed = float(np.mean(~np.isfinite(samples).all(axis=(1, 2, 3, 4))))
+            if failed > 0:
+                extra_findings.append(Finding(
+                    code="bootstrap_failures",
+                    severity="block" if failed > th.failed_replicates else "caution",
+                    title="Часть bootstrap-реплик не посчиталась",
+                    detail=f"Не удалось посчитать {100 * failed:.0f}% реплик (вырожденные выборки).",
+                    advice="Увеличьте объём данных или уменьшите n_folds.",
+                ))
+            d = samples[..., e_primary, 0] - samples[..., e_primary, 1]
+            delta_hat = v_b[:, :, e_primary] - v_a[None, :, e_primary]
+            sd = np.nanstd(d, axis=0)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                rw_t_obs = np.where(sd > 0, delta_hat / sd, np.nan)
+                rw_null = ((d - delta_hat) / sd).reshape(n_boot, -1)
+
+        p_primary = stats.get("p_value")
+        if p_primary is not None:
+            p_family = p_primary[:, :, e_primary]
+            p_adj = p_family.copy() if rw_null is None else romano_wolf(
+                rw_t_obs.reshape(-1), rw_null
+            ).reshape(P, M)
+        else:
+            p_adj = None
+
+        settings = self._settings(estimator, inference, alpha, n_boot)
+        reports = {}
+        for i, name in enumerate(names):
+            reports[name] = self._report(
+                i, name, base_label, pis[i], base, psi_b, psi_a, v_b, v_a, stats, p_adj,
+                terms_b, estimator, inference, alpha, extra_findings, settings,
+            )
+        table = pd.concat(
+            {name: rep.summary() for name, rep in reports.items()}, names=["candidate"]
+        ).reset_index()
+        return Leaderboard(table=table, reports=reports, baseline=base_label, alpha=alpha)
+
+    # ------------------------------------------------------------------
+    # Инференс
+    # ------------------------------------------------------------------
+
+    def _influence(self, psi_b, psi_a, v_b, v_a, alpha) -> dict[str, np.ndarray]:
+        data = self.data
+        P, M, E, _ = psi_b.shape
+        keys = ("v_b_low", "v_b_high", "v_a_low", "v_a_high", "delta_low", "delta_high",
+                "delta_se", "p_value", "lift_low", "lift_high")
+        out = {k: np.full((P, M, E), np.nan) for k in keys}
+        tc = t_critical(alpha, data.n_clusters)
+        for m in range(M):
+            for e in range(E):
+                sa = analytic_summary(psi_a[m, e], data.clusters, data.n_clusters, alpha)
+                for i in range(P):
+                    cols = [psi_b[i, m, e], psi_b[i, m, e] - psi_a[m, e]]
+                    vb, va = v_b[i, m, e], v_a[m, e]
+                    if vb > 0 and va > 0:
+                        cols.append(psi_b[i, m, e] / vb - psi_a[m, e] / va)
+                    s = analytic_summary(np.column_stack(cols), data.clusters, data.n_clusters, alpha)
+                    out["v_b_low"][i, m, e], out["v_b_high"][i, m, e] = s["low"][0], s["high"][0]
+                    out["v_a_low"][i, m, e], out["v_a_high"][i, m, e] = sa["low"][0], sa["high"][0]
+                    out["delta_low"][i, m, e], out["delta_high"][i, m, e] = s["low"][1], s["high"][1]
+                    out["delta_se"][i, m, e] = s["se"][1]
+                    out["p_value"][i, m, e] = s["p_value"][1]
+                    if len(cols) == 3:
+                        log_ratio, se = np.log(vb / va), s["se"][2]
+                        out["lift_low"][i, m, e] = np.exp(log_ratio - tc * se) - 1
+                        out["lift_high"][i, m, e] = np.exp(log_ratio + tc * se) - 1
         return out
 
-    def compare(self, estimator: EstimatorName = "dr") -> PolicyComparison:
-        """Считает сравнение выбранным оценщиком."""
-        return compare_policies(self.data, self.policyB, estimator=estimator, **self._kwargs())
+    @staticmethod
+    def _bootstrap_stats(samples, v_b, v_a, alpha) -> dict[str, np.ndarray]:
+        sb, sa = samples[..., 0], samples[..., 1]
+        d = sb - sa
+        delta = v_b - v_a[None]
+        out: dict[str, np.ndarray] = {}
+        out["v_b_low"], out["v_b_high"] = percentile_interval(sb, alpha)
+        a_low, a_high = percentile_interval(sa, alpha)
+        out["v_a_low"], out["v_a_high"] = a_low, a_high
+        out["delta_low"], out["delta_high"] = percentile_interval(d, alpha)
+        out["delta_se"] = np.nanstd(d, axis=0)
+        out["p_value"] = centered_pvalue(d, delta)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = np.where((sb > 0) & (sa > 0), sb / sa - 1, np.nan)
+        out["lift_low"], out["lift_high"] = percentile_interval(ratio, alpha)
+        positive = (v_b > 0) & (v_a[None] > 0)
+        out["lift_low"] = np.where(positive, out["lift_low"], np.nan)
+        out["lift_high"] = np.where(positive, out["lift_high"], np.nan)
+        return out
 
-    def compare_all(
-        self,
-        estimators: Sequence[EstimatorName] = ("ips", "snips", "dm", "dr", "sndr", "switch_dr"),
-    ) -> pd.DataFrame:
-        """Считает несколько оценщиков и сводит их в таблицу.
+    # ------------------------------------------------------------------
+    # Сборка отчёта
+    # ------------------------------------------------------------------
 
-        Расхождение оценщиков между собой — практичный признак того, что оценке
-        доверять нельзя, даже если каждый отдельный CI выглядит узким.
-        """
-        return compare_policies_multi_estimator(
-            self.data, self.policyB, estimators=estimators, **self._kwargs()
+    def _settings(self, estimator: str, inference: str, alpha: float, n_boot: int) -> dict:
+        d = self.data
+        return {
+            "estimator": estimator,
+            "inference": inference,
+            "alpha": alpha,
+            "n_boot": n_boot if inference == "bootstrap" else None,
+            "n_folds": self.config.n_folds,
+            "action": d.action_col,
+            "rewards": list(d.reward_cols),
+            "propensity": d.propensity_col,
+            "propensity_source": self.nuisance.source,
+            "propensity_floor": self.config.propensity_floor if d.propensity is None else None,
+            "cluster": d.cluster_col,
+            "features": list(d.features),
+            "features_auto": d.features_auto,
+            "skipped_features": dict(d.skipped_features),
+            "propensity_model": (
+                "логированные" if d.propensity is not None else
+                _model_name(self.config.propensity_model, "LogisticRegression (OOF)")
+            ),
+            "outcome_model": _model_name(
+                self.config.outcome_model, "LogisticRegression / Ridge с x×a (OOF)"
+            ),
+            "random_state": self.random_state,
+            "actions": list(d.actions),
+        }
+
+    def _outcome_quality(self, metric: str) -> dict[str, float]:
+        r = self.data.rewards[metric]
+        mu = self.nuisance.mu[metric][np.arange(self.data.n), self.data.a]
+        if self.data.binary[metric]:
+            if 0 < r.mean() < 1:
+                from sklearn.metrics import roc_auc_score
+
+                return {"roc_auc": float(roc_auc_score(r, mu))}
+            return {}
+        sst = float(np.sum((r - r.mean()) ** 2))
+        return {"r2": float(1 - np.sum((r - mu) ** 2) / sst)} if sst > 0 else {}
+
+    def _floor_sensitivity(self, pi, base, metric, estimator) -> Optional[dict[str, float]]:
+        nuis = self.nuisance
+        if nuis.source != "estimated":
+            return None
+        data = self.data
+        r = data.rewards[metric]
+        full = np.arange(data.n)
+        out = {}
+        for label, factor in (("x0.5", 0.5), ("x1", 1.0), ("x2", 2.0)):
+            p = nuis.floored(data.a, factor)
+            vb = contributions(estimator, r, _terms(data, nuis, full, pi, metric, p)).mean()
+            va = r.mean() if base is None else contributions(
+                estimator, r, _terms(data, nuis, full, base, metric, p)
+            ).mean()
+            out[label] = float(vb - va)
+        return out
+
+    def _report(
+        self, i, name, base_label, pi, base, psi_b, psi_a, v_b, v_a, stats, p_adj,
+        terms_b, estimator, inference, alpha, extra_findings, settings,
+    ) -> Report:
+        data, th, nuis = self.data, self.thresholds, self.nuisance
+        e_primary = ESTIMATORS.index(estimator)
+        overlap = overlap_summary(data, nuis, pi, alpha)
+        findings = policy_findings(data, nuis, overlap, th, role="B")
+        if base is not None:
+            base_overlap = overlap_summary(data, nuis, base, alpha)
+            findings += policy_findings(data, nuis, base_overlap, th, role=base_label)
+        findings += extra_findings
+        ess_value = ess(terms_b[i, 0].w)
+        has_ci = inference != "none"
+
+        def get(key, m, e):
+            return float(stats[key][i, m, e]) if has_ci else None
+
+        metric_reports = {}
+        for m, metric in enumerate(data.reward_cols):
+            binary = data.binary[metric]
+            delta_value = float(v_b[i, m, e_primary] - v_a[m, e_primary])
+            se_delta = get("delta_se", m, e_primary)
+            terms = terms_b[i, m]
+            checks, metric_findings = triangulate(
+                data, metric, estimator=estimator, w=terms.w, dm=terms.dm,
+                mu_taken=terms.mu_taken,
+                se_delta=se_delta if se_delta is not None else float(
+                    analytic_summary(psi_b[i, m, e_primary] - psi_a[m, e_primary],
+                                     data.clusters, data.n_clusters, alpha)["se"][0]
+                ),
+                estimated_propensity=nuis.source == "estimated",
+                ess_value=ess_value, th=th,
+            )
+            concentration = variance_concentration(
+                psi_b[i, m, e_primary] - psi_a[m, e_primary], data, th, metric
+            )
+            if concentration is not None:
+                metric_findings.append(concentration)
+            floor = self._floor_sensitivity(pi, base, metric, estimator)
+            if floor is not None and se_delta is not None and (
+                max(floor.values()) - min(floor.values()) > se_delta
+            ):
+                metric_findings.append(Finding(
+                    code="floor_sensitive",
+                    severity="caution",
+                    metric=metric,
+                    title="Оценка чувствительна к полу пропенсити",
+                    detail=(
+                        "При изменении пола вдвое Δ меняется больше чем на стандартную ошибку: "
+                        f"{floor['x0.5']:+.4g} / {floor['x1']:+.4g} / {floor['x2']:+.4g}."
+                    ),
+                    advice="Политика A плохо воспроизводится моделью; нужны логированные пропенсити.",
+                ))
+
+            all_findings = tuple(findings) + tuple(metric_findings)
+            trust = trust_level(all_findings)
+            low, high = get("delta_low", m, e_primary), get("delta_high", m, e_primary)
+            if not has_ci:
+                decision = "not_computed"
+            elif trust == "unreliable":
+                decision = "inconclusive"
+            elif low is not None and low > 0:
+                decision = "worse" if metric in self.lower_is_better else "better"
+            elif high is not None and high < 0:
+                decision = "better" if metric in self.lower_is_better else "worse"
+            else:
+                decision = "no_difference"
+
+            lift = None
+            vb, va = float(v_b[i, m, e_primary]), float(v_a[m, e_primary])
+            if vb > 0 and va > 0:
+                lift = Estimate(vb / va - 1, get("lift_low", m, e_primary), get("lift_high", m, e_primary))
+            mde = None
+            if se_delta is not None and np.isfinite(se_delta):
+                mde = (t_critical(alpha, data.n_clusters) + _Z_POWER_80) * se_delta
+
+            rows = []
+            for e, est in enumerate(ESTIMATORS):
+                show_ci = has_ci and est != "dm"
+                rows.append(EstimatorRow(
+                    estimator=est,
+                    v_b=Estimate(float(v_b[i, m, e]), get("v_b_low", m, e) if show_ci else None,
+                                 get("v_b_high", m, e) if show_ci else None),
+                    delta=Estimate(float(v_b[i, m, e] - v_a[m, e]),
+                                   get("delta_low", m, e) if show_ci else None,
+                                   get("delta_high", m, e) if show_ci else None,
+                                   get("delta_se", m, e) if show_ci else None),
+                    p_value=get("p_value", m, e) if show_ci else None,
+                ))
+
+            metric_reports[metric] = MetricReport(
+                metric=metric,
+                estimator=estimator,
+                binary=binary,
+                lower_is_better=metric in self.lower_is_better,
+                v_a=Estimate(va, get("v_a_low", m, e_primary), get("v_a_high", m, e_primary)),
+                v_b=Estimate(vb, get("v_b_low", m, e_primary), get("v_b_high", m, e_primary)),
+                delta=Estimate(delta_value, low, high, se_delta),
+                p_value=get("p_value", m, e_primary),
+                p_value_adj=float(p_adj[i, m]) if p_adj is not None else None,
+                lift=lift,
+                mde=mde,
+                decision=decision,
+                trust=trust,
+                findings=all_findings,
+                checks=checks,
+                rows=tuple(rows),
+                outcome_quality=self._outcome_quality(metric),
+                floor_sensitivity=floor,
+            )
+        return Report(
+            policy=name,
+            baseline=base_label,
+            metrics=metric_reports,
+            overlap=overlap,
+            findings=tuple(findings),
+            settings=settings,
         )
 
-    def compare_targets(
-        self,
-        targets: Sequence[str],
-        estimator: EstimatorName = "dr",
-    ) -> MultiTargetComparison:
-        """Повторяет оценку для нескольких целевых метрик."""
-        kwargs = self._kwargs()
-        kwargs.pop("target", None)
-        return compare_policies_multi_target(
-            self.data, self.policyB, targets=targets, estimator=estimator, **kwargs
-        )
+
+def evaluate(
+    logs: pd.DataFrame,
+    policy: Any,
+    *,
+    action: str,
+    reward: Union[str, Sequence[str]],
+    propensity: Optional[str] = None,
+    cluster: Optional[str] = None,
+    features: Optional[Sequence[str]] = None,
+    baseline: Any = None,
+    estimator: str = "dr",
+    inference: str = "auto",
+    alpha: float = 0.05,
+    n_boot: int = 200,
+    name: str = "B",
+    **evaluator_options: Any,
+) -> Report:
+    """Одноразовая оценка: ``Evaluator(logs, ...).evaluate(policy, ...)``.
+
+    Для нескольких кандидатов на одних логах создайте :class:`Evaluator` один раз —
+    модели не будут переобучаться.
+    """
+    ev = Evaluator(
+        logs, action=action, reward=reward, propensity=propensity, cluster=cluster,
+        features=features, **evaluator_options,
+    )
+    return ev.evaluate(
+        policy, baseline=baseline, estimator=estimator, inference=inference,
+        alpha=alpha, n_boot=n_boot, name=name,
+    )

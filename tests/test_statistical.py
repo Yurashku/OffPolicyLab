@@ -1,0 +1,181 @@
+"""Статистические свойства на многих симуляциях с известной истиной (маркер ``slow``).
+
+Это главное подтверждение работоспособности: unit-тесты проверяют формулы, а здесь —
+что оценки несмещены, интервалы покрывают истину с заявленной частотой, а проверки
+согласия не поднимают ложных тревог и ловят настоящие проблемы.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+import policyscope as ps
+from policyscope.estimators import PolicyTerms, contributions
+from policyscope.inference import analytic_summary, multiplier_tstats, romano_wolf
+from policyscope.synthetic import OfferSimulator
+
+from conftest import ACTIONS, make_bandit
+
+pytestmark = pytest.mark.slow
+
+KW = dict(action="action", reward="reward", features=["x1", "x2"])
+
+
+def mc_bias_ok(errors, z=3.0):
+    errors = np.asarray(errors)
+    return abs(errors.mean()) < z * errors.std(ddof=1) / np.sqrt(len(errors))
+
+
+def test_ips_dr_unbiased_with_logged_propensity():
+    errors = {"ips": [], "dr": []}
+    for seed in range(40):
+        b = make_bandit(2000, seed=100 + seed)
+        rep = ps.evaluate(b.logs, b.policy_b, propensity="propensity", inference="none", **KW)
+        table = rep["reward"].estimators.set_index("estimator")
+        for est in errors:
+            errors[est].append(table.loc[est, "delta"] - b.delta)
+    for est, e in errors.items():
+        assert mc_bias_ok(e), f"{est}: смещение {np.mean(e):.4f}"
+
+
+def test_error_shrinks_with_sample_size():
+    def mean_abs_error(n):
+        out = []
+        for seed in range(10):
+            b = make_bandit(n, seed=500 + seed)
+            rep = ps.evaluate(b.logs, b.policy_b, propensity="propensity", inference="none", **KW)
+            out.append(abs(rep["reward"].delta.value - b.delta))
+        return np.mean(out)
+
+    assert mean_abs_error(20000) < mean_abs_error(500) / 2
+
+
+class TestDoubleRobustness:
+    """DR несмещён, если верна хотя бы одна из моделей; негативный контроль — обе неверны."""
+
+    @staticmethod
+    def dr_error(seed, *, good_propensity, good_outcome):
+        b = make_bandit(3000, seed=seed)
+        rows = np.arange(3000)
+        codes = b.logs["action"].map({label: i for i, label in enumerate(ACTIONS)}).to_numpy()
+        distorted = b.probs_a ** 0.3
+        pa = b.probs_a if good_propensity else distorted / distorted.sum(axis=1, keepdims=True)
+        mu = b.mu if good_outcome else np.full_like(b.mu, 0.9)
+        pi = b.policy_b.to_numpy()
+        terms = PolicyTerms(w=pi[rows, codes] / pa[rows, codes],
+                            dm=np.sum(pi * mu, axis=1), mu_taken=mu[rows, codes])
+        r = b.logs["reward"].to_numpy(dtype=float)
+        return contributions("dr", r, terms).mean() - b.value_b
+
+    @pytest.mark.parametrize("good_propensity,good_outcome", [(True, False), (False, True)])
+    def test_one_correct_model_is_enough(self, good_propensity, good_outcome):
+        errors = [self.dr_error(s, good_propensity=good_propensity, good_outcome=good_outcome)
+                  for s in range(200, 225)]
+        assert mc_bias_ok(errors)
+
+    def test_both_wrong_is_biased(self):
+        errors = [self.dr_error(s, good_propensity=False, good_outcome=False) for s in range(300, 325)]
+        assert not mc_bias_ok(errors)
+
+
+def test_coverage_with_logged_propensity():
+    covered = {"dr": [], "sndr": [], "ips": []}
+    for seed in range(100):
+        b = make_bandit(1500, seed=1000 + seed)
+        rep = ps.Evaluator(b.logs, propensity="propensity", **KW)
+        for est in covered:
+            m = rep.evaluate(b.policy_b, estimator=est)["reward"]
+            covered[est].append(m.delta.low <= b.delta <= m.delta.high)
+    for est, c in covered.items():
+        assert np.mean(c) >= 0.89, f"{est}: покрытие {np.mean(c):.2f}"
+
+
+def test_cluster_robust_intervals_account_for_repeat_visits():
+    """С повторными визитами строки клиента зависимы: без кластеризации интервал узок.
+
+    Для V(A) и V(B) эффект клиента входит в каждую его строку. Для Δ при повторной
+    рандомизации действия на каждом визите он почти сокращается в парной разности
+    (E[w - 1 | x] = 0), поэтому проверяется и покрытие Δ, и ширина интервалов для V.
+    """
+    covered_delta, covered_b, ratio_a, ratio_b = [], [], [], []
+    for seed in range(40):
+        sim = OfferSimulator(seed=seed, client_effect=1.5)
+        clients = sim.sample_clients(600, visits=5)
+        a, b = sim.policy("epsilon_greedy", epsilon=0.3, seed=1), sim.policy("softmax", seed=2)
+        logs = sim.simulate(clients, a)
+        v_a, v_b = sim.true_value(logs, a), sim.true_value(logs, b)
+        kw = dict(action="offer", reward="accepted", propensity="propensity",
+                  features=["age", "income", "loyal", "risk", "region"])
+        clustered = ps.evaluate(logs, b, cluster="client_id", **kw)["accepted"]
+        naive = ps.evaluate(logs, b, **kw)["accepted"]
+        covered_delta.append(clustered.delta.low <= v_b - v_a <= clustered.delta.high)
+        covered_b.append(clustered.v_b.low <= v_b <= clustered.v_b.high)
+        width = lambda e: e.high - e.low  # noqa: E731
+        ratio_a.append(width(clustered.v_a) / width(naive.v_a))
+        ratio_b.append(width(clustered.v_b) / width(naive.v_b))
+    assert np.mean(covered_delta) >= 0.85
+    assert np.mean(covered_b) >= 0.85
+    assert np.mean(ratio_a) > 1.3 and np.mean(ratio_b) > 1.15
+
+
+def test_estimated_propensity_is_no_longer_catastrophic():
+    """Регрессия 0.2: оценённые пропенсити давали RMSE(DR) в сотни раз хуже логированных."""
+    err_logged, err_est = [], []
+    for seed in range(20):
+        sim = OfferSimulator(seed=seed)
+        clients = sim.sample_clients(3000)
+        a, b = sim.policy("epsilon_greedy", epsilon=0.2, seed=1), sim.policy("softmax", seed=2)
+        logs = sim.simulate(clients, a)
+        truth = sim.true_value(logs, b) - sim.true_value(logs, a)
+        kw = dict(action="offer", reward="accepted", inference="none",
+                  features=["age", "income", "loyal", "risk", "region"])
+        err_logged.append(ps.evaluate(logs, b, propensity="propensity", **kw)["accepted"].delta.value - truth)
+        err_est.append(ps.evaluate(logs, b, **kw)["accepted"].delta.value - truth)
+    rmse = lambda e: float(np.sqrt(np.mean(np.square(e))))  # noqa: E731
+    assert rmse(err_est) < 2.5 * rmse(err_logged) + 0.01
+
+
+def test_bootstrap_covers_with_estimated_propensity():
+    covered = []
+    for seed in range(12):
+        sim = OfferSimulator(seed=50 + seed)
+        clients = sim.sample_clients(1500)
+        a, b = sim.policy("softmax", temperature=0.5, seed=3), sim.policy("softmax", seed=4)
+        logs = sim.simulate(clients, a)
+        truth = sim.true_value(logs, b) - sim.true_value(logs, a)
+        m = ps.evaluate(logs, b, action="offer", reward="accepted", n_boot=60,
+                        features=["age", "income", "loyal", "risk", "region"])["accepted"]
+        covered.append(m.delta.low <= truth <= m.delta.high)
+    assert np.mean(covered) >= 0.75
+
+
+def test_checks_rarely_false_alarm_and_catch_wrong_propensities():
+    false_alarms, detected = 0, 0
+    for seed in range(30):
+        b = make_bandit(4000, seed=2000 + seed)
+        m = ps.evaluate(b.logs, b.policy_b, propensity="propensity", **KW)["reward"]
+        false_alarms += any(c.status == "fail" for c in m.checks if c.name == "propensity")
+    for seed in range(10):
+        b = make_bandit(8000, seed=3000 + seed)
+        distorted = b.logs["propensity"] ** 3
+        logs = b.logs.assign(propensity=distorted / distorted.max())
+        m = ps.evaluate(logs, b.policy_b, propensity="propensity", **KW)["reward"]
+        detected += any(c.status == "fail" for c in m.checks if c.name == "propensity")
+    assert false_alarms <= 2
+    assert detected >= 8
+
+
+def test_romano_wolf_controls_familywise_error():
+    """При верных нулевых гипотезах доля прогонов хотя бы с одним «значимо» ≤ alpha."""
+    rng = np.random.default_rng(0)
+    rejections = 0
+    n, j, sims = 400, 4, 300
+    cov = 0.6 * np.ones((j, j)) + 0.4 * np.eye(j)
+    for _ in range(sims):
+        psi = rng.multivariate_normal(np.zeros(j), cov, size=n)
+        s = analytic_summary(psi, np.arange(n), n, 0.05)
+        t = s["estimate"] / s["se"]
+        null = multiplier_tstats(s["sums"], s["se"], n, 1000, rng)
+        rejections += bool((romano_wolf(t, null) < 0.05).any())
+    assert rejections / sims <= 0.05 + 2 * np.sqrt(0.05 * 0.95 / sims)
