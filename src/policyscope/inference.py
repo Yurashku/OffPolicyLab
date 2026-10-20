@@ -220,6 +220,11 @@ def run_bootstrap(
 
         results = Parallel(n_jobs=n_jobs)(delayed(one)(c) for c in children)
     width = next((len(r) for r in results if r is not None), 0)
+    if width == 0:
+        raise ValueError(
+            "Ни одна bootstrap-реплика не посчиталась: данных слишком мало для переобучения "
+            "моделей на ресэмплах. Уменьшите n_folds или используйте inference='influence'."
+        )
     out = np.full((n_boot, width), np.nan)
     for i, r in enumerate(results):
         if r is not None:

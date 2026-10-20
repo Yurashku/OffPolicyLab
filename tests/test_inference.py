@@ -120,6 +120,14 @@ class TestBootstrap:
                             n_boot=40, seed=0, n_jobs=1)
         assert np.isnan(out).any() and np.isfinite(out).any()
 
+    def test_all_replicates_failing_is_an_error(self):
+        def broken(positions, seed):
+            raise ValueError("нет данных")
+
+        with pytest.raises(ValueError, match="Ни одна"):
+            run_bootstrap(broken, clusters=np.arange(10), n_clusters=10, clustered=False,
+                          n_boot=5, seed=0, n_jobs=1)
+
     def test_centered_p_value(self):
         samples = np.random.default_rng(1).normal(0.0, 1.0, size=(2000, 1))
         assert centered_pvalue(samples, np.array([0.0]))[0] == pytest.approx(1.0)
