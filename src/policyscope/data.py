@@ -16,7 +16,11 @@ class BanditSchema:
     reward_col: str = "accept"
     feature_cols: Optional[Sequence[str]] = None
     propensity_col: Optional[str] = None
-    cluster_col: Optional[str] = "user_id"
+    #: Единица кластеризации для инференса. По умолчанию ``None``: подставлять имя
+    #: колонки, которой может не быть, значит ломать минимальную схему. Если на одну
+    #: единицу приходится несколько строк, задайте её явно — иначе доверительный
+    #: интервал будет занижен.
+    cluster_col: Optional[str] = None
 
 
 @dataclass

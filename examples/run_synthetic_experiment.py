@@ -1,246 +1,123 @@
-"""
-Пример запуска синтетического эксперимента с off‑policy оценкой.
+"""Сквозной синтетический эксперимент: оценка политики B по логам политики A.
 
-Скрипт генерирует пользователей, симулирует логи политики A,
-расчитывает оффлайн‑оценки новой политики B (Replay, IPS, SNIPS, DM, DR)
-по метрикам «Отклик» и «CLTV», строит бутстрэп‑интервалы для DR и
-сравнивает с истинными ожиданиями (оракулом).
+Скрипт генерирует пользователей, симулирует логи политики A, оценивает политику B
+всеми доступными оценщиками и сравнивает результат с **аналитически известной**
+истиной. Это самый быстрый способ увидеть, как выглядит полный отчёт.
 
-Пример использования:
-
-```
-python examples/run_synthetic_experiment.py \
-  --n_users 50000 \
-  --seed 42 \
-  --policyA epsilon_greedy --epsilon 0.15 \
-  --policyB softmax --tau 0.7 \
-  --horizon 90 \
-  --weight_clip 20
-```
+Пример:
+    python examples/run_synthetic_experiment.py --n-users 20000 --seed 42
 """
 
 from __future__ import annotations
 
 import argparse
-import os
+import logging
+import sys
+from pathlib import Path
 
-from policyscope.synthetic import SynthConfig, SyntheticRecommenderEnv
+import pandas as pd
+
+import policyscope as ps
 from policyscope.policies import make_policy
-from policyscope.estimators import (
-    value_on_policy,
-    replay_value,
-    prepare_piB_taken,
-    ips_value,
-    snips_value,
-    dm_value,
-    dr_value,
-    train_mu_hat,
-    train_pi_hat,
-    pi_hat_predict,
-    take_action_probabilities,
-)
-from policyscope.evaluator import OPEEvaluator
-from policyscope.report import decision_summary, dump_json
+from policyscope.synthetic import SynthConfig, SyntheticRecommenderEnv
+
+FEATURES = ["loyal", "age", "risk", "income"]
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--n_users", type=int, default=50_000, help="Количество пользователей в синтетике")
-    parser.add_argument("--seed", type=int, default=42, help="Зерно генератора")
-    parser.add_argument("--horizon", type=int, default=90, help="Горизонт для CLTV")
-    parser.add_argument("--policyA", type=str, default="epsilon_greedy", choices=["greedy", "epsilon_greedy", "softmax"], help="Тип политики A")
-    parser.add_argument("--epsilon", type=float, default=0.15, help="Параметр ε для ε‑жадной политики A")
-    parser.add_argument("--tau", type=float, default=0.7, help="Температура softmax политики A")
-    parser.add_argument("--policyB", type=str, default="softmax", choices=["greedy", "epsilon_greedy", "softmax"], help="Тип политики B")
-    parser.add_argument("--weight_clip", type=float, default=20.0, help="Порог клиппинга весов для IPS/SNIPS/DR")
-    parser.add_argument("--business_threshold_accept", type=float, default=0.0, help="Бизнес‑порог для метрики отклика")
-    parser.add_argument("--business_threshold_cltv", type=float, default=1.0, help="Бизнес‑порог для метрики CLTV")
-    parser.add_argument("--oracle_users", type=int, default=200_000, help="Число пользователей для оракула")
-    parser.add_argument("--oracle_mc", type=int, default=1, help="Число MC‑прогонов для оракула")
-    parser.add_argument("--artifacts_dir", type=str, default="artifacts", help="Каталог для сохранения артефактов")
-    args = parser.parse_args()
-
-    os.makedirs(args.artifacts_dir, exist_ok=True)
-
-    # Создаём синтетическую среду
-    cfg = SynthConfig(n_users=args.n_users, horizon_days=args.horizon, seed=args.seed)
-    env = SyntheticRecommenderEnv(cfg)
-    X = env.sample_users(args.n_users)
-
-    # Создаём политики A и B
-    policyA = make_policy(args.policyA, seed=111, epsilon=args.epsilon, tau=args.tau)
-    policyB = make_policy(args.policyB, seed=222, epsilon=0.1, tau=0.7)
-
-    # Генерируем логи A
-    logsA = env.simulate_logs_A(policyA, X)
-    logsA["a_B"] = policyB.action_argmax(X)
-
-    # On‑policy значения для A
-    vA_accept = value_on_policy(logsA, target="accept")
-    vA_cltv = value_on_policy(logsA, target="cltv")
-
-    # Расчёт вероятностей выбора текущих действий под B
-    piB_taken = prepare_piB_taken(logsA, policyB)
-
-    # Обучаем модели исхода и пропенсити для DM/DR/IPS/SNIPS
-    mu_accept = train_mu_hat(logsA, target="accept")
-    mu_cltv = train_mu_hat(logsA, target="cltv")
-    pi_model = train_pi_hat(logsA)
-    pA_all = pi_hat_predict(pi_model, logsA)
-    pA_taken = take_action_probabilities(pA_all, logsA["a_A"].values, action_space=pi_model.classes_)
-
-    # Replay (на совпадающих действиях)
-    vB_replay_accept = replay_value(logsA, policyB.action_argmax(X), target="accept")
-    vB_replay_cltv = replay_value(logsA, policyB.action_argmax(X), target="cltv")
-
-    # IPS и SNIPS
-    vB_ips_accept, ess_ips_accept, clip_ips_accept = ips_value(logsA, piB_taken, pA_taken, target="accept", weight_clip=args.weight_clip)
-    vB_ips_cltv, ess_ips_cltv, clip_ips_cltv = ips_value(logsA, piB_taken, pA_taken, target="cltv", weight_clip=args.weight_clip)
-
-    vB_snips_accept, ess_snips_accept, clip_snips_accept = snips_value(logsA, piB_taken, pA_taken, target="accept", weight_clip=args.weight_clip)
-    vB_snips_cltv, ess_snips_cltv, clip_snips_cltv = snips_value(logsA, piB_taken, pA_taken, target="cltv", weight_clip=args.weight_clip)
-
-    # Direct Method
-    vB_dm_accept = dm_value(logsA, policyB, mu_accept, target="accept")
-    vB_dm_cltv = dm_value(logsA, policyB, mu_cltv, target="cltv")
-
-    # Doubly Robust
-    vB_dr_accept, ess_dr_accept, clip_dr_accept = dr_value(
-        logsA, policyB, mu_accept, pA_taken, target="accept", weight_clip=args.weight_clip
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--n-users", type=int, default=20_000)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--target", default="accept", choices=["accept", "cltv"])
+    parser.add_argument(
+        "--policy-a", default="epsilon_greedy",
+        choices=["greedy", "epsilon_greedy", "softmax"],
+        help="логирующая политика: для OPE ей нужен полный носитель",
     )
-    vB_dr_cltv, ess_dr_cltv, clip_dr_cltv = dr_value(
-        logsA, policyB, mu_cltv, pA_taken, target="cltv", weight_clip=args.weight_clip
-    )
+    parser.add_argument("--epsilon", type=float, default=0.2)
+    parser.add_argument("--policy-b", default="softmax",
+                        choices=["greedy", "epsilon_greedy", "softmax"])
+    parser.add_argument("--tau-b", type=float, default=0.8)
+    parser.add_argument("--n-boot", type=int, default=300)
+    parser.add_argument("--weight-clip", type=float, default=None)
+    parser.add_argument("--artifacts-dir", type=Path, default=None)
+    return parser.parse_args()
 
-    # Oracle (истинные ожидания)
-    X_oracle = env.sample_users(args.oracle_users)
-    vA_accept_true = env.oracle_value(
-        policyA, X_oracle, metric="accept", n_mc=args.oracle_mc
-    )
-    vB_accept_true = env.oracle_value(
-        policyB, X_oracle, metric="accept", n_mc=args.oracle_mc
-    )
-    vA_cltv_true = env.oracle_value(
-        policyA, X_oracle, metric="cltv", n_mc=args.oracle_mc
-    )
-    vB_cltv_true = env.oracle_value(
-        policyB, X_oracle, metric="cltv", n_mc=args.oracle_mc
-    )
 
-    dr_abs_error_accept = abs(vB_dr_accept - vB_accept_true)
-    dr_abs_error_cltv = abs(vB_dr_cltv - vB_cltv_true)
+def main() -> int:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    args = parse_args()
 
-    # Paired bootstrap CI для DR через единый high-level API
-    eval_accept = OPEEvaluator(
-        logsA,
-        policyB,
-        target="accept",
-        feature_cols=["loyal", "age", "risk", "income"],
+    env = SyntheticRecommenderEnv(
+        SynthConfig(n_users=args.n_users, seed=args.seed)
+    )
+    X = env.sample_users()
+    policy_a = make_policy(args.policy_a, seed=111, epsilon=args.epsilon)
+    policy_b = make_policy(args.policy_b, seed=222, tau=args.tau_b)
+
+    logs = env.simulate_logs_A(policy_a, X, propensity_col="propensity_A")
+
+    # Истина известна аналитически — на реальных данных её, разумеется, нет.
+    oracle_a = env.oracle_value(policy_a, X, metric=args.target)
+    oracle_b = env.oracle_value(policy_b, X, metric=args.target)
+
+    common = dict(
+        target=args.target,
         action_col="a_A",
-        cluster_col="user_id",
-        n_boot=300,
-        alpha=0.05,
+        action_space=list(env.ACTIONS),
+        feature_cols=FEATURES,
+        propensity_col="propensity_A",
+        propensity_source="logged",
+        cluster_col=None,
         weight_clip=args.weight_clip,
     )
-    res_accept = eval_accept.evaluate("dr")
 
-    eval_cltv = OPEEvaluator(
-        logsA,
-        policyB,
-        target="cltv",
-        feature_cols=["loyal", "age", "risk", "income"],
-        action_col="a_A",
-        cluster_col="user_id",
-        n_boot=300,
-        alpha=0.05,
-        weight_clip=args.weight_clip,
+    print(f"\n=== Истина (оракул), метрика «{args.target}» ===")
+    print(f"  V(A) = {oracle_a:.6f}")
+    print(f"  V(B) = {oracle_b:.6f}")
+    print(f"  Delta = {oracle_b - oracle_a:.6f}")
+
+    table = ps.compare_policies_multi_estimator(
+        logs, policy_b,
+        estimators=("ips", "snips", "dm", "dr", "sndr", "switch_dr"),
+        inference="influence", **common,
     )
-    res_cltv = eval_cltv.evaluate("dr")
+    table["oracle_Delta"] = oracle_b - oracle_a
+    table["delta_error"] = table["Delta"] - table["oracle_Delta"]
 
-    # Диагностика весов
-    diagnostics = {
-        "ips": {
-            "ess_accept": ess_ips_accept,
-            "clip_share_accept": clip_ips_accept,
-            "ess_cltv": ess_ips_cltv,
-            "clip_share_cltv": clip_ips_cltv,
-        },
-        "snips": {
-            "ess_accept": ess_snips_accept,
-            "clip_share_accept": clip_snips_accept,
-            "ess_cltv": ess_snips_cltv,
-            "clip_share_cltv": clip_snips_cltv,
-        },
-        "dr": {
-            "ess_accept": ess_dr_accept,
-            "clip_share_accept": clip_dr_accept,
-            "ess_cltv": ess_dr_cltv,
-            "clip_share_cltv": clip_dr_cltv,
-        },
-        "n_logs": int(len(logsA)),
-        "policyA": args.policyA,
-        "policyB": args.policyB,
-        "epsilon": args.epsilon,
-        "tau": args.tau,
-        "weight_clip": args.weight_clip,
-    }
+    pd.set_option("display.width", 200)
+    pd.set_option("display.max_columns", 30)
+    print("\n=== Оценщики против истины ===")
+    print(
+        table[
+            ["estimator", "V_B", "Delta", "oracle_Delta", "delta_error",
+             "ess_ratio", "weight_mean", "n_warnings"]
+        ].to_string(index=False)
+    )
+    print(
+        "\nСогласие оценщиков между собой — практичный признак доверия: "
+        f"разброс Delta = {table['Delta'].max() - table['Delta'].min():.6f}"
+    )
 
-    summary = {
-        "accept": {
-            "on_policy_A": vA_accept,
-            "replay_B": vB_replay_accept,
-            "ips_B": vB_ips_accept,
-            "snips_B": vB_snips_accept,
-            "dm_B": vB_dm_accept,
-            "dr_B": vB_dr_accept,
-            "oracle_A": vA_accept_true,
-            "oracle_B": vB_accept_true,
-            "dr_abs_error": dr_abs_error_accept,
-            "bootstrap_DR": res_accept,
-        },
-        "cltv": {
-            "on_policy_A": vA_cltv,
-            "replay_B": vB_replay_cltv,
-            "ips_B": vB_ips_cltv,
-            "snips_B": vB_snips_cltv,
-            "dm_B": vB_dm_cltv,
-            "dr_B": vB_dr_cltv,
-            "oracle_A": vA_cltv_true,
-            "oracle_B": vB_cltv_true,
-            "dr_abs_error": dr_abs_error_cltv,
-            "bootstrap_DR": res_cltv,
-        },
-    }
+    print("\n=== Полный отчёт (DR, bootstrap CI) ===")
+    result = ps.compare_policies(
+        logs, policy_b, estimator="dr",
+        inference="bootstrap", n_boot=args.n_boot, **common,
+    )
+    print(result.to_markdown(metric_name=args.target))
+    print(f"\nОшибка Delta относительно оракула: {result.delta - (oracle_b - oracle_a):+.6f}")
 
-    # Отчёт
-    report_accept = decision_summary(res_accept, "Отклик", business_threshold=args.business_threshold_accept)
-    report_cltv = decision_summary(res_cltv, "CLTV", business_threshold=args.business_threshold_cltv)
+    if args.artifacts_dir:
+        args.artifacts_dir.mkdir(parents=True, exist_ok=True)
+        table.to_csv(args.artifacts_dir / "estimators.csv", index=False)
+        ps.dump_json(str(args.artifacts_dir / "dr_result.json"), result)
+        (args.artifacts_dir / "report.md").write_text(
+            result.to_markdown(metric_name=args.target), encoding="utf-8"
+        )
+        print(f"\nАртефакты сохранены в {args.artifacts_dir}")
 
-    # Сохраняем артефакты
-    logs_path = os.path.join(args.artifacts_dir, "logs_A.csv")
-    logsA.to_csv(logs_path, index=False)
-    dump_json(os.path.join(args.artifacts_dir, "diagnostics.json"), diagnostics)
-    dump_json(os.path.join(args.artifacts_dir, "summary.json"), summary)
-    # записываем отчёт
-    with open(os.path.join(args.artifacts_dir, "report.txt"), "w", encoding="utf-8") as f:
-        f.write("# Итоговый отчёт (DR как основной оценщик)\n\n")
-        f.write("## Метрика: Отклик\n")
-        f.write(report_accept + "\n")
-        f.write(f"Абсолютная ошибка DR: {dr_abs_error_accept:.6f}\n\n")
-        f.write("## Метрика: CLTV\n")
-        f.write(report_cltv + "\n")
-        f.write(f"Абсолютная ошибка DR: {dr_abs_error_cltv:.6f}\n")
-
-    # Выводим кратко в консоль
-    print("==== DR (Отклик) ====")
-    print(report_accept)
-    print("\n==== DR (CLTV) ====")
-    print(report_cltv)
-    print("\n==== Оракул ====")
-    print(f"Accept: V_A_true={vA_accept_true:.6f}, V_B_true={vB_accept_true:.6f}, Delta_true={vB_accept_true - vA_accept_true:.6f}")
-    print(f"CLTV  : V_A_true={vA_cltv_true:.6f}, V_B_true={vB_cltv_true:.6f}, Delta_true={vB_cltv_true - vA_cltv_true:.6f}")
-    print(f"\nАртефакты сохранены в: {args.artifacts_dir}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -1,306 +1,253 @@
-# Policyscope: офлайн‑оценка политик рекомендаций (переиспользуемый пайплайн)
+# Policyscope — офлайн-оценка политик рекомендаций
 
-`Policyscope` помогает оценивать новую политику **B** по логам текущей политики **A** без онлайн A/B‑теста.
+`Policyscope` отвечает на вопрос: **«что будет, если заменить текущую политику A на кандидата B?»** —
+по логам одной только политики A, без онлайн A/B-теста.
 
-Главное в текущей версии:
-- API стал **универсальным**: названия колонок (`a_A`, `a_B`, целевая метрика, `user_id`) и список признаков задаются аргументами.
-- Туториал стал короче и практичнее: есть компактный сценарий «взял свой DataFrame → получил все OPE‑оценки».
-- Bootstrap-инференс считается через единый API: `OPEEvaluator(...).evaluate(method)` или `estimate_value_with_ci(..., method=...)`.
-- Для сравнения A vs B в `OPEEvaluator` доступны `Delta_CI` и честная significance metadata:
-  - `p_value` (двусторонний centered paired bootstrap test для `H0: delta = 0`),
-  - `is_significant` + `significance_rule="centered_paired_bootstrap_p_value_lt_alpha"`.
-- В comparison output также включены trust/stability diagnostics (`ESS`, `ESS/N`, replay overlap, weight tails, clip/switch share, warning flags).
-- Все основные OPE‑оценщики снабжены подробными docstring на русском (аргументы, возвращаемые значения, интерпретация).
-
-## Установка
+Это задача off-policy evaluation (OPE) для contextual bandit. Библиотека даёт
+точечную оценку, доверительный интервал, значимость и, что не менее важно,
+**честный вердикт о том, можно ли этой оценке верить на ваших данных**.
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-# или
-pip install -e .
+pip install -e ".[dev]"
 ```
+
+## Быстрый старт
+
+Нужны логи: контекст (признаки), выбранное действие, полученная награда. Крайне
+желательно — `propensity`, вероятность, с которой политика A выбрала это действие.
+
+```python
+import policyscope as ps
+
+# Политика-кандидат: обычно это выход вашей модели.
+policy_b = ps.TabularPolicy(
+    model.predict_proba(X),        # матрица (n, k)
+    action_space=[0, 1, 2],
+    index=df.index,                # чтобы политика пережила ресэмплинг
+)
+
+result = ps.compare_policies(
+    df, policy_b,
+    estimator="dr",                # doubly robust — разумный выбор по умолчанию
+    target="reward",
+    action_col="action",
+    propensity_col="propensity",
+    cluster_col="user_id",
+)
+
+print(result.to_markdown())
+```
+
+Вывод — готовый отчёт: `V(A)`, `V(B)`, `Delta` с интервалами, p-value, решение
+и **вердикт доверия** с расшифровкой сработавших предупреждений.
+
+## Как получить политику B
+
+Самый частый затык — превратить свою модель в объект политики. Для этого есть
+готовые адаптеры, свой класс писать не нужно:
+
+| Что у вас есть | Адаптер |
+|---|---|
+| Матрица вероятностей `(n, k)` | `ps.TabularPolicy(probs, index=df.index)` |
+| Скоры модели | `ps.SoftmaxPolicy(["score_0", "score_1"], temperature=1.0)` |
+| Скоры + доля исследования | `ps.EpsilonGreedyPolicy(["score_0", "score_1"], epsilon=0.1)` |
+| Только выбранное действие | `ps.DeterministicPolicy("recommended_action", action_space=[0, 1, 2])` |
+
+Если передать **имена колонок** (а не массивы), политика автоматически переживает
+cross-fitting и bootstrap. Для массивов передавайте `index=df.index`.
+
+> **Про детерминированные политики.** Если B всегда выбирает одно действие, вес
+> важности зануляется везде, где её выбор не совпал с логированным. При слабом
+> перекрытии взвешенные оценки становятся очень шумными — смотрите на `ESS/N`
+> и `replay_overlap` в диагностике. Часто честнее оценивать ε-greedy-вариант B.
+
+## Как читать результат
+
+```python
+result.to_dict()      # плоский словарь со стабильной схемой, сериализуем в JSON
+result.to_frame()     # однострочный DataFrame
+result.to_markdown()  # человекочитаемый отчёт с вердиктом доверия
+```
+
+- `V_A` — значение текущей политики: средняя наблюдённая награда.
+- `V_B` — оценка значения кандидата.
+- `Delta = V_B − V_A` — то, ради чего всё затевалось. Инференс строится именно
+  по delta, парно: `V_A` и `V_B` считаются на одной и той же ресэмплированной
+  выборке, поэтому их корреляция учтена.
+- `p_value` и `ci_excludes_zero` — **два разных правила** значимости. Обычно они
+  согласованы; расхождение означает пограничный случай, и отчёт об этом скажет.
+
+## Когда результату нельзя верить
+
+Узкий доверительный интервал не спасает, если данные не поддерживают оценку.
+Библиотека проверяет это явно и выдаёт вердикт `надёжно` / `с осторожностью` /
+`ненадёжно`. Главные красные флаги:
+
+- **`policy_b_recommends_unsupported_actions`** — B рекомендует то, чего A почти
+  никогда не делала. Данных об этих действиях просто нет; оценка экстраполирует.
+- **`critically_low_ess`** — эффективный размер выборки критически мал: оценка
+  опирается на считанные наблюдения. Родственный `low_ess_ratio` предупреждает
+  о малой *доле* эффективной выборки — при большом `n` это часто приемлемо,
+  поэтому блокирующим считается именно абсолютный ESS.
+- **`mean_weight_far_from_one`** — при корректных пропенсити `E[w] = 1` по
+  построению. Заметное отклонение выдаёт неверную модель пропенсити.
+
+### Главная ловушка: оценённые пропенсити
+
+Если `propensity` не сохранён в логах, библиотека оценит его моделью. Это работает,
+только когда логирующая политика действительно стохастична **и** её вероятности
+воспроизводимы моделью. Если политика A почти детерминирована (например, ε-greedy
+с малым ε), логистическая регрессия не воспроизведёт ступенчатые вероятности,
+часть оценок уйдёт к нулю, и веса важности достигнут тысяч.
+
+Насколько это серьёзно, видно на собственной синтетике библиотеки (30 повторений,
+ε-greedy логирование, ε = 0.2):
+
+| Источник пропенсити | RMSE для `Delta` (IPS) | Покрытие CI | Вердикт |
+|---|---|---|---|
+| `logged` | 0.050 | 0.97 | надёжно |
+| `estimated` | 141 | 0.63 | ненадёжно |
+
+Оценка расходится на три порядка. Библиотека это ловит — прогон помечается
+`ненадёжно` с предупреждениями про вырожденные веса (`critically_low_ess`,
+`extreme_max_weight`, `mean_weight_far_from_one`) — но починить за вас не может.
+
+**Практический вывод: сохраняйте `propensity` при логировании.** Это самое дешёвое
+и самое действенное вложение в возможность оценивать политики офлайн.
+
+Самая практичная проверка — согласие оценщиков между собой:
+
+```python
+table = ps.compare_policies_multi_estimator(
+    df, policy_b,
+    estimators=("ips", "dm", "dr", "sndr"),
+    target="reward", action_col="action", propensity_col="propensity",
+)
+```
+
+Если IPS, DM и DR дают близкие числа — оценка устойчива к выбору метода. Если
+расходятся — верить нельзя ни одному, каким бы узким ни был его интервал.
 
 ## Что реализовано
 
-- Replay
-- IPS / SNIPS
-- DM (Direct Method)
-- DR / SNDR / Switch-DR
-- Кластерный и обычный бутстрэп (если `cluster_col=None`)
-- Data contract слой для логов contextual bandit (`BanditSchema`, `LoggedBanditDataset`)
+| Оценщик | Когда уместен |
+|---|---|
+| `ips` | Точные пропенсити, хорошее перекрытие |
+| `snips` | То же, но веса тяжёлые — самонормировка снижает дисперсию |
+| `dm` | Пропенсити неизвестны; полностью зависит от модели исхода |
+| `dr` | **По умолчанию.** Состоятелен, если верна хотя бы одна из двух моделей |
+| `sndr` | DR с самонормированной поправкой |
+| `switch_dr` | DR с отключением поправки на тяжёлых весах (`tau`) |
+| `on_policy` | Опорное значение самой политики A |
+| `replay` | Только как грубый ориентир перекрытия — см. предупреждение ниже |
 
-## Архитектура
+`replay` несмещён **лишь при равномерной логирующей политике**. На ε-greedy или
+softmax логах он оценивает другую величину и не сопоставим с остальными, поэтому
+не входит в набор по умолчанию.
 
-- Краткое описание архитектурных границ и доменной модели: `docs/architecture.md`.
-- Библиотека разделяет слои: `data contract -> point estimators -> inference -> diagnostics/reporting`.
+## Инференс
 
-## Experimental: cross-fitting-ready nuisance layer
-
-Добавлена инкрементальная поддержка внешних nuisance-предсказаний (без ломки текущего workflow):
-- структуры `BehaviorPredictions`, `OutcomePredictions`, `CrossFitNuisanceBundle`;
-- fold utilities: `make_kfold_indices`, `generate_oof_behavior_predictions`, `generate_oof_outcome_predictions`;
-- `compare_policies(..., nuisance_bundle=...)` может принять заранее посчитанные nuisance-предсказания (опционально);
-- `compare_policies(..., use_crossfit=True)` строит OOF nuisance автоматически через внутренний helper;
-- покрываемые методы в cross-fitting mode: `ips/snips` (behavior nuisance), `dm/dr/sndr/switch_dr` (behavior + outcome nuisance).
-- migration note (bootstrap safety): при `with_ci=True` внешние nuisance-предсказания используются только для исходного point-estimate на оригинальных строках; в bootstrap-ресемплах они **не переиспользуются** (fallback к внутреннему fit), а факт fallback отражается в `inference_warnings` и `notes`.
-
-По умолчанию ничего менять не нужно: внутренний fit nuisance остаётся стандартным поведением.
-Важно: это практичный approximation-слой для снижения bias риска, а не гарантия «идеального» инференса.
-
-### Propensity source modes (official path)
-
-Для взвешенных OPE-методов (`ips`, `snips`, `dr`, `sndr`, `switch_dr`) доступен явный режим источника propensity:
-- `propensity_source="auto"` (по умолчанию): использовать logged propensity column, если валидная колонка доступна; иначе fallback на оценку `pi_hat`;
-- `propensity_source="logged"`: использовать только logged propensity column (если колонка отсутствует/невалидна — ошибка);
-- `propensity_source="estimated"`: всегда оценивать propensity через behavior model.
-
-В `compare_policies(...).to_dict()` и `diagnostics` возвращаются `propensity_source` и `propensity_column` (если применимо).
-
-### Nuisance model diagnostics
-
-В high-level summary добавлен блок `nuisance_diagnostics`:
-- behavior-side quality для estimated propensity path (например multiclass log-loss, top-1 agreement);
-- outcome-side quality (`accept`: log-loss/Brier/AUC, `cltv`: RMSE/MAE/R²);
-- маркеры `applicable` и `is_out_of_fold`, чтобы явно различать logged path и cross-fit OOF path.
-
-Важно: diagnostics по весам/overlap и diagnostics качества nuisance дополняют друг друга; ни один из блоков сам по себе не гарантирует корректность оценки на реальных данных.
-
-
-## Simulation validation harness (synthetic oracle checks)
-
-Для систематической валидации поведения estimators добавлен `policyscope.validation.run_simulation_validation(...)`.
-
-Он запускает повторяемые synthetic-эксперименты и возвращает:
-- run-level таблицу с oracle vs estimate (`V_B`, `delta`), bias/error, coverage/significance, diagnostics;
-- aggregate таблицу по `mode x estimator` (mean bias, std, RMSE, coverage, significance rate).
-
-Документация: `docs/validation_harness.md`.
-
-## Минимальный формат данных
-
-Нужны:
-- колонка действия, зафиксированного в логах A (по умолчанию `a_A`),
-- целевая метрика (например, `accept`, `cltv` или ваша `reward`),
-- признаки (`feature_cols`),
-- опционально `user_id` для кластерного бутстрэпа.
-
-Дополнительно можно хранить `a_B` (действие рекомендованное B) для диагностики и таблиц в туториале.
-
-## Универсальный пример на своих данных
+Два метода, оба с поддержкой кластеризации (например, по `user_id`):
 
 ```python
-import numpy as np
-import pandas as pd
-from policyscope.data import BanditSchema, LoggedBanditDataset
-from policyscope.estimators import (
-    train_pi_hat,
-    pi_hat_predict,
-    train_mu_hat,
-    prepare_piB_taken,
-    take_action_probabilities,
-    ips_value,
-    snips_value,
-    dm_value,
-    dr_value,
-)
-from policyscope.ci import estimate_value_with_ci
-from policyscope.evaluator import OPEEvaluator
-from policyscope.comparison import compare_policies, compare_policies_multi_target
-
-# ваш датасет
-# df columns example:
-# user_col, logged_action, candidate_action, reward, f1, f2, f3
-
-df = pd.read_csv("my_logs.csv")
-
-# (Опционально, но рекомендуется) валидируем контракт логов до OPE
-schema = BanditSchema(
-    action_col="logged_action",
-    reward_col="reward",
-    feature_cols=["f1", "f2", "f3"],
-    cluster_col="user_col",
-)
-logged = LoggedBanditDataset(df=df, schema=schema)
-df = logged.df
-
-feature_cols = ["f1", "f2", "f3"]
-action_col = "logged_action"
-target_col = "reward"
-
-policyB = ...  # объект с методом action_probs(df) -> (n, k)
-
-# 1) Вероятность того, что B выбрала бы логированное действие
-piB_taken = prepare_piB_taken(df, policyB, action_col=action_col)
-
-# 2) Оценка модели поведения A: pA(a|x)
-pi_model = train_pi_hat(df, feature_cols=feature_cols, action_col=action_col)
-pA_all = pi_hat_predict(pi_model, df)
-pA_taken = take_action_probabilities(
-    pA_all,
-    df[action_col].values,
-    action_space=pi_model.classes_,
-)
-
-# 3) Модель исхода mu(x, a)
-mu = train_mu_hat(df, target=target_col, feature_cols=feature_cols, action_col=action_col)
-
-# 4) OPE-оценки
-v_ips, ess_ips, clip_ips = ips_value(df, piB_taken, pA_taken, target=target_col, action_col=action_col)
-v_snips, ess_snips, clip_snips = snips_value(df, piB_taken, pA_taken, target=target_col, action_col=action_col)
-v_dm = dm_value(df, policyB, mu, target=target_col)
-v_dr, ess_dr, clip_dr = dr_value(df, policyB, mu, pA_taken, target=target_col, action_col=action_col)
-
-# 5) Единый слой CI для любого встроенного OPE-эстиматора
-ips_ci = estimate_value_with_ci(
-    df,
-    policyB,
-    method="ips",          # "snips", "dm", "dr", "sndr", "switch_dr", ...
-    target=target_col,
-    action_col=action_col,
-    feature_cols=feature_cols,
-    cluster_col="user_col",
-    n_boot=300,
-)
-print(ips_ci)
-
-# 6) Единый абстрактный объект (CI включён по умолчанию)
-evaluator = OPEEvaluator(
-    df,
-    policyB,
-    target=target_col,
-    feature_cols=feature_cols,
-    action_col=action_col,
-    cluster_col="user_col",
-    n_boot=300,
-    alpha=0.05,
-    weight_clip=20.0,
-)
-dr_report = evaluator.evaluate("dr")  # также: "ips", "snips", "dm", "sndr", "switch_dr", ...
-print(dr_report)  # V_A, V_B, Delta + CI + significance metadata
-
-# 7) Официальный orchestration entrypoint (структурированный результат)
-summary = compare_policies(
-    df,
-    policyB,
-    estimator="dr",
-    target=target_col,
-    feature_cols=feature_cols,
-    action_col=action_col,
-    cluster_col="user_col",
-    n_boot=300,
-    alpha=0.05,
-)
-print(summary.to_dict())
-
-# 8) Multi-target режим: повторная scalar-оценка для каждого target
-multi = compare_policies_multi_target(
-    df,
-    policyB,
-    estimator="dr",
-    targets=["reward", "reward_2"],
-    feature_cols=feature_cols,
-    action_col=action_col,
-    cluster_col="user_col",
-    n_boot=300,
-    alpha=0.05,
-)
-print(multi.to_dict())
+ps.compare_policies(..., inference="bootstrap")   # по умолчанию
+ps.compare_policies(..., inference="influence")   # быстрый аналитический CI
 ```
 
-## Теория и ссылки на статьи (RU)
+- **`bootstrap`** — парный кластерный percentile bootstrap. Nuisance-модели
+  переобучаются внутри каждой реплики, поэтому интервал учитывает и их
+  неопределённость. Работает для любого оценщика.
+- **`influence`** — аналитический интервал по построчным вкладам с кластерно
+  робастной дисперсией. Один проход вместо сотен переобучений.
+  Не учитывает неопределённость nuisance: асимптотически корректен для DR при
+  `use_crossfit=True`, но **антиконсервативен для DM**.
 
-### Нотация в формулах
+### Что это стоит по времени
 
-Используем единый набор обозначений: `π_A`, `π_B`, `μ̂`, `V̂`, `Δ`, `τ`, `w̄`.
+Замеры на 50 000 строк / 10 000 кластеров (обычный ноутбук):
 
-Добавлен отдельный подробный гайд по математической интуиции и строгим источникам для всех реализованных OPE-методов:
+| Конфигурация | Время |
+|---|---|
+| `ips`, `influence` | 0.3 с |
+| `dr`, `influence` | 4.5 с |
+| `ips`, `bootstrap`, `n_boot=500` | 39 с |
+| `dr`, `bootstrap`, `n_boot=500` | ~18 мин |
 
-- `docs/ope_methods_math_guide_ru.md`
+Разница в том, что bootstrap переобучает nuisance-модели внутри каждой реплики —
+статистически правильно, но дорого. На тех же данных интервалы двух методов
+практически совпадают, поэтому на больших выборках берите `influence`.
+Библиотека предупредит, если запрошенная конфигурация окажется заведомо долгой.
 
-В гайде разобраны: On-policy baseline, Replay, IPS, SNIPS, DM, DR, SNDR, Switch-DR и методы построения доверительных интервалов (CI).
-Формулы в гайде приведены в plain-text формате (без обязательной LaTeX-разметки), чтобы корректно читаться и на GitHub, и в локальных Markdown-просмотрщиках.
-Отдельно поясняется важный момент: bootstrap CI — это не отдельный OPE-эстиматор, а inference-обёртка поверх выбранного оценщика.
-Гайд также содержит отдельное сравнение: какие CI-подходы используются в OPE-литературе/практике и что именно реализовано в текущем репозитории.
-В API есть единый CI-слой `estimate_value_with_ci` для встроенных OPE-эстиматоров и совместимая низкоуровневая обёртка `estimator_with_bootstrap_ci` для произвольных `estimator_fn`.
-Нотация в формулах гайда унифицирована: `π_A`, `π_B`, `μ̂`, `V̂`, `Δ`, `τ`, `w̄` — для более читаемого и однозначного математического стиля.
-Также добавлен `OPEEvaluator` — единый абстрактный объект, который унифицированно вызывает эстиматоры по имени и возвращает CI по умолчанию.
+## Продвинутое
 
-## Постоянные инструкции для AI-агентов
-
-В репозиторий добавлены постоянные инструкции для агентных инструментов (в т.ч. Codex):
-
-- `AGENTS.md` — каноничный набор постоянных правил и workflow для Codex/агентов.
-
-
-## Быстрый синтетический запуск
-
-```bash
-python examples/run_synthetic_experiment.py --n_users 50000 --seed 42 --policyA epsilon_greedy --policyB softmax
-```
-
-Скрипт сохраняет артефакты в `artifacts/`.
-
-## Туториал
-
-- Основной notebook: `examples/tutorial.ipynb`
-- В нём показано:
-  1. генерация синтетики,
-  2. валидация data contract через `BanditSchema` / `LoggedBanditDataset`,
-  3. вывод oracle ground-truth (`V_A`, `V_B`, `Delta`) сразу после генерации,
-  4. явная остановка использования синтезатора после шага ground-truth (anti data-leakage),
-  5. проверка логов и таблица фич + `a_A` + `a_B`,
-  6. компактный расчёт всех метрик,
-  7. унифицированный вызов через `OPEEvaluator` (переключается только имя эстиматора),
-  8. bootstrap CI и significance metadata для **всех** методов через `OPEEvaluator`,
-  9. итоговая таблица сравнения методов с колонками CI (`V_B_CI`, `Delta_CI`) для каждого метода.
-
-Для переноса на реальный кейс в туториале отдельно показано, какие 3-4 строки обычно нужно заменить (`df/logs`, `feature_cols`, `action_col`, `target_col`).
-
-После `OPEEvaluator(...).evaluate("dr")` вы получите словарь:
+**Свои модели nuisance.** По умолчанию — логистическая/линейная регрессия
+с взаимодействиями `x*a`. Подставить своё:
 
 ```python
-{
-  'V_A': ...,
-  'V_A_CI': (..., ...),
-  'V_B': ...,
-  'V_B_CI': (..., ...),
-  'Delta': ...,
-  'Delta_CI': (..., ...),
-  'p_value': ...,
-  'is_significant': ...,
-  'significance_rule': 'centered_paired_bootstrap_p_value_lt_alpha',
-  'n_boot': ...,
-  'inference_method': ...,
-  'diagnostics': {
-    'weight_ess': ...,
-    'weight_ess_ratio': ...,
-    'replay_overlap': ...,
-    'weight_max': ...,
-    'weight_p95': ...,
-    'weight_p99': ...,
-    'clip_share': ...,
-    'switch_share': ...,
-    'warnings': [...],
-  }
-}
+from sklearn.ensemble import GradientBoostingRegressor
+
+ps.compare_policies(..., nuisance_spec=ps.NuisanceSpec(
+    outcome_model=GradientBoostingRegressor(),
+))
 ```
 
-Интерпретация: статистическая значимость (`p_value`, `is_significant`) **не достаточна сама по себе** — проверяйте diagnostics на поддержку/стабильность весов.
+**Cross-fitting** (`use_crossfit=True`) считает nuisance out-of-fold, снижая
+смещение от переобучения. Фолды формируются по `cluster_col`, а при
+`inference="bootstrap"` cross-fitting выполняется внутри каждой реплики — так
+точечная оценка и интервал описывают один и тот же оценщик.
 
-## Проверки перед коммитом
+**Диагностика качества nuisance** считается out-of-fold, потому что in-sample
+метрики оптимистичны и не обнаружили бы слабую модель. Это стоит одного
+дополнительного k-fold фита на вызов (примерно ×5 к времени точечной оценки);
+на больших данных отключается через `honest_outcome_metrics=False`.
+
+**Источник пропенсити** — `propensity_source`: `logged` (из логов, точные),
+`estimated` (модель) или `auto`. Логированные пропенсити всегда предпочтительнее.
+
+**Контракт данных** — валидация логов до оценки:
+
+```python
+schema = ps.BanditSchema(
+    action_col="action", reward_col="reward",
+    feature_cols=["f1", "f2"], propensity_col="propensity", cluster_col="user_id",
+)
+dataset = ps.LoggedBanditDataset(df=df, schema=schema)
+result = ps.compare_policies(dataset, policy_b)
+```
+
+## Проверка работоспособности
+
+Корректность не декларируется, а проверяется:
 
 ```bash
-python -m flake8 src tests
-pytest
-jupyter nbconvert --to notebook --execute examples/tutorial.ipynb --inplace
+pytest -m "not slow"   # формулы, тождества, валидация входов
+pytest -m slow         # несмещённость, состоятельность, покрытие CI
 ```
 
-## Migration note (inference)
+Медленный набор проверяет на синтетике с **аналитически известной истиной**, что
+смещение DR/IPS статистически неотличимо от нуля, ошибка убывает с ростом `n`,
+DR сохраняет несмещённость при одной неверной из двух моделей, а фактическое
+покрытие 95% интервала близко к номинальному.
 
-- Публичные имена функций не менялись.
-- В выходах сравнения политик (`paired_bootstrap_ci`, `OPEEvaluator.evaluate`) добавлены поля:
-  - `is_significant` и `significance_rule`,
-  - `p_value` (centered paired bootstrap approximation для `H0: delta = 0`),
-  - `inference_method`,
-  - `alpha`.
+Систематический прогон по режимам и оценщикам:
+
+```bash
+python examples/run_validation_experiment.py
+```
+
+## Документация
+
+- [`docs/architecture.md`](docs/architecture.md) — слои и границы ответственности
+- [`docs/ope_methods_math_guide_ru.md`](docs/ope_methods_math_guide_ru.md) — формулы и источники
+- [`docs/validation_harness.md`](docs/validation_harness.md) — обвязка валидации
+- [`examples/tutorial.ipynb`](examples/tutorial.ipynb) — сквозной пример
+- [`CHANGELOG.md`](CHANGELOG.md) — история изменений
+
+## Логирование
+
+Библиотека не настраивает root logger. Чтобы видеть предупреждения:
+
+```python
+import logging
+logging.basicConfig(level=logging.INFO)
+```
