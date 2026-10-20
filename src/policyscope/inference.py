@@ -17,7 +17,7 @@ percentile, p-value — центрированный (доля реплик с `
 максимума |t|-статистик (Romano, Wolf, 2005, 2016). Контролирует вероятность хотя бы
 одного ложного открытия (FWER) и, в отличие от Holm/Bonferroni, учитывает зависимость
 гипотез: метрики и кандидаты оцениваются на одних и тех же логах. Нулевое
-распределение берётся из multiplier bootstrap по кластерным суммам вкладов (для
+распределение берётся из gaussian multiplier bootstrap по кластерным суммам вкладов (для
 аналитического метода — без переобучения) или из тех же bootstrap-реплик.
 """
 
@@ -114,20 +114,20 @@ def analytic_summary(
 def multiplier_tstats(
     sums: np.ndarray, se: np.ndarray, n: int, n_draws: int, rng: np.random.Generator
 ) -> np.ndarray:
-    """Нулевое распределение t-статистик через multiplier bootstrap: ``(n_draws, J)``.
+    """Нулевое распределение t-статистик (gaussian multiplier bootstrap): ``(n_draws, J)``.
 
-    ``t*_j = sum_g xi_g S_gj / (n se_j)``, ``xi ~ N(0, 1)``. Совместное распределение
-    сохраняет корреляцию между гипотезами — ровно то, что нужно Romano–Wolf.
+    Multiplier bootstrap ``t*_j = sum_g xi_g S_gj / (n se_j)`` с ``xi ~ N(0, 1)`` при
+    фиксированных кластерных суммах ``S`` распределён ровно как ``N(0, R)``, где
+    ``R = S'S · G/(G-1) / (n^2 se se')``. Поэтому сэмплируется сразу ``J``-мерное
+    нормальное — без ``n_draws × G`` случайных множителей. Корреляция между гипотезами
+    сохраняется — ровно то, что нужно Romano–Wolf.
     """
     g = sums.shape[0]
-    scale = np.sqrt(g / max(g - 1, 1)) / (n * se)
-    out = np.empty((n_draws, sums.shape[1]))
-    batch = max(1, min(n_draws, 20_000_000 // max(g, 1)))
-    for start in range(0, n_draws, batch):
-        stop = min(start + batch, n_draws)
-        xi = rng.standard_normal((stop - start, g))
-        out[start:stop] = (xi @ sums) * scale
-    return out
+    scale = np.sqrt(g / max(g - 1, 1)) / (n * np.asarray(se, dtype=float))
+    cov = (sums.T @ sums) * np.outer(scale, scale)
+    values, vectors = np.linalg.eigh((cov + cov.T) / 2)
+    root = vectors * np.sqrt(np.clip(values, 0.0, None))
+    return rng.standard_normal((n_draws, len(se))) @ root.T
 
 
 def romano_wolf(t_obs: np.ndarray, t_null: np.ndarray) -> np.ndarray:
