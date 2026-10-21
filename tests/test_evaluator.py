@@ -120,9 +120,17 @@ class TestCompare:
 
 
 class TestValidation:
-    def test_dm_cannot_be_primary(self, bandit, evaluator):
-        with pytest.raises(ValueError, match="DM"):
-            evaluator.evaluate(bandit.policy_b, estimator="dm")
+    def test_dm_with_custom_outcome_model_is_refused(self, bandit):
+        from sklearn.ensemble import HistGradientBoostingClassifier
+
+        ev = ps.Evaluator(bandit.logs, propensity="propensity", action="action", reward="reward",
+                          features=["x1", "x2"], outcome_model=HistGradientBoostingClassifier())
+        with pytest.raises(ValueError, match="встроенной моделью"):
+            ev.evaluate(bandit.policy_b, estimator="dm")
+
+    def test_dm_has_no_analytic_interval(self, bandit, evaluator):
+        with pytest.raises(ValueError, match="bootstrap"):
+            evaluator.evaluate(bandit.policy_b, estimator="dm", inference="influence")
 
     def test_ips_needs_logged_propensity(self, bandit):
         ev = ps.Evaluator(bandit.logs, action="action", reward="reward", features=["x1", "x2"])
@@ -133,9 +141,48 @@ class TestValidation:
         with pytest.raises(ValueError):
             evaluator.evaluate(bandit.policy_b, inference="jackknife")
 
+    def test_outcome_model_for_unknown_metric(self, bandit):
+        from sklearn.dummy import DummyRegressor
+
+        with pytest.raises(ValueError, match="outcome_model"):
+            ps.Evaluator(bandit.logs, action="action", reward="reward",
+                         outcome_model={"rewrd": DummyRegressor()})
+
     def test_unknown_lower_is_better_metric(self, bandit):
         with pytest.raises(ValueError, match="lower_is_better"):
             ps.Evaluator(bandit.logs, action="action", reward="reward", lower_is_better=["cost"])
+
+
+class TestDirectMethod:
+    """DM — явный выбор: точнее DR при верной модели исхода, но смещение не проверяется."""
+
+    def test_opt_in_uses_bootstrap_and_reports_interval(self):
+        b = make_bandit(800, seed=12)
+        ev = ps.Evaluator(b.logs, action="action", reward="reward", propensity="propensity",
+                          features=["x1", "x2"], n_jobs=1)
+        rep = ev.evaluate(b.policy_b, estimator="dm", n_boot=60)
+        m = rep["reward"]
+        assert rep.settings["inference"] == "bootstrap" and m.estimator == "dm"
+        assert m.delta.low < m.delta.value < m.delta.high
+        assert m.trust != "reliable"
+        assert "model_based_estimate" in {f.code for f in m.findings}
+        dm_row = m.estimators.set_index("estimator").loc["dm"]
+        assert np.isfinite(dm_row["delta_low"])
+
+    def test_dm_delta_is_a_contrast_of_model_predictions(self, bandit, evaluator):
+        """Для DM база — прогноз той же модели на залогированных действиях, а не mean(r)."""
+        rep = evaluator.evaluate(bandit.policy_b, inference="none")
+        nuis = evaluator.nuisance
+        data = evaluator.data
+        pi = ps.policy.policy_matrix(bandit.policy_b, data, evaluator._frame)
+        mu = nuis.mu["reward"]
+        expected = np.mean(np.sum(pi * mu, axis=1)) - np.mean(mu[np.arange(data.n), data.a])
+        dm = rep["reward"].estimators.set_index("estimator").loc["dm", "delta"]
+        assert dm == pytest.approx(expected)
+
+    def test_dm_row_without_interval_when_not_primary(self, bandit, evaluator):
+        row = evaluator.evaluate(bandit.policy_b)["reward"].estimators.set_index("estimator").loc["dm"]
+        assert pd.isna(row["delta_low"])
 
 
 class TestInferenceModes:

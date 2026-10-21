@@ -43,7 +43,13 @@ from policyscope.inference import (
     run_bootstrap,
     t_critical,
 )
-from policyscope.nuisance import Nuisance, NuisanceConfig, fit_nuisance
+from policyscope.nuisance import (
+    OUTCOME_KIND_LABELS,
+    Nuisance,
+    NuisanceConfig,
+    fit_nuisance,
+    outcome_kind,
+)
 from policyscope.policy import policy_matrix
 from policyscope.report import Estimate, EstimatorRow, Leaderboard, MetricReport, Report
 
@@ -51,9 +57,13 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["Evaluator", "evaluate", "PRIMARY_ESTIMATORS"]
 
-#: Оценщики, которые могут быть основными. DM — только для сверки: его интервал
-#: не учитывает смещение модели исхода и потому систематически недопокрывает.
-PRIMARY_ESTIMATORS = ("dr", "sndr", "ips", "snips")
+#: Оценщики, которые могут быть основными. ``dm`` — только явным выбором: он точнее DR,
+#: если модель исхода верна, но его смещение целиком определяется этой моделью и по
+#: логам не проверяется (см. docs/estimators.md).
+PRIMARY_ESTIMATORS = ("dr", "sndr", "ips", "snips", "dm")
+#: Объём, начиная с которого даже небольшая ошибка спецификации модели исхода сравнима
+#: с интервалом DM (симуляции: покрытие падает до ~0.8 к 3·10⁴ строк).
+DM_LARGE_N = 10_000
 _Z_POWER_80 = 0.8416
 _RW_DRAWS = 2000
 
@@ -75,6 +85,26 @@ def _terms(
     return policy_terms(pi[idx], data.a[idx], p, nuis.mu[metric])
 
 
+def _baseline_contributions(
+    data: LogData, nuis: Nuisance, idx: np.ndarray, metric: str, est: str,
+    base_terms: Optional[PolicyTerms],
+) -> np.ndarray:
+    """Вклады базы для оценщика ``est``.
+
+    База — политика A из логов (``base_terms is None``): для всех оценщиков, кроме DM,
+    её значение — средняя награда. Для DM — прогноз той же модели исхода на
+    залогированных действиях, ``mean(mu(x_i, a_i))``: тогда Δ у DM — контраст двух
+    прогнозов одной модели, и её систематическая ошибка частично сокращается
+    (симуляции: убирает 0.5–0.8 смещения двухчастной модели).
+    """
+    r = data.rewards[metric][idx]
+    if base_terms is not None:
+        return contributions(est, r, base_terms)
+    if est == "dm":
+        return nuis.mu[metric][np.arange(len(idx)), data.a[idx]]
+    return r
+
+
 def _values(
     data: LogData, nuis: Nuisance, idx: np.ndarray, pis: list[np.ndarray], base: Optional[np.ndarray]
 ) -> np.ndarray:
@@ -84,9 +114,7 @@ def _values(
         r = data.rewards[metric][idx]
         base_terms = _terms(data, nuis, idx, base, metric) if base is not None else None
         for e, est in enumerate(ESTIMATORS):
-            out[:, m, e, 1] = (
-                r.mean() if base_terms is None else contributions(est, r, base_terms).mean()
-            )
+            out[:, m, e, 1] = _baseline_contributions(data, nuis, idx, metric, est, base_terms).mean()
         for i, pi in enumerate(pis):
             terms = _terms(data, nuis, idx, pi, metric)
             for e, est in enumerate(ESTIMATORS):
@@ -118,8 +146,10 @@ class Evaluator:
         features: Признаки контекста. ``None`` — авто-выбор (список попадает в отчёт).
         propensity_model: sklearn-классификатор для пропенсити (по умолчанию —
             логистическая регрессия).
-        outcome_model: sklearn-модель для ``E[r|x, a]`` (по умолчанию — логистическая
-            регрессия или Ridge с взаимодействиями признаков и действия).
+        outcome_model: sklearn-модель для ``E[r|x, a]`` или словарь «метрика -> модель». По
+            умолчанию выбирается по данным: логистическая регрессия (бинарная награда),
+            двухчастная модель (неотрицательная с нулями, например выручка) или Ridge — все с
+            взаимодействиями признаков и действия.
         n_folds: Число фолдов cross-fitting.
         propensity_floor: Пол оценённого пропенсити как доля частоты действия.
         lower_is_better: Метрики, где меньше — лучше (отток, расходы).
@@ -154,6 +184,10 @@ class Evaluator:
         if unknown:
             raise ValueError(f"lower_is_better содержит метрики, которых нет в reward: {unknown}")
         self.lower_is_better = frozenset(lower_is_better)
+        if isinstance(outcome_model, dict):
+            extra = sorted(set(outcome_model) - set(self.data.reward_cols))
+            if extra:
+                raise ValueError(f"outcome_model задан для метрик, которых нет в reward: {extra}")
         hidden = list(self.data.reward_cols) + ([propensity] if propensity else [])
         # Политике показываются логи без наград и пропенсити — она не должна их видеть.
         self._frame = logs.drop(columns=hidden).copy()
@@ -198,12 +232,16 @@ class Evaluator:
                 колонках (см. :func:`policyscope.softmax` и др.), имя колонки с действием
                 кандидата, ``Series`` действий или объект с ``action_probs(df)``.
             baseline: С чем сравнивать. ``None`` — с политикой A, как она есть в логах
-                (``V(A)`` = средняя награда). Политика в том же формате — с ней (например,
-                с прод-версией A без исследования); её значение оценивается тем же оценщиком.
-            estimator: Основной оценщик: ``dr`` (по умолчанию), ``sndr``, ``ips``, ``snips``.
-                Остальные считаются для сверки на тех же моделях.
-            inference: ``auto`` — аналитический интервал при логированных пропенсити и
-                bootstrap при оценённых; ``influence``, ``bootstrap`` или ``none``.
+                (``V(A)`` = средняя награда; у DM — прогноз модели на залогированных действиях).
+                Политика в том же формате — с ней (например, с прод-версией A без
+                исследования); её значение оценивается тем же оценщиком.
+            estimator: Основной оценщик: ``dr`` (по умолчанию), ``sndr``, ``ips``, ``snips``
+                или ``dm`` (явный выбор: точнее при верной модели исхода, но её смещение не
+                проверяется; только со встроенной моделью и bootstrap-интервалом).
+                Остальные оценщики считаются для сверки на тех же моделях.
+            inference: ``auto`` — аналитический интервал при логированных пропенсити;
+                bootstrap при оценённых пропенсити и при ``estimator="dm"``. Также
+                ``influence``, ``bootstrap`` или ``none``.
             alpha: Уровень значимости (интервалы ``1 - alpha``).
             n_boot: Число bootstrap-реплик.
             name: Имя кандидата в отчёте.
@@ -244,11 +282,6 @@ class Evaluator:
     # ------------------------------------------------------------------
 
     def _validate(self, estimator: str, inference: str, alpha: float, n_boot: int) -> str:
-        if estimator == "dm":
-            raise ValueError(
-                "DM не может быть основным оценщиком: его интервал не учитывает смещение "
-                "модели исхода. DM всё равно считается и показывается в таблице согласия."
-            )
         if estimator not in PRIMARY_ESTIMATORS:
             raise ValueError(f"Неизвестный оценщик '{estimator}'. Доступны: {PRIMARY_ESTIMATORS}")
         if self.data.propensity is None and estimator in ("ips", "snips"):
@@ -256,10 +289,28 @@ class Evaluator:
                 f"При оценённых пропенсити '{estimator}' не может быть основным: смещение от "
                 "ошибки модели пропенсити входит в него напрямую. Используйте 'dr' или 'sndr'."
             )
+        if estimator == "dm":
+            custom = [m for m in self.data.reward_cols if self.config.model_for(m) is not None]
+            if custom:
+                raise ValueError(
+                    f"Основной DM доступен только со встроенной моделью исхода, а для {custom} "
+                    "задана своя. Для гибких ML-моделей у DM нет валидного интервала: в симуляциях "
+                    "bootstrap покрывал истину в 30–70% случаев. DM всё равно показывается точкой "
+                    "в таблице согласия; основным возьмите 'dr'."
+                )
+            if inference == "influence":
+                raise ValueError(
+                    "Аналитический интервал для DM не реализован: формула по вкладам dm_i "
+                    "игнорирует ошибку оценки модели исхода и занижает разброс. Используйте "
+                    "inference='bootstrap' (или 'auto')."
+                )
         if not 0.0 < alpha < 1.0:
             raise ValueError("alpha должна лежать в (0, 1)")
         if inference == "auto":
-            inference = "influence" if self.data.propensity is not None else "bootstrap"
+            if estimator == "dm" or self.data.propensity is None:
+                inference = "bootstrap"
+            else:
+                inference = "influence"
         if inference not in ("influence", "bootstrap", "none"):
             raise ValueError("inference: 'auto', 'influence', 'bootstrap' или 'none'")
         if inference == "bootstrap" and n_boot < 50:
@@ -317,7 +368,7 @@ class Evaluator:
             r = data.rewards[metric]
             base_terms = _terms(data, nuis, full, base, metric) if base is not None else None
             for e, est in enumerate(ESTIMATORS):
-                psi_a[m, e] = r if base_terms is None else contributions(est, r, base_terms)
+                psi_a[m, e] = _baseline_contributions(data, nuis, full, metric, est, base_terms)
             for i, pi in enumerate(pis):
                 terms_b[i, m] = _terms(data, nuis, full, pi, metric)
                 for e, est in enumerate(ESTIMATORS):
@@ -471,9 +522,13 @@ class Evaluator:
                 "логированные" if d.propensity is not None else
                 _model_name(self.config.propensity_model, "LogisticRegression (OOF)")
             ),
-            "outcome_model": _model_name(
-                self.config.outcome_model, "LogisticRegression / Ridge с x×a (OOF)"
-            ),
+            "outcome_model": {
+                m: _model_name(
+                    self.config.model_for(m),
+                    OUTCOME_KIND_LABELS[outcome_kind(d.rewards[m], d.binary[m])] + " с x×a",
+                )
+                for m in d.reward_cols
+            },
             "random_state": self.random_state,
             "actions": list(d.actions),
         }
@@ -492,7 +547,7 @@ class Evaluator:
 
     def _floor_sensitivity(self, pi, base, metric, estimator) -> Optional[dict[str, float]]:
         nuis = self.nuisance
-        if nuis.source != "estimated":
+        if nuis.source != "estimated" or estimator == "dm":  # DM пропенсити не использует
             return None
         data = self.data
         r = data.rewards[metric]
@@ -519,6 +574,25 @@ class Evaluator:
             base_overlap = overlap_summary(data, nuis, base, alpha)
             findings += policy_findings(data, nuis, base_overlap, th, role=base_label)
         findings += extra_findings
+        if estimator == "dm":
+            findings.append(Finding(
+                code="model_based_estimate",
+                severity="caution",
+                title="Оценка держится только на модели исхода (DM)",
+                detail=(
+                    "DM точнее DR, если модель исхода верна, но её смещение по логам не "
+                    "проверяется: сверка с DR замечает лишь грубые расхождения, порядка "
+                    "нескольких стандартных ошибок DM. "
+                    + ("При таком объёме данных (от 10 000 строк) остаточная ошибка спецификации "
+                       "становится заметной долей стандартной ошибки; в симуляциях к 3·10⁴ строк "
+                       "покрытие падало до ~0.8. " if data.n >= DM_LARGE_N else "")
+                    + "Интервал описывает разброс оценки, но не смещение модели."
+                ),
+                advice=(
+                    "Принимайте решение по DM, только если уверены в модели исхода и DR в таблице "
+                    "оценщиков ему не противоречит; иначе основным возьмите 'dr'."
+                ),
+            ))
         ess_value = ess(terms_b[i, 0].w)
         has_ci = inference != "none"
 
@@ -531,9 +605,12 @@ class Evaluator:
             delta_value = float(v_b[i, m, e_primary] - v_a[m, e_primary])
             se_delta = get("delta_se", m, e_primary)
             terms = terms_b[i, m]
+            base_terms = _terms(data, nuis, np.arange(data.n), base, metric) if base is not None else None
             checks, metric_findings = triangulate(
                 data, metric, estimator=estimator, w=terms.w, dm=terms.dm,
                 mu_taken=terms.mu_taken,
+                base_w=base_terms.w if base_terms is not None else None,
+                base_dm=base_terms.dm if base_terms is not None else None,
                 se_delta=se_delta if se_delta is not None else float(
                     analytic_summary(psi_b[i, m, e_primary] - psi_a[m, e_primary],
                                      data.clusters, data.n_clusters, alpha)["se"][0]
@@ -562,6 +639,16 @@ class Evaluator:
                     advice="Политика A плохо воспроизводится моделью; нужны логированные пропенсити.",
                 ))
 
+            primary_values = [v_b[i, m, e_primary], v_a[m, e_primary]]
+            if not np.all(np.isfinite(primary_values)):
+                metric_findings.append(Finding(
+                    code="non_finite_estimate",
+                    severity="block",
+                    metric=metric,
+                    title="Оценка не посчиталась",
+                    detail="Основной оценщик дал нечисловое значение (например, нет перекрытия политик).",
+                    advice="Проверьте таблицу перекрытия и модель исхода.",
+                ))
             all_findings = tuple(findings) + tuple(metric_findings)
             trust = trust_level(all_findings)
             low, high = get("delta_low", m, e_primary), get("delta_high", m, e_primary)
@@ -586,7 +673,8 @@ class Evaluator:
 
             rows = []
             for e, est in enumerate(ESTIMATORS):
-                show_ci = has_ci and est != "dm"
+                # Интервал DM показывается, только если DM выбран основным явно.
+                show_ci = has_ci and (est != "dm" or estimator == "dm")
                 rows.append(EstimatorRow(
                     estimator=est,
                     v_b=Estimate(float(v_b[i, m, e]), get("v_b_low", m, e) if show_ci else None,

@@ -179,3 +179,45 @@ def test_romano_wolf_controls_familywise_error():
         null = multiplier_tstats(s["sums"], s["se"], n, 1000, rng)
         rejections += bool((romano_wolf(t, null) < 0.05).any())
     assert rejections / sims <= 0.05 + 2 * np.sqrt(0.05 * 0.95 / sims)
+
+
+FEATURES = ["age", "income", "loyal", "risk", "region"]
+
+
+def test_dm_is_more_precise_than_dr_when_outcome_model_is_close():
+    """Тезис «DM мощнее»: при близкой к верной модели исхода разброс DM заметно меньше."""
+    errors = {"dm": [], "dr": []}
+    for seed in range(40):
+        sim = OfferSimulator(seed=600 + seed)
+        a, b = sim.policy("epsilon_greedy", epsilon=0.2, seed=1), sim.policy("softmax", seed=2)
+        logs = sim.simulate(sim.sample_clients(3000), a)
+        truth = sim.true_value(logs, b) - sim.true_value(logs, a)
+        rep = ps.evaluate(logs, b, action="offer", reward="accepted", propensity="propensity",
+                          features=FEATURES, inference="none")
+        table = rep["accepted"].estimators.set_index("estimator")["delta"]
+        for est in errors:
+            errors[est].append(table[est] - truth)
+    sd = {est: np.std(e, ddof=1) for est, e in errors.items()}
+    assert sd["dm"] < 0.75 * sd["dr"]
+    assert mc_bias_ok(errors["dm"]) and mc_bias_ok(errors["dr"])
+
+
+def test_dm_opt_in_bootstrap_interval_covers():
+    """Основной DM со встроенной моделью: bootstrap-интервал покрывает истину.
+
+    Регрессия на два дефекта 0.3: наивная формула дисперсии DM и обрезка/линейность
+    модели выручки, смещавшая DM на несколько его стандартных ошибок.
+    """
+    covered = {"accepted": [], "revenue": []}
+    for seed in range(20):
+        sim = OfferSimulator(seed=700 + seed)
+        a, b = sim.policy("epsilon_greedy", epsilon=0.2, seed=3), sim.policy("softmax", seed=5)
+        logs = sim.simulate(sim.sample_clients(2000), a)
+        rep = ps.evaluate(logs, b, action="offer", reward=list(covered), propensity="propensity",
+                          features=FEATURES, estimator="dm", n_boot=80, random_state=seed)
+        for metric, c in covered.items():
+            truth = sim.true_value(logs, b, metric) - sim.true_value(logs, a, metric)
+            d = rep[metric].delta
+            c.append(d.low <= truth <= d.high)
+    for metric, c in covered.items():
+        assert np.mean(c) >= 0.8, f"{metric}: покрытие {np.mean(c):.2f}"

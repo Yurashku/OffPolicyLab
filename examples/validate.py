@@ -37,6 +37,8 @@ class Scenario:
     visits: int = 1
     cluster: bool = False
     expect_flagged: bool = False
+    estimator: str = "dr"
+    seeds: tuple = (1, 2)
 
 
 SCENARIOS = {
@@ -60,6 +62,14 @@ SCENARIOS = {
         "clustered", "5 визитов на клиента, клиентский эффект (кластерный ДИ)",
         dict(kind="epsilon_greedy", epsilon=0.2), client_effect=1.5, visits=5, cluster=True,
     ),
+    "dm": Scenario(
+        "dm", "основной DM (estimator='dm', bootstrap), ε-greedy 0.2, пропенсити в логах",
+        dict(kind="epsilon_greedy", epsilon=0.2), estimator="dm",
+    ),
+    "dm_pair2": Scenario(
+        "dm_pair2", "основной DM на другой паре политик (A3 → B5), где его выигрыш меньше",
+        dict(kind="epsilon_greedy", epsilon=0.2), estimator="dm", seeds=(3, 5),
+    ),
 }
 
 
@@ -68,14 +78,14 @@ def run_scenario(s: Scenario, *, runs: int, clients: int, n_boot: int, seed: int
     for run in range(runs):
         sim = OfferSimulator(seed=seed + run, client_effect=s.client_effect)
         data = sim.sample_clients(max(clients // s.visits, 50), visits=s.visits)
-        policy_a = sim.policy(seed=1, **s.logging)
-        policy_b = sim.policy("softmax", temperature=1.0, seed=2)
+        policy_a = sim.policy(seed=s.seeds[0], **s.logging)
+        policy_b = sim.policy("softmax", temperature=1.0, seed=s.seeds[1])
         logs = sim.simulate(data, policy_a, log_propensity=s.propensity)
         report = ps.evaluate(
             logs, policy_b, action="offer", reward=["accepted", "revenue"],
             propensity="propensity" if s.propensity else None,
             cluster="client_id" if s.cluster else None,
-            features=FEATURES, n_boot=n_boot, random_state=run,
+            features=FEATURES, n_boot=n_boot, random_state=run, estimator=s.estimator,
         )
         for metric, m in report.metrics.items():
             truth = sim.true_value(logs, policy_b, metric) - sim.true_value(logs, policy_a, metric)
@@ -122,9 +132,10 @@ def aggregate(raw: pd.DataFrame) -> pd.DataFrame:
 
 
 def check(table: pd.DataFrame) -> list[str]:
-    """Пороги приёмки для основного оценщика DR на прогонах, признанных пригодными."""
+    """Пороги приёмки для основного оценщика сценария на прогонах, признанных пригодными."""
     problems = []
-    for _, r in table[table["estimator"] == "dr"].iterrows():
+    primary = table["estimator"] == table["scenario"].map(lambda name: SCENARIOS[name].estimator)
+    for _, r in table[primary].iterrows():
         label = f"{r['scenario']}/{r['metric']}"
         if SCENARIOS[r["scenario"]].expect_flagged and r["unreliable_share"] < 0.3:
             problems.append(f"{label}: перекрытия нет, но ненадёжными помечено лишь {r['unreliable_share']:.0%}")
@@ -144,15 +155,20 @@ def to_markdown(table: pd.DataFrame, settings: str) -> str:
 
     lines = [
         settings, "",
-        "| Сценарий | Метрика | Оценщик | Помечено «ненадёжно» | Смещение (±MCSE) | RMSE | Покрытие 95% ДИ "
-        "| RMSE по всем прогонам |",
+        "| Сценарий | Метрика | Оценщик | Помечено «ненадёжно» | Смещение (±MCSE) | RMSE "
+        "| Покрытие 95% ДИ (±MCSE) | RMSE по всем прогонам |",
         "|---|---|---|---|---|---|---|---|",
     ]
     for _, r in table.iterrows():
         bias = "—" if pd.isna(r["bias"]) else f"{r['bias']:+.4g} (±{fmt(r['bias_mcse'], '.2g')})"
+        if pd.isna(r["coverage"]):
+            coverage = "—"
+        else:
+            mcse = np.sqrt(max(r["coverage"] * (1 - r["coverage"]), 0.0025) / max(r["trusted_runs"], 1))
+            coverage = f"{r['coverage']:.2f} (±{mcse:.2f})"
         lines.append(
             f"| {r['scenario']} | {r['metric']} | {r['estimator']} | {r['unreliable_share']:.0%} | {bias} "
-            f"| {fmt(r['rmse'], '.4g')} | {fmt(r['coverage'], '.2f')} | {fmt(r['rmse_all'], '.4g')} |"
+            f"| {fmt(r['rmse'], '.4g')} | {coverage} | {fmt(r['rmse_all'], '.4g')} |"
         )
     return "\n".join(lines)
 
@@ -171,12 +187,13 @@ def main() -> int:
     frames = []
     for name in args.scenarios:
         s = SCENARIOS[name]
-        runs = args.runs if s.propensity else max(args.runs // 3, 10)  # bootstrap дорог
+        bootstrap = (not s.propensity) or s.estimator == "dm"
+        runs = max(args.runs // 2, 10) if bootstrap else args.runs  # bootstrap дорог
         start = time.perf_counter()
         frames.append(run_scenario(s, runs=runs, clients=args.clients, n_boot=args.n_boot, seed=args.seed))
         print(f"{name}: {runs} прогонов за {time.perf_counter() - start:.0f} с — {s.description}", file=sys.stderr)
     table = aggregate(pd.concat(frames, ignore_index=True))
-    settings = (f"Прогонов на сценарий: {args.runs} (estimated — {max(args.runs // 3, 10)}), "
+    settings = (f"Прогонов на сценарий: {args.runs} (сценарии с bootstrap — {max(args.runs // 2, 10)}), "
                 f"строк в прогоне: {args.clients}, bootstrap-реплик: {args.n_boot}, seed: {args.seed}.")
     markdown = to_markdown(table, settings)
     print(markdown)

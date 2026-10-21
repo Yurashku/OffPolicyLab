@@ -22,15 +22,23 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 import numpy as np
-from sklearn.base import clone
-from sklearn.linear_model import LogisticRegression, Ridge
+from sklearn.base import BaseEstimator, RegressorMixin, clone
+from sklearn.linear_model import GammaRegressor, LogisticRegression, Ridge
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from threadpoolctl import threadpool_limits
 
 from policyscope.data import LogData
 
-__all__ = ["NuisanceConfig", "Nuisance", "make_folds", "fit_nuisance", "outcome_design"]
+__all__ = [
+    "NuisanceConfig",
+    "Nuisance",
+    "TwoPartRegressor",
+    "make_folds",
+    "fit_nuisance",
+    "outcome_design",
+    "outcome_kind",
+]
 
 
 @dataclass(frozen=True)
@@ -40,9 +48,9 @@ class NuisanceConfig:
     Attributes:
         propensity_model: sklearn-классификатор с ``predict_proba`` для ``pi_A(a|x)``.
             ``None`` — мультиномиальная логистическая регрессия.
-        outcome_model: sklearn-модель для ``mu(x, a)``; получает признаки, one-hot
-            действия и их попарные произведения. ``None`` — логистическая регрессия для
-            бинарной награды и Ridge для непрерывной.
+        outcome_model: sklearn-модель для ``mu(x, a)`` или словарь «метрика -> модель»;
+            получает признаки, one-hot действия и их попарные произведения. ``None`` (или
+            метрика, отсутствующая в словаре) — модель по умолчанию, см. :func:`outcome_kind`.
         n_folds: Число фолдов cross-fitting.
         propensity_floor: Доля от частоты действия, ниже которой оценённое пропенсити
             не опускается. Применяется только к оценённым пропенсити.
@@ -52,6 +60,12 @@ class NuisanceConfig:
     outcome_model: Any = None
     n_folds: int = 5
     propensity_floor: float = 0.1
+
+    def model_for(self, metric: str) -> Any:
+        """Пользовательская модель исхода для метрики или ``None`` (модель по умолчанию)."""
+        if isinstance(self.outcome_model, dict):
+            return self.outcome_model.get(metric)
+        return self.outcome_model
 
     def __post_init__(self) -> None:
         if self.n_folds < 2:
@@ -98,9 +112,85 @@ def _default_propensity_model():
     return make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000))
 
 
-def _default_outcome_model(binary: bool):
+class TwoPartRegressor(RegressorMixin, BaseEstimator):
+    """Модель неотрицательной награды с нулями: ``E[r|z] = P(r > 0|z) · E[r | r > 0, z]``.
+
+    Первая часть — логистическая регрессия, вторая — Gamma-GLM с log-связью на строках с
+    ``r > 0``. Так устроены выручка, сумма покупки, LTV: чаще всего ноль, иначе
+    положительная величина с длинным хвостом. Линейная модель на таких данных выдаёт
+    отрицательные прогнозы, а их обрезка смещает оценку DM на величину порядка его
+    стандартной ошибки — это показали симуляции (см. docs/estimators.md).
+
+    Прогноз положительной части не превышает наблюдённый максимум ``r``. Log-связь
+    экстраполирует экспоненциально, и в областях без данных (слабое перекрытие) прогноз
+    без ограничения уходит в разы выше любого наблюдения: в симуляциях это смещало и DM,
+    и DR. Ограничение действует только там, где модель экстраполирует.
+
+    Args:
+        C: Обратная сила L2-штрафа логистической части (как в ``LogisticRegression``).
+            Штраф Gamma-части согласован с ним: ``alpha = 1 / (C · n_pos)``.
+    """
+
+    def __init__(self, C: float = 1.0) -> None:
+        self.C = C
+
+    def fit(self, X, y):
+        X = np.asarray(X, dtype=float)
+        y = np.asarray(y, dtype=float)
+        if (y < 0).any():
+            raise ValueError("TwoPartRegressor ожидает неотрицательную награду")
+        self.scaler_ = StandardScaler().fit(X)
+        Z = self.scaler_.transform(X)
+        positive = y > 0
+        n_pos = int(positive.sum())
+        self.p_const_ = float(positive.mean())
+        self.classifier_ = None
+        if 0 < n_pos < len(y):
+            self.classifier_ = LogisticRegression(C=self.C, max_iter=1000).fit(Z, positive)
+        self.m_const_ = float(y[positive].mean()) if n_pos else 0.0
+        self.cap_ = float(y.max())
+        self.regressor_ = None
+        if n_pos >= 10:
+            self.regressor_ = GammaRegressor(
+                alpha=1.0 / (self.C * n_pos), solver="newton-cholesky", max_iter=300,
+            ).fit(Z[positive], y[positive])
+        return self
+
+    def predict(self, X):
+        Z = self.scaler_.transform(np.asarray(X, dtype=float))
+        p = (self.classifier_.predict_proba(Z)[:, 1] if self.classifier_ is not None
+             else np.full(len(Z), self.p_const_))
+        m = self.regressor_.predict(Z) if self.regressor_ is not None else np.full(len(Z), self.m_const_)
+        return p * np.minimum(m, self.cap_)
+
+
+def outcome_kind(r: np.ndarray, binary: bool) -> str:
+    """Тип модели исхода по умолчанию для вектора наград.
+
+    - ``binary`` — логистическая регрессия;
+    - ``two_part`` — неотрицательная награда, где заметная доля нулей (выручка):
+      :class:`TwoPartRegressor`;
+    - ``linear`` — иначе: Ridge.
+    """
     if binary:
+        return "binary"
+    if (r >= 0).all() and np.mean(r == 0) >= 0.05 and np.sum(r > 0) >= 20:
+        return "two_part"
+    return "linear"
+
+
+OUTCOME_KIND_LABELS = {
+    "binary": "LogisticRegression",
+    "two_part": "двухчастная: LogisticRegression × GammaRegressor (log)",
+    "linear": "Ridge",
+}
+
+
+def _default_outcome_model(kind: str):
+    if kind == "binary":
         return make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000))
+    if kind == "two_part":
+        return TwoPartRegressor()
     return make_pipeline(StandardScaler(), Ridge(alpha=1.0))
 
 
@@ -150,15 +240,15 @@ def _propensity_oof(
 
 def _outcome_oof(
     X: np.ndarray, a: np.ndarray, r: np.ndarray, k: int, binary: bool,
-    folds: np.ndarray, n_folds: int, model: Any,
+    folds: np.ndarray, n_folds: int, model: Any, kind: str,
 ) -> np.ndarray:
     mu = np.zeros((len(a), k))
-    base = model if model is not None else _default_outcome_model(binary)
+    base = model if model is not None else _default_outcome_model(kind)
     for f in range(n_folds):
         train, hold = folds != f, folds == f
         n_hold = int(hold.sum())
         r_train = r[train]
-        if binary and np.unique(r_train).size < 2:
+        if np.unique(r_train).size < 2:
             mu[hold] = float(r_train.mean())
             continue
         fitted = clone(base).fit(outcome_design(X[train], a[train], k), r_train)
@@ -169,7 +259,15 @@ def _outcome_oof(
             pred = fitted.predict_proba(stacked)[:, 1]
         else:
             pred = fitted.predict(stacked)
-        mu[hold] = np.clip(pred, r_train.min(), r_train.max()).reshape(k, n_hold).T
+            if binary:  # регрессор на бинарной награде: прогноз — вероятность
+                pred = np.clip(pred, 0.0, 1.0)
+        # Непрерывные прогнозы не обрезаются: обрезка по [min r, max r] смещает DM.
+        mu[hold] = np.asarray(pred, dtype=float).reshape(k, n_hold).T
+    if not np.isfinite(mu).all():
+        raise ValueError(
+            "Модель исхода выдала нечисловые прогнозы (inf/NaN). Проверьте признаки на выбросы "
+            "или задайте более устойчивую outcome_model."
+        )
     return mu
 
 
@@ -224,7 +322,8 @@ def _fit_nuisance(
     mu = {
         metric: _outcome_oof(
             X, a, data.rewards[metric][idx], k, data.binary[metric],
-            folds, config.n_folds, config.outcome_model,
+            folds, config.n_folds, config.model_for(metric),
+            outcome_kind(data.rewards[metric], data.binary[metric]),
         )
         for metric in data.reward_cols
     }

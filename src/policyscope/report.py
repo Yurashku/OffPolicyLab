@@ -404,7 +404,8 @@ class Report:
     def _estimators_block(self, level: str) -> list[str]:
         lines = [
             "IPS опирается только на пропенсити, DM — только на модель исхода, DR — на обе. "
-            "Если они согласны, оценка устойчива к ошибке любой из моделей.",
+            "Если они расходятся, хотя бы одна из моделей неверна; согласие исключает только "
+            "грубые ошибки.",
             "",
             f"| Метрика | Оценщик | V({self.policy}) | Δ | {level} ДИ для Δ |",
             "|---|---|---|---|---|",
@@ -418,7 +419,21 @@ class Report:
                     f"| {fd(row.delta.value)} | {_interval(row.delta.low, row.delta.high, fd)} |"
                 )
         lines.append("")
-        lines.append("DM показан без интервала: его ДИ не учитывает смещение модели исхода.")
+        if self.settings.get("estimator") == "dm":
+            lines.append(
+                "Интервал DM описывает разброс оценки при верной модели исхода; её смещение "
+                "в интервал не входит."
+            )
+        else:
+            lines.append(
+                "DM показан без интервала: его точность держится на модели исхода, смещение "
+                "которой по логам не проверяется. Интервал DM считается, если выбрать его "
+                "основным явно (estimator='dm')."
+            )
+        lines.append(
+            "Отсутствие расхождения не подтверждает модели: проверки замечают лишь грубые "
+            "ошибки, сравнимые с несколькими стандартными ошибками."
+        )
         meaning = {"propensity": "пропенсити", "outcome": "модель исхода"}
         for m in self.metrics.values():
             for c in m.checks:
@@ -465,10 +480,13 @@ class Report:
     def _settings_block(self) -> list[str]:
         s = self.settings
         features = ", ".join(s.get("features", [])) or "нет (оценка без контекста)"
+        models = s.get("outcome_model") or {}
+        outcome = ("; ".join(f"{m} — {name}" for m, name in models.items())
+                   if isinstance(models, dict) else str(models))
         auto = " (выбраны автоматически)" if s.get("features_auto") else ""
         lines = [
             f"- Признаки{auto}: {features}.",
-            f"- Модель пропенсити: {s.get('propensity_model')}; модель исхода: {s.get('outcome_model')}; "
+            f"- Модель пропенсити: {s.get('propensity_model')}; модель исхода: {outcome}; "
             f"cross-fitting: {s.get('n_folds')} фолдов.",
         ]
         quality = []

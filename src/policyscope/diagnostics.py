@@ -16,8 +16,9 @@
 - ``DR − IPS = mean(dm − w·mu(a_i))`` — ноль при верных пропенсити и *любой*
   модели исхода. Значимое отличие — пропенсити неверны или B уходит туда, где A не
   действует.
-- ``DR − DM = mean(w·(r − mu(a_i)))`` — ноль при верной модели исхода и *любых*
-  весах. Значимое отличие — модель исхода смещена.
+- ``DR − DM = mean((w − 1)·(r − mu(a_i)))`` (для Δ: у DM база — прогноз модели на
+  залогированных действиях) — ноль при верной модели исхода и *любых* весах. Значимое
+  отличие — модель исхода смещена.
 
 DR смещён, только если неверны обе модели, поэтому провал одной проверки — повод
 для осторожности, а двух — для отказа от вывода.
@@ -335,7 +336,10 @@ def policy_findings(
                 f"ESS = {overlap.ess:.0f} ({100 * overlap.ess_ratio:.1f}% от {overlap.n}): "
                 "вес сосредоточен в малой части наблюдений, интервал может быть неточным."
             ),
-            advice="Сверьтесь с SNDR в таблице оценщиков: он устойчивее к тяжёлым весам.",
+            advice=(
+                "При тяжёлых весах интервал может недопокрывать с одной стороны. Возьмите "
+                "кандидата ближе к A или соберите больше данных."
+            ),
         ))
 
     if role != "B":
@@ -349,8 +353,9 @@ def policy_findings(
             title="Пропенсити оценены моделью",
             detail=(
                 "В логах нет вероятностей выбора действия, они восстановлены моделью "
-                "(cross-fit, с полом). Оценка верна, если модель воспроизводит политику A "
-                "или если верна модель исхода; проверки согласия ниже показывают, так ли это."
+                "(cross-fit, с полом). Пол и неточность модели пропенсити дают смещение, "
+                "которое не исчезает с ростом данных, поэтому в этом режиме DR не является "
+                "строго дважды робастным."
             ),
             advice=(
                 "Логируйте вероятность выбранного действия в проде: это делает оценку "
@@ -461,36 +466,79 @@ def triangulate(
     estimated_propensity: bool,
     ess_value: float,
     th: Thresholds,
+    base_w: Optional[np.ndarray] = None,
+    base_dm: Optional[np.ndarray] = None,
 ) -> tuple[tuple[Check, ...], list[Finding]]:
-    """Проверки согласия оценщиков для одной метрики и находки по ним."""
+    """Проверки согласия оценщиков для одной метрики и находки по ним.
+
+    Сравниваются те Δ, что показаны в отчёте. Для базы «A из логов» DR берёт V(A) = mean(r),
+    а DM — mean(mu(x_i, a_i)), поэтому
+
+    - ``DR − IPS`` для Δ = ``mean(dm − w·mu_i)``;
+    - ``DR − DM`` для Δ = ``mean((w − 1)(r − mu_i))``.
+
+    Если база — политика, из каждой величины вычитается такая же величина для базы.
+    """
     r = data.rewards[metric]
-    weights = w / np.mean(w) if estimator in SELF_NORMALIZED and np.mean(w) > 0 else w
     sn = estimator in SELF_NORMALIZED
+
+    def normalized(weights: np.ndarray) -> np.ndarray:
+        return weights / np.mean(weights) if sn and np.mean(weights) > 0 else weights
+
+    wb = normalized(w)
+    prop_values = dm - wb * mu_taken
+    if base_w is None:
+        outcome_values = (wb - 1.0) * (r - mu_taken)
+    else:
+        wa = normalized(base_w)
+        prop_values = prop_values - (base_dm - wa * mu_taken)
+        outcome_values = (wb - wa) * (r - mu_taken)
     material = th.material_bias * se_delta if np.isfinite(se_delta) else np.inf
     informative = ess_value >= th.min_ess
     prop = _check(
         "propensity", "SNDR − SNIPS" if sn else "DR − IPS",
-        dm - weights * mu_taken, data, material, th, informative,
+        prop_values, data, material, th, informative,
     )
     outc = _check(
         "outcome", "SNDR − DM" if sn else "DR − DM",
-        weights * (r - mu_taken), data, material, th, informative,
+        outcome_values, data, material, th, informative,
     )
 
     findings: list[Finding] = []
     prop_fail, out_fail = prop.status == "fail", outc.status == "fail"
+    if estimator == "dm":
+        if out_fail:
+            findings.append(Finding(
+                code="outcome_check_failed",
+                severity="block",
+                metric=metric,
+                title="DM не согласуется с DR: модель исхода смещена",
+                detail=(
+                    f"{outc.label} = {outc.discrepancy:+.4g} (интервал {outc.low:+.4g}…{outc.high:+.4g}): "
+                    "расхождение значимо и существенно, а DM целиком опирается на модель исхода."
+                ),
+                advice="Используйте estimator='dr' или улучшите модель исхода (outcome_model=...).",
+            ))
+        return (prop, outc), findings
+    tail_note = (
+        "При логированных пропенсити это обычно значит, что заметная часть массы весов "
+        "приходится на редкие сочетания «контекст–действие», почти не попавшие в выборку "
+        "(тяжёлый хвост весов), а не что пропенсити неверны."
+        if not estimated_propensity else
+        "Оценённые пропенсити, по-видимому, плохо воспроизводят политику A."
+    )
     if estimator in ("ips", "snips"):
         if prop_fail:
             findings.append(Finding(
                 code="propensity_check_failed",
                 severity="block",
                 metric=metric,
-                title="IPS не согласуется с DR: пропенсити неверны",
+                title="IPS не согласуется с DR",
                 detail=(
                     f"{prop.label} = {prop.discrepancy:+.4g} (интервал {prop.low:+.4g}…{prop.high:+.4g}), "
-                    "а при верных пропенсити эта разность в среднем равна нулю."
+                    f"а при верных пропенсити и полной выборке эта разность в среднем равна нулю. {tail_note}"
                 ),
-                advice="Используйте estimator='dr' и проверьте источник пропенсити.",
+                advice="Используйте estimator='dr': он не зависит от того, попал ли хвост весов в выборку.",
             ))
         return (prop, outc), findings
 
@@ -514,14 +562,17 @@ def triangulate(
             code="propensity_check_failed",
             severity="caution",
             metric=metric,
-            title="Пропенсити не согласуются с данными",
+            title="IPS и DR расходятся",
             detail=(
                 f"{prop.label} = {prop.discrepancy:+.4g} (интервал {prop.low:+.4g}…{prop.high:+.4g}). "
-                "Оценка DR держится на модели исхода"
+                f"{tail_note} Там, где весов не хватает, оценка DR держится на модели исхода"
                 + ("; её проверка расхождений не выявила." if outc.status == "ok"
                    else ", а её проверить не удалось.")
             ),
-            advice="Перепроверьте источник пропенсити; сравните DR с DM в таблице оценщиков.",
+            advice=(
+                "При оценённых пропенсити — логируйте настоящие; при логированных — интервал DR "
+                "может недопокрывать с одной стороны, смотрите на таблицу перекрытия по действиям."
+            ),
         ))
     elif out_fail:
         findings.append(Finding(
@@ -557,5 +608,5 @@ def variance_concentration(
         metric=metric,
         title="Разброс оценки держится на одном наблюдении",
         detail=f"{unit} даёт {100 * share:.0f}% дисперсии Δ: интервал неустойчив.",
-        advice="Посмотрите на строки с максимальными весами; SNDR устойчивее к таким выбросам.",
+        advice="Посмотрите на строки с максимальными весами: оценка и интервал определяются ими.",
     )
