@@ -39,6 +39,9 @@ class Scenario:
     expect_flagged: bool = False
     estimator: str = "dr"
     seeds: tuple = (1, 2)
+    #: False — сценарий показывает известное ограничение: цифры попадают в таблицу,
+    #: но пороги приёмки к нему не применяются.
+    enforce: bool = True
 
 
 SCENARIOS = {
@@ -57,6 +60,11 @@ SCENARIOS = {
     "estimated": Scenario(
         "estimated", "ε-greedy логирование, пропенсити НЕ залогированы (bootstrap)",
         dict(kind="epsilon_greedy", epsilon=0.2), propensity=False,
+    ),
+    "estimated_pair2": Scenario(
+        "estimated_pair2",
+        "пропенсити НЕ залогированы, другая пара (A8 → B6): ограничение — DR смещён",
+        dict(kind="epsilon_greedy", epsilon=0.2), propensity=False, seeds=(8, 6), enforce=False,
     ),
     "clustered": Scenario(
         "clustered", "5 визитов на клиента, клиентский эффект (кластерный ДИ)",
@@ -139,7 +147,7 @@ def check(table: pd.DataFrame) -> list[str]:
         label = f"{r['scenario']}/{r['metric']}"
         if SCENARIOS[r["scenario"]].expect_flagged and r["unreliable_share"] < 0.3:
             problems.append(f"{label}: перекрытия нет, но ненадёжными помечено лишь {r['unreliable_share']:.0%}")
-        if r["trusted_runs"] < 5:
+        if r["trusted_runs"] < 5 or not SCENARIOS[r["scenario"]].enforce:
             continue
         if abs(r["bias"]) > 3 * r["bias_mcse"]:
             problems.append(f"{label}: смещение {r['bias']:.4g} больше 3 MCSE ({r['bias_mcse']:.4g})")

@@ -94,8 +94,9 @@ def _baseline_contributions(
     База — политика A из логов (``base_terms is None``): для всех оценщиков, кроме DM,
     её значение — средняя награда. Для DM — прогноз той же модели исхода на
     залогированных действиях, ``mean(mu(x_i, a_i))``: тогда Δ у DM — контраст двух
-    прогнозов одной модели, и её систематическая ошибка частично сокращается
-    (симуляции: убирает 0.5–0.8 смещения двухчастной модели).
+    прогнозов одной модели, и её систематическая ошибка частично сокращается. В
+    симуляциях доля убранного смещения зависела от пары политик (от нуля до ~0.45,
+    иногда с перелётом), а RMSE контраста не был хуже, чем у базы ``mean(r)``.
     """
     r = data.rewards[metric][idx]
     if base_terms is not None:
@@ -184,7 +185,7 @@ class Evaluator:
         if unknown:
             raise ValueError(f"lower_is_better содержит метрики, которых нет в reward: {unknown}")
         self.lower_is_better = frozenset(lower_is_better)
-        if isinstance(outcome_model, dict):
+        if isinstance(outcome_model, Mapping):
             extra = sorted(set(outcome_model) - set(self.data.reward_cols))
             if extra:
                 raise ValueError(f"outcome_model задан для метрик, которых нет в reward: {extra}")
@@ -640,6 +641,8 @@ class Evaluator:
                 ))
 
             primary_values = [v_b[i, m, e_primary], v_a[m, e_primary]]
+            if has_ci:
+                primary_values += [get("delta_low", m, e_primary), get("delta_high", m, e_primary)]
             if not np.all(np.isfinite(primary_values)):
                 metric_findings.append(Finding(
                     code="non_finite_estimate",
@@ -654,7 +657,7 @@ class Evaluator:
             low, high = get("delta_low", m, e_primary), get("delta_high", m, e_primary)
             if not has_ci:
                 decision = "not_computed"
-            elif trust == "unreliable":
+            elif trust == "unreliable" or not (np.isfinite(low) and np.isfinite(high)):
                 decision = "inconclusive"
             elif low is not None and low > 0:
                 decision = "worse" if metric in self.lower_is_better else "better"

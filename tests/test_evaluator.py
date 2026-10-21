@@ -221,3 +221,38 @@ def test_string_actions_and_categorical_features_end_to_end():
                       propensity="propensity", features=["x1", "x2", "segment"])
     assert rep.settings["actions"] == sorted(ACTIONS)
     assert "segment" in rep.settings["features"]
+
+
+class TestOutcomeCheckTargetsReportedDelta:
+    """Проверка DR − DM сравнивает именно те Δ, что показаны в таблице оценщиков."""
+
+    @pytest.mark.parametrize("with_baseline", [False, True])
+    def test_discrepancy_equals_difference_of_rows(self, bandit, evaluator, with_baseline):
+        baseline = bandit.policy_a if with_baseline else None
+        m = evaluator.evaluate(bandit.policy_b, baseline=baseline, inference="none")["reward"]
+        rows = m.estimators.set_index("estimator")["delta"]
+        check = {c.name: c for c in m.checks}["outcome"]
+        assert check.discrepancy == pytest.approx(rows["dr"] - rows["dm"], abs=1e-10)
+
+    def test_candidate_equal_to_logging_policy_gives_zero(self, bandit, evaluator):
+        m = evaluator.evaluate(bandit.policy_a, estimator="dm", inference="none")["reward"]
+        check = {c.name: c for c in m.checks}["outcome"]
+        assert check.discrepancy == pytest.approx(0.0, abs=1e-12)
+        assert "outcome_check_failed" not in {f.code for f in m.findings}
+
+
+def test_outlying_feature_does_not_break_revenue_estimates():
+    """Регрессия: выброс в доходе раздувал прогноз двухчастной модели до 1e6 и выше."""
+    from policyscope.synthetic import OfferSimulator
+
+    sim = OfferSimulator(seed=5)
+    clients = sim.sample_clients(3000)
+    clients.loc[0, "income"] = clients["income"].max() * 5
+    a, b = sim.policy("epsilon_greedy", epsilon=0.2, seed=1), sim.policy("softmax", seed=2)
+    logs = sim.simulate(clients, a)
+    truth = sim.true_value(logs, b, "revenue") - sim.true_value(logs, a, "revenue")
+    m = ps.evaluate(logs, b, action="offer", reward="revenue", propensity="propensity",
+                    features=["age", "income", "loyal", "risk", "region"])["revenue"]
+    rows = m.estimators.set_index("estimator")["delta"]
+    assert abs(rows["dr"] - truth) < 4 * m.delta.se
+    assert abs(rows["dm"] - truth) < 10

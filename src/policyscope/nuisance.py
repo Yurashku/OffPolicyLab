@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -63,7 +64,7 @@ class NuisanceConfig:
 
     def model_for(self, metric: str) -> Any:
         """Пользовательская модель исхода для метрики или ``None`` (модель по умолчанию)."""
-        if isinstance(self.outcome_model, dict):
+        if isinstance(self.outcome_model, Mapping):
             return self.outcome_model.get(metric)
         return self.outcome_model
 
@@ -295,6 +296,10 @@ def fit_nuisance(
 def _fit_nuisance(
     data: LogData, config: NuisanceConfig, *, seed: int, positions: Optional[np.ndarray]
 ) -> Nuisance:
+    if isinstance(config.outcome_model, Mapping):
+        extra = sorted(set(config.outcome_model) - set(data.reward_cols))
+        if extra:
+            raise ValueError(f"outcome_model задан для метрик, которых нет в reward: {extra}")
     start = time.perf_counter()
     idx = np.arange(data.n) if positions is None else np.asarray(positions)
     X = data.X[idx]
