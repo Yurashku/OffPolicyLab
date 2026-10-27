@@ -1,425 +1,344 @@
-"""Internal nuisance-model helpers for OPE estimators and diagnostics."""
+"""Nuisance-модели: пропенсити ``pi_A(a|x)`` и модель исхода ``mu(x, a)``.
+
+Обе модели **не зависят от оцениваемой политики B**, поэтому обучаются один раз и
+переиспользуются для любого числа кандидатов.
+
+Обе всегда считаются **out-of-fold** (cross-fitting): прогноз для строки делает
+модель, которая эту строку не видела. In-sample прогнозы систематически подстроены
+под шум данных: гибкая модель пропенсити «запоминает» залогированные действия и
+сжимает веса, а модель исхода занижает остатки, на которых держится DR.
+
+Оценённые пропенсити дополнительно ограничиваются снизу **полом для каждого
+действия** ``floor_a = propensity_floor * доля действия a в логах``. Без пола
+модель, не воспроизводящая ступенчатую логирующую политику (ε-greedy), выдаёт
+пропенсити порядка 1e-4 там, где на деле 0.05, и единичные веса в тысячи определяют
+всю оценку.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Literal, Optional, Sequence
+import time
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any, Optional
 
 import numpy as np
-import pandas as pd
-from sklearn.model_selection import KFold
+from sklearn.base import BaseEstimator, RegressorMixin, clone
+from sklearn.linear_model import GammaRegressor, LogisticRegression, Ridge
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+from threadpoolctl import threadpool_limits
 
-PropensitySource = Literal["auto", "logged", "estimated"]
+from policyscope.data import LogData
 
-from policyscope.estimators import (
-    mu_hat_predict,
-    pi_hat_predict,
-    prepare_piB_taken,
-    train_mu_hat,
-    train_pi_hat,
-)
-
-
-@dataclass(frozen=True)
-class BehaviorPredictions:
-    """Precomputed behavior-side nuisance predictions aligned with ``df`` rows."""
-
-    pA_taken: np.ndarray
-    piB_taken: np.ndarray
-    pA_all: Optional[np.ndarray] = None
-    is_out_of_fold: bool = False
-    fold_index: Optional[np.ndarray] = None
-    propensity_source: Optional[str] = None
-    propensity_col: Optional[str] = None
-    action_space: Optional[tuple[object, ...]] = None
+__all__ = [
+    "NuisanceConfig",
+    "Nuisance",
+    "TwoPartRegressor",
+    "make_folds",
+    "fit_nuisance",
+    "outcome_design",
+    "outcome_kind",
+]
 
 
 @dataclass(frozen=True)
-class OutcomePredictions:
-    """Precomputed outcome predictions aligned with ``df`` rows."""
+class NuisanceConfig:
+    """Настройки nuisance-моделей.
 
-    mu_logged_action: np.ndarray
-    mu_by_action: Optional[dict[object, np.ndarray]] = None
-    target: Optional[str] = None
-    is_out_of_fold: bool = False
-    fold_index: Optional[np.ndarray] = None
+    Attributes:
+        propensity_model: sklearn-классификатор с ``predict_proba`` для ``pi_A(a|x)``.
+            ``None`` — мультиномиальная логистическая регрессия.
+        outcome_model: sklearn-модель для ``mu(x, a)`` или словарь «метрика -> модель»;
+            получает признаки, one-hot действия и их попарные произведения. ``None`` (или
+            метрика, отсутствующая в словаре) — модель по умолчанию, см. :func:`outcome_kind`.
+        n_folds: Число фолдов cross-fitting.
+        propensity_floor: Доля от частоты действия, ниже которой оценённое пропенсити
+            не опускается. Применяется только к оценённым пропенсити.
+    """
+
+    propensity_model: Any = None
+    outcome_model: Any = None
+    n_folds: int = 5
+    propensity_floor: float = 0.1
+
+    def model_for(self, metric: str) -> Any:
+        """Пользовательская модель исхода для метрики или ``None`` (модель по умолчанию)."""
+        if isinstance(self.outcome_model, Mapping):
+            return self.outcome_model.get(metric)
+        return self.outcome_model
+
+    def __post_init__(self) -> None:
+        if self.n_folds < 2:
+            raise ValueError("n_folds должен быть не меньше 2")
+        if not 0.0 < self.propensity_floor < 1.0:
+            raise ValueError("propensity_floor должен лежать в (0, 1)")
 
 
 @dataclass(frozen=True)
-class CrossFitNuisanceBundle:
-    """Container for fold-aware nuisance predictions for future cross-fitting."""
+class Nuisance:
+    """Out-of-fold прогнозы nuisance-моделей, выровненные по строкам выборки.
 
-    behavior: Optional[BehaviorPredictions] = None
-    outcome: Optional[OutcomePredictions] = None
-    n_splits: Optional[int] = None
-    notes: tuple[str, ...] = field(default_factory=tuple)
+    Attributes:
+        p_taken: Пропенсити залогированного действия, используемые в весах
+            (для оценённых — с полом).
+        source: ``"logged"`` или ``"estimated"``.
+        p_raw: Оценённое пропенсити без пола (только для оценённых).
+        p_max: Максимальная оценённая вероятность по действиям — признак
+            детерминированности A (только для оценённых).
+        floor: Пол для каждого действия ``(k,)`` (только для оценённых).
+        unseen_share: Доля строк, чьё действие не встретилось в обучающем фолде.
+        mu: Метрика -> прогнозы ``(n, k)``.
+        fit_seconds: Время обучения (для прогноза длительности bootstrap).
+    """
+
+    p_taken: np.ndarray
+    source: str
+    p_raw: Optional[np.ndarray]
+    p_max: Optional[np.ndarray]
+    floor: Optional[np.ndarray]
+    unseen_share: float
+    mu: dict[str, np.ndarray]
+    fit_seconds: float
+
+    def floored(self, a: np.ndarray, factor: float) -> np.ndarray:
+        """Пропенсити с полом, умноженным на ``factor`` (анализ чувствительности)."""
+        if self.source != "estimated":
+            return self.p_taken
+        assert self.p_raw is not None and self.floor is not None
+        return np.maximum(self.p_raw, factor * self.floor[a])
 
 
-@dataclass(frozen=True)
-class BehaviorNuisanceBundle:
-    """Behavior-side fitted objects reused across estimators/diagnostics."""
-
-    pi_model: object
-    predictions: BehaviorPredictions
+def _default_propensity_model():
+    return make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000))
 
 
-@dataclass(frozen=True)
-class OutcomeNuisanceBundle:
-    """Outcome-model fitted object reused by DM/DR-family estimators."""
+class TwoPartRegressor(RegressorMixin, BaseEstimator):
+    """Модель неотрицательной награды с нулями: ``E[r|z] = P(r > 0|z) · E[r | r > 0, z]``.
 
-    mu_model: object
+    Первая часть — логистическая регрессия, вторая — Gamma-GLM с log-связью на строках с
+    ``r > 0``. Так устроены выручка, сумма покупки, LTV: чаще всего ноль, иначе
+    положительная величина с длинным хвостом. Линейная модель на таких данных выдаёт
+    отрицательные прогнозы, а их обрезка смещает оценку DM на величину порядка его
+    стандартной ошибки — это показали симуляции (см. docs/estimators.md).
+
+    Прогноз положительной части не превышает наблюдённый максимум ``r``. Log-связь
+    экстраполирует экспоненциально, и в областях без данных (слабое перекрытие) прогноз
+    без ограничения уходит в разы выше любого наблюдения: в симуляциях это смещало и DM,
+    и DR. Ограничение действует только там, где модель экстраполирует.
+
+    Args:
+        C: Обратная сила L2-штрафа логистической части (как в ``LogisticRegression``).
+            Штраф Gamma-части согласован с ним: ``alpha = 1 / (C · n_pos)``.
+    """
+
+    def __init__(self, C: float = 1.0) -> None:
+        self.C = C
+
+    def fit(self, X, y):
+        X = np.asarray(X, dtype=float)
+        y = np.asarray(y, dtype=float)
+        if (y < 0).any():
+            raise ValueError("TwoPartRegressor ожидает неотрицательную награду")
+        self.scaler_ = StandardScaler().fit(X)
+        Z = self.scaler_.transform(X)
+        positive = y > 0
+        n_pos = int(positive.sum())
+        self.p_const_ = float(positive.mean())
+        self.classifier_ = None
+        if 0 < n_pos < len(y):
+            self.classifier_ = LogisticRegression(C=self.C, max_iter=1000).fit(Z, positive)
+        self.m_const_ = float(y[positive].mean()) if n_pos else 0.0
+        self.cap_ = float(y.max())
+        self.regressor_ = None
+        if n_pos >= 10:
+            self.regressor_ = GammaRegressor(
+                alpha=1.0 / (self.C * n_pos), solver="newton-cholesky", max_iter=300,
+            ).fit(Z[positive], y[positive])
+        return self
+
+    def predict(self, X):
+        Z = self.scaler_.transform(np.asarray(X, dtype=float))
+        p = (self.classifier_.predict_proba(Z)[:, 1] if self.classifier_ is not None
+             else np.full(len(Z), self.p_const_))
+        m = self.regressor_.predict(Z) if self.regressor_ is not None else np.full(len(Z), self.m_const_)
+        return p * np.minimum(m, self.cap_)
 
 
+def outcome_kind(r: np.ndarray, binary: bool) -> str:
+    """Тип модели исхода по умолчанию для вектора наград.
+
+    - ``binary`` — логистическая регрессия;
+    - ``two_part`` — неотрицательная награда, где заметная доля нулей (выручка):
+      :class:`TwoPartRegressor`;
+    - ``linear`` — иначе: Ridge.
+    """
+    if binary:
+        return "binary"
+    if (r >= 0).all() and np.mean(r == 0) >= 0.05 and np.sum(r > 0) >= 20:
+        return "two_part"
+    return "linear"
 
 
-def _take_logged_probabilities_with_safe_default(
-    probs: np.ndarray,
-    actions: np.ndarray,
-    *,
-    action_space: Sequence,
-    eps: float = 1e-6,
+OUTCOME_KIND_LABELS = {
+    "binary": "LogisticRegression",
+    "two_part": "двухчастная: LogisticRegression × GammaRegressor (log)",
+    "linear": "Ridge",
+}
+
+
+def _default_outcome_model(kind: str):
+    if kind == "binary":
+        return make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000))
+    if kind == "two_part":
+        return TwoPartRegressor()
+    return make_pipeline(StandardScaler(), Ridge(alpha=1.0))
+
+
+def make_folds(groups: np.ndarray, n_folds: int, rng: np.random.Generator) -> np.ndarray:
+    """Номер фолда для каждой строки; все строки одной группы — в одном фолде.
+
+    Группа — кластер (клиент) или, в bootstrap-реплике, исходная строка: копии одной
+    строки не должны попадать одновременно в обучение и в прогноз.
+    """
+    unique_groups, group_of_row = np.unique(groups, return_inverse=True)
+    n_groups = len(unique_groups)
+    if n_groups < n_folds:
+        raise ValueError(f"Групп ({n_groups}) меньше, чем фолдов ({n_folds})")
+    fold_of_group = rng.permutation(n_groups) % n_folds
+    return fold_of_group[group_of_row]
+
+
+def outcome_design(X: np.ndarray, a: np.ndarray, k: int) -> np.ndarray:
+    """Дизайн-матрица модели исхода: ``[x, onehot(a), x * onehot(a)]``.
+
+    Блок произведений даёт каждому действию собственные наклоны: без него модель
+    отличает действия только сдвигом и не может выразить, что оффер работает по-разному
+    для разных клиентов.
+    """
+    onehot = np.zeros((len(a), k))
+    onehot[np.arange(len(a)), a] = 1.0
+    inter = (X[:, :, None] * onehot[:, None, :]).reshape(len(a), -1)
+    return np.hstack([X, onehot, inter])
+
+
+def _propensity_oof(
+    X: np.ndarray, a: np.ndarray, k: int, folds: np.ndarray, n_folds: int, model: Any
+) -> tuple[np.ndarray, int]:
+    probs = np.zeros((len(a), k))
+    unseen = 0
+    for f in range(n_folds):
+        train, hold = folds != f, folds == f
+        classes = np.unique(a[train])
+        if len(classes) == 1:
+            probs[np.ix_(hold, classes)] = 1.0
+        else:
+            fitted = clone(model).fit(X[train], a[train])
+            probs[np.ix_(hold, np.asarray(fitted.classes_, dtype=int))] = fitted.predict_proba(X[hold])
+        unseen += int(np.sum(~np.isin(a[hold], classes)))
+    return probs, unseen
+
+
+def _outcome_oof(
+    X: np.ndarray, a: np.ndarray, r: np.ndarray, k: int, binary: bool,
+    folds: np.ndarray, n_folds: int, model: Any, kind: str,
 ) -> np.ndarray:
-    idx_map = {a: i for i, a in enumerate(action_space)}
-    out = np.full(len(actions), eps, dtype=float)
-    for i, action in enumerate(actions):
-        idx = idx_map.get(action)
-        if idx is not None:
-            out[i] = probs[i, idx]
-    return out
-
-def _validate_length(name: str, values: np.ndarray, n: int) -> None:
-    if len(values) != n:
-        raise ValueError(f"{name} must have length {n}, got {len(values)}")
-
-
-def fit_behavior_nuisance_bundle(
-    df: pd.DataFrame,
-    policyB,
-    *,
-    feature_cols: Optional[Sequence[str]] = None,
-    action_col: str = "a_A",
-    action_space: Optional[Sequence] = None,
-    target_col: Optional[str] = None,
-    propensity_col: Optional[str] = None,
-    cluster_col: Optional[str] = None,
-) -> BehaviorNuisanceBundle:
-    """Fit behavior model and derive reusable propensity vectors."""
-    pi_model = train_pi_hat(
-        df,
-        feature_cols=feature_cols,
-        action_col=action_col,
-        target_col=target_col,
-        propensity_col=propensity_col,
-        cluster_col=cluster_col,
-    )
-    pA_all = pi_hat_predict(pi_model, df)
-    pA_taken = _take_logged_probabilities_with_safe_default(
-        pA_all,
-        df[action_col].to_numpy(),
-        action_space=pi_model.classes_,
-    )
-    piB_taken = prepare_piB_taken(df, policyB, action_col=action_col, action_space=action_space)
-    preds = BehaviorPredictions(
-        pA_taken=pA_taken,
-        piB_taken=piB_taken,
-        pA_all=pA_all,
-        propensity_source="estimated",
-        action_space=tuple(pi_model.classes_),
-    )
-    return BehaviorNuisanceBundle(pi_model=pi_model, predictions=preds)
-
-
-def fit_outcome_nuisance_bundle(
-    df: pd.DataFrame,
-    *,
-    target: str,
-    feature_cols: Optional[Sequence[str]] = None,
-    action_col: str = "a_A",
-) -> OutcomeNuisanceBundle:
-    """Fit reusable outcome model for DM/DR-family estimators."""
-    mu_model = train_mu_hat(df, target=target, feature_cols=feature_cols, action_col=action_col)
-    return OutcomeNuisanceBundle(mu_model=mu_model)
-
-
-def make_kfold_indices(
-    n_samples: int,
-    *,
-    n_splits: int = 5,
-    shuffle: bool = True,
-    random_state: int = 123,
-) -> list[tuple[np.ndarray, np.ndarray]]:
-    """Create train/holdout indices for fold-based nuisance prediction."""
-    if n_splits < 2:
-        raise ValueError("n_splits must be at least 2")
-    kf = KFold(n_splits=n_splits, shuffle=shuffle, random_state=random_state)
-    idx = np.arange(n_samples)
-    return [(train_idx, holdout_idx) for train_idx, holdout_idx in kf.split(idx)]
-
-
-def generate_oof_behavior_predictions(
-    df: pd.DataFrame,
-    policyB,
-    *,
-    n_splits: int = 5,
-    random_state: int = 123,
-    feature_cols: Optional[Sequence[str]] = None,
-    action_col: str = "a_A",
-    action_space: Optional[Sequence] = None,
-    target_col: Optional[str] = None,
-    propensity_col: Optional[str] = None,
-    cluster_col: Optional[str] = None,
-) -> BehaviorPredictions:
-    """Generate out-of-fold behavior predictions aligned to the original rows."""
-    n = len(df)
-    pA_taken = np.zeros(n, dtype=float)
-    piB_taken = np.zeros(n, dtype=float)
-    fold_index = np.full(n, -1, dtype=int)
-
-    for fold_id, (train_idx, holdout_idx) in enumerate(
-        make_kfold_indices(n, n_splits=n_splits, random_state=random_state)
-    ):
-        train_df = df.iloc[train_idx]
-        holdout_df = df.iloc[holdout_idx]
-
-        pi_model = train_pi_hat(
-            train_df,
-            feature_cols=feature_cols,
-            action_col=action_col,
-            target_col=target_col,
-            propensity_col=propensity_col,
-            cluster_col=cluster_col,
+    mu = np.zeros((len(a), k))
+    base = model if model is not None else _default_outcome_model(kind)
+    for f in range(n_folds):
+        train, hold = folds != f, folds == f
+        n_hold = int(hold.sum())
+        r_train = r[train]
+        if np.unique(r_train).size < 2:
+            mu[hold] = float(r_train.mean())
+            continue
+        fitted = clone(base).fit(outcome_design(X[train], a[train], k), r_train)
+        stacked = np.vstack([
+            outcome_design(X[hold], np.full(n_hold, j), k) for j in range(k)
+        ])
+        if binary and hasattr(fitted, "predict_proba"):
+            pred = fitted.predict_proba(stacked)[:, 1]
+        else:
+            pred = fitted.predict(stacked)
+            if binary:  # регрессор на бинарной награде: прогноз — вероятность
+                pred = np.clip(pred, 0.0, 1.0)
+        # Непрерывные прогнозы не обрезаются: обрезка по [min r, max r] смещает DM.
+        mu[hold] = np.asarray(pred, dtype=float).reshape(k, n_hold).T
+    if not np.isfinite(mu).all():
+        raise ValueError(
+            "Модель исхода выдала нечисловые прогнозы (inf/NaN). Проверьте признаки на выбросы "
+            "или задайте более устойчивую outcome_model."
         )
-        pA_all_holdout = pi_hat_predict(pi_model, holdout_df)
-        pA_taken_holdout = _take_logged_probabilities_with_safe_default(
-            pA_all_holdout,
-            holdout_df[action_col].to_numpy(),
-            action_space=pi_model.classes_,
+    return mu
+
+
+def fit_nuisance(
+    data: LogData,
+    config: NuisanceConfig,
+    *,
+    seed: int,
+    positions: Optional[np.ndarray] = None,
+) -> Nuisance:
+    """Обучает nuisance-модели out-of-fold на всей выборке или на bootstrap-реплике.
+
+    Args:
+        data: Подготовленные логи.
+        config: Настройки моделей.
+        seed: Зерно разбиения на фолды.
+        positions: Позиции строк реплики; ``None`` — вся выборка.
+    """
+    # Многопоточный BLAS на небольших матрицах в разы медленнее однопоточного,
+    # а параллелизм у bootstrap и так есть на уровне реплик.
+    with threadpool_limits(limits=1, user_api="blas"):
+        return _fit_nuisance(data, config, seed=seed, positions=positions)
+
+
+def _fit_nuisance(
+    data: LogData, config: NuisanceConfig, *, seed: int, positions: Optional[np.ndarray]
+) -> Nuisance:
+    if isinstance(config.outcome_model, Mapping):
+        extra = sorted(set(config.outcome_model) - set(data.reward_cols))
+        if extra:
+            raise ValueError(f"outcome_model задан для метрик, которых нет в reward: {extra}")
+    start = time.perf_counter()
+    idx = np.arange(data.n) if positions is None else np.asarray(positions)
+    X = data.X[idx]
+    if X.shape[1] == 0:  # оценка без контекста
+        X = np.zeros((len(idx), 1))
+    a = data.a[idx]
+    k = data.k
+    groups = data.clusters[idx] if data.is_clustered else idx
+    folds = make_folds(groups, config.n_folds, np.random.default_rng(seed))
+
+    unseen = 0
+    if data.propensity is not None:
+        p_taken = data.propensity[idx]
+        source, p_raw, p_max, floor = "logged", None, None, None
+    else:
+        model = config.propensity_model or _default_propensity_model()
+        probs, unseen = _propensity_oof(X, a, k, folds, config.n_folds, model)
+        rows = np.arange(len(a))
+        p_raw = probs[rows, a]
+        p_max = probs.max(axis=1)
+        floor = config.propensity_floor * np.bincount(a, minlength=k) / len(a)
+        p_taken = np.maximum(p_raw, floor[a])
+        source = "estimated"
+
+    mu = {
+        metric: _outcome_oof(
+            X, a, data.rewards[metric][idx], k, data.binary[metric],
+            folds, config.n_folds, config.model_for(metric),
+            outcome_kind(data.rewards[metric], data.binary[metric]),
         )
-        piB_taken_holdout = prepare_piB_taken(
-            holdout_df,
-            policyB,
-            action_col=action_col,
-            action_space=action_space,
-        )
-
-        pA_taken[holdout_idx] = pA_taken_holdout
-        piB_taken[holdout_idx] = piB_taken_holdout
-        fold_index[holdout_idx] = fold_id
-
-    return BehaviorPredictions(
-        pA_taken=pA_taken,
-        piB_taken=piB_taken,
-        pA_all=None,
-        is_out_of_fold=True,
-        fold_index=fold_index,
-        propensity_source="estimated",
-    )
-
-
-def generate_oof_outcome_predictions(
-    df: pd.DataFrame,
-    *,
-    target: str,
-    n_splits: int = 5,
-    random_state: int = 123,
-    feature_cols: Optional[Sequence[str]] = None,
-    action_col: str = "a_A",
-    requested_actions: Optional[Sequence] = None,
-) -> OutcomePredictions:
-    """Generate out-of-fold outcome predictions for logged and optional requested actions."""
-    n = len(df)
-    mu_logged = np.zeros(n, dtype=float)
-    fold_index = np.full(n, -1, dtype=int)
-    mu_by_action: dict[object, np.ndarray] = {}
-    if requested_actions is not None:
-        mu_by_action = {a: np.zeros(n, dtype=float) for a in requested_actions}
-
-    for fold_id, (train_idx, holdout_idx) in enumerate(
-        make_kfold_indices(n, n_splits=n_splits, random_state=random_state)
-    ):
-        train_df = df.iloc[train_idx]
-        holdout_df = df.iloc[holdout_idx]
-        mu_model = train_mu_hat(train_df, target=target, feature_cols=feature_cols, action_col=action_col)
-
-        logged_actions = holdout_df[action_col].to_numpy()
-        mu_logged[holdout_idx] = mu_hat_predict(mu_model, holdout_df, logged_actions, target)
-        for action, values in mu_by_action.items():
-            values[holdout_idx] = mu_hat_predict(mu_model, holdout_df, np.full(len(holdout_df), action, dtype=object), target)
-        fold_index[holdout_idx] = fold_id
-
-    return OutcomePredictions(
-        mu_logged_action=mu_logged,
-        mu_by_action=mu_by_action or None,
-        target=target,
-        is_out_of_fold=True,
-        fold_index=fold_index,
-    )
-
-
-
-
-def _validate_logged_propensity_values(p: pd.Series, col: str) -> None:
-    if p.isna().any():
-        raise ValueError(f"Propensity column '{col}' contains NaN values")
-    invalid = (~((p > 0.0) & (p <= 1.0))).any()
-    if invalid:
-        raise ValueError(f"Propensity column '{col}' must be in (0, 1]")
-
-
-def build_logged_behavior_predictions(
-    df: pd.DataFrame,
-    policyB,
-    *,
-    propensity_col: str,
-    action_col: str = "a_A",
-    action_space: Optional[Sequence] = None,
-) -> BehaviorPredictions:
-    """Build behavior predictions from logged propensity column."""
-    if propensity_col not in df.columns:
-        raise ValueError(f"Missing propensity column: {propensity_col}")
-    _validate_logged_propensity_values(df[propensity_col], propensity_col)
-    piB_taken = prepare_piB_taken(df, policyB, action_col=action_col, action_space=action_space)
-    return BehaviorPredictions(
-        pA_taken=df[propensity_col].to_numpy(dtype=float),
-        piB_taken=piB_taken,
-        propensity_source="logged",
-        propensity_col=propensity_col,
-    )
-
-
-def resolve_behavior_predictions(
-    df: pd.DataFrame,
-    policyB,
-    *,
-    propensity_source: PropensitySource = "auto",
-    propensity_col: Optional[str] = None,
-    feature_cols: Optional[Sequence[str]] = None,
-    action_col: str = "a_A",
-    action_space: Optional[Sequence] = None,
-    target_col: Optional[str] = None,
-    cluster_col: Optional[str] = None,
-) -> tuple[BehaviorPredictions, str, Optional[str], tuple[str, ...]]:
-    """Resolve behavior predictions from logged or estimated propensity path."""
-    notes: list[str] = []
-    if propensity_source == "logged":
-        if propensity_col is None:
-            raise ValueError("propensity_source='logged' requires propensity_col")
-        preds = build_logged_behavior_predictions(
-            df,
-            policyB,
-            propensity_col=propensity_col,
-            action_col=action_col,
-            action_space=action_space,
-        )
-        return preds, "logged", propensity_col, tuple(notes)
-
-    if propensity_source == "estimated":
-        bundle = fit_behavior_nuisance_bundle(
-            df,
-            policyB,
-            feature_cols=feature_cols,
-            action_col=action_col,
-            action_space=action_space,
-            target_col=target_col,
-            propensity_col=propensity_col,
-            cluster_col=cluster_col,
-        )
-        notes.append("estimated_propensity_from_behavior_model")
-        return bundle.predictions, "estimated", None, tuple(notes)
-
-    # auto
-    if propensity_col is not None and propensity_col in df.columns:
-        try:
-            preds = build_logged_behavior_predictions(
-                df,
-                policyB,
-                propensity_col=propensity_col,
-                action_col=action_col,
-                action_space=action_space,
-            )
-            notes.append("auto_selected_logged_propensity")
-            return preds, "logged", propensity_col, tuple(notes)
-        except ValueError:
-            notes.append("logged_propensity_invalid_fallback_to_estimated")
-
-    if propensity_col is None or propensity_col not in df.columns:
-        notes.append("logged_propensity_missing_fallback_to_estimated")
-    bundle = fit_behavior_nuisance_bundle(
-        df,
-        policyB,
-        feature_cols=feature_cols,
-        action_col=action_col,
-        action_space=action_space,
-        target_col=target_col,
-        propensity_col=propensity_col,
-        cluster_col=cluster_col,
-    )
-    return bundle.predictions, "estimated", None, tuple(notes)
-
-def validate_behavior_predictions(predictions: BehaviorPredictions, n: int) -> None:
-    """Validate that precomputed behavior predictions align with current data length."""
-    _validate_length("pA_taken", predictions.pA_taken, n)
-    _validate_length("piB_taken", predictions.piB_taken, n)
-
-
-def validate_outcome_predictions(
-    predictions: OutcomePredictions,
-    n: int,
-    *,
-    required_actions: Optional[Sequence] = None,
-) -> None:
-    """Validate that precomputed outcome predictions align with current data length."""
-    _validate_length("mu_logged_action", predictions.mu_logged_action, n)
-    if required_actions is None:
-        return
-    if predictions.mu_by_action is None:
-        raise ValueError("Outcome predictions must include mu_by_action for DM/DR-family cross-fitting path")
-    for action in required_actions:
-        if action not in predictions.mu_by_action:
-            raise ValueError(f"Outcome predictions missing action {action}")
-        _validate_length(f"mu_by_action[{action}]", predictions.mu_by_action[action], n)
-
-
-def fit_crossfit_nuisance_bundle(
-    df: pd.DataFrame,
-    policyB,
-    *,
-    target: str,
-    n_splits: int = 5,
-    random_state: int = 123,
-    feature_cols: Optional[Sequence[str]] = None,
-    action_col: str = "a_A",
-    action_space: Optional[Sequence] = None,
-    propensity_col: Optional[str] = None,
-    cluster_col: Optional[str] = None,
-) -> CrossFitNuisanceBundle:
-    """Fit OOF nuisance predictions and return a single structured bundle."""
-    probsB = policyB.action_probs(df)
-    actions = list(action_space) if action_space is not None else list(range(probsB.shape[1]))
-    behavior = generate_oof_behavior_predictions(
-        df,
-        policyB,
-        n_splits=n_splits,
-        random_state=random_state,
-        feature_cols=feature_cols,
-        action_col=action_col,
-        action_space=action_space,
-        target_col=target,
-        propensity_col=propensity_col,
-        cluster_col=cluster_col,
-    )
-    outcome = generate_oof_outcome_predictions(
-        df,
-        target=target,
-        n_splits=n_splits,
-        random_state=random_state,
-        feature_cols=feature_cols,
-        action_col=action_col,
-        requested_actions=actions,
-    )
-    return CrossFitNuisanceBundle(
-        behavior=behavior,
-        outcome=outcome,
-        n_splits=n_splits,
-        notes=("oof_crossfit_bundle",),
+        for metric in data.reward_cols
+    }
+    return Nuisance(
+        p_taken=p_taken,
+        source=source,
+        p_raw=p_raw,
+        p_max=p_max,
+        floor=floor,
+        unseen_share=unseen / len(a),
+        mu=mu,
+        fit_seconds=time.perf_counter() - start,
     )

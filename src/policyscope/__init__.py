@@ -1,27 +1,44 @@
+"""Policyscope — офлайн-оценка политик рекомендаций по логам (off-policy evaluation).
+
+Задача: по логам работающей политики **A** понять, что даст политика-кандидат **B**,
+без онлайн A/B-теста — с доверительным интервалом и честным ответом на вопрос,
+можно ли этой оценке верить.
+
+Быстрый старт::
+
+    import policyscope as ps
+
+    ev = ps.Evaluator(logs, action="offer", reward=["accepted", "revenue"],
+                      propensity="propensity", cluster="client_id")
+    report = ev.evaluate(policy_b)   # DataFrame вероятностей: колонки — офферы
+    report                           # в Jupyter рендерится отчётом
 """
-Policyscope package.
 
-Предоставляет инструменты для оффлайн‑оценки рекомендационных моделей,
-включая генерацию синтетических данных, определение политик и реализацию
-оценщиков (IPS, SNIPS, DM, DR, SNDR, Switch-DR) с доверительными интервалами.
+from __future__ import annotations
 
-Версия пакета определяется переменной `__version__`.
-"""
+import logging
 
-from policyscope.comparison import (
-    RECOMMENDED_CROSSFIT_ESTIMATORS,
-    RECOMMENDED_ESTIMATOR,
-    RECOMMENDED_PROPENSITY_SOURCE_FALLBACK,
-    RECOMMENDED_PROPENSITY_SOURCE_WITH_LOGGED,
-)
+from policyscope import synthetic
+from policyscope.diagnostics import Finding, Thresholds
+from policyscope.evaluator import Evaluator, evaluate
+from policyscope.policy import epsilon_greedy, greedy, softmax
+from policyscope.report import Leaderboard, MetricReport, Report
 
+logging.getLogger(__name__).addHandler(logging.NullHandler())
+
+__version__ = "0.3.0"
 
 __all__ = [
     "__version__",
-    "RECOMMENDED_ESTIMATOR",
-    "RECOMMENDED_PROPENSITY_SOURCE_WITH_LOGGED",
-    "RECOMMENDED_PROPENSITY_SOURCE_FALLBACK",
-    "RECOMMENDED_CROSSFIT_ESTIMATORS",
+    "Evaluator",
+    "evaluate",
+    "Report",
+    "MetricReport",
+    "Leaderboard",
+    "Finding",
+    "Thresholds",
+    "greedy",
+    "softmax",
+    "epsilon_greedy",
+    "synthetic",
 ]
-
-__version__ = "0.1.0"

@@ -1,0 +1,107 @@
+name: release
+
+# Публикация по тегу вида v0.3.0: сборка → TestPyPI → PyPI → GitHub Release.
+# Публикация через Trusted Publishing (без токенов); разовая настройка — в RELEASING.md.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Tag matches the package version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'EOF'
+          import os, pathlib, re, sys
+          text = pathlib.Path("src/policyscope/__init__.py").read_text(encoding="utf-8")
+          version = re.search(r'__version__ = "([^"]+)"', text).group(1)
+          tag = os.environ["TAG"].removeprefix("v")
+          sys.exit(0 if version == tag else f"tag v{tag} does not match __version__ {version}")
+          EOF
+      - name: Build
+        run: |
+          python -m pip install build twine
+          python -m build
+          python -m twine check --strict dist/*
+      - name: Smoke test of the wheel
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/python -m pip install dist/*.whl
+          cd /tmp && /tmp/smoke/bin/python - <<'EOF'
+          import policyscope as ps
+          sim = ps.synthetic.OfferSimulator(seed=0)
+          logs = sim.simulate(sim.sample_clients(2000), sim.policy("epsilon_greedy", epsilon=0.2, seed=1))
+          report = ps.evaluate(logs, sim.policy("softmax", seed=2), action="offer",
+                               reward="accepted", propensity="propensity")
+          print(repr(report))
+          EOF
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish-testpypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  publish-pypi:
+    needs: publish-testpypi
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Release notes from CHANGELOG
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'EOF'
+          import os, pathlib, re
+          version = os.environ["TAG"].removeprefix("v")
+          text = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
+          match = re.search(rf"^## {re.escape(version)}\b.*?$(.*?)(?=^## |\Z)", text, re.M | re.S)
+          pathlib.Path("notes.md").write_text(match.group(1).strip() if match else "", encoding="utf-8")
+          EOF
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" dist/* --title "policyscope ${{ github.ref_name }}" --notes-file notes.md

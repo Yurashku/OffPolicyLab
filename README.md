@@ -1,83 +1,266 @@
 # Policyscope
 
-Библиотека для **contextual bandit off-policy evaluation (OPE)**: оценка target/candidate policy **B** по логам behavior/logging policy **A**.
+[![CI](https://github.com/Yurashku/OffPolicyLab/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Yurashku/OffPolicyLab/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.10%E2%80%933.14-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
 
-Главные выходы сравнения: `V_A`, `V_B`, `Delta = V_B - V_A`, CI/p-value и diagnostics/trust metadata (включая `weight_ess_ratio`, replay overlap и warning flags).
+**Что будет, если заменить текущую политику A на кандидата B?** Policyscope отвечает на
+этот вопрос по логам одной только политики A — без онлайн A/B-теста. Это задача
+off-policy evaluation (OPE) для contextual bandit: выбор оффера, рекомендации, промо.
 
-## Быстрый навигатор
+На выходе — отчёт, а не просто число:
 
-### 1) Я хочу запустить на своих данных
-- **Quickstart notebook (основной путь)**: `examples/quickstart_own_data_ru.ipynb`
-- Покрывает: `BanditSchema`, `LoggedBanditDataset`, `compare_policies(...)`, режимы propensity (logged/estimated/auto), чтение `Delta`, CI, `p_value`, diagnostics и `trust_level`.
-- Если у вас уже есть колонка `action_B`, используйте `policyscope.policy_adapters.DeterministicActionColumnPolicy`.
-
-### 2) Я хочу понять, как методы ведут себя относительно oracle
-- **Synthetic comparison notebook**: `examples/compare_estimators_vs_oracle_ru.ipynb`
-- Покрывает сравнение Replay / IPS / SNIPS / DM / DR / SNDR / Switch-DR в контролируемых synthetic-сценариях.
-
-### 3) Я хочу понять, когда OPE результату можно (и нельзя) доверять
-- **Практический интерпретационный гайд (RU)**: `docs/how_to_interpret_ope_outputs_ru.md`
-
-### 4) Я хочу понять устройство библиотеки
-- **Architecture doc**: `docs/architecture.md`
-
-### 5) Я хочу системно валидировать поведение оценщиков
-- **Validation harness doc**: `docs/validation_harness.md`
-
-## Установка
+- **оценка эффекта** по каждой метрике: Δ = V(B) − V(A), относительный прирост, доверительный
+  интервал, p-value с поправкой на множественность (Romano–Wolf);
+- **вывод**: «B лучше», «B хуже», «разница не обнаружена» (с минимальным обнаружимым эффектом) или
+  «вывод сделать нельзя»;
+- **вердикт доверия** с объяснением, почему оценке можно или нельзя верить на ваших данных, и
+  советом, что делать.
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-# или
-pip install -e .
+pip install git+https://github.com/Yurashku/OffPolicyLab
 ```
 
-## Что реализовано
+Нужен Python ≥ 3.10. После публикации на PyPI установка будет `pip install policyscope`.
 
-- Replay
-- IPS / SNIPS
-- DM
-- DR / SNDR / Switch-DR
-- Bootstrap inference (clustered и non-clustered)
-- Data contract слой: `BanditSchema`, `LoggedBanditDataset`
-
-
-Инференс significance в `compare_policies` опирается на **centered paired bootstrap** p-value для проверки **H0: Delta = 0**.
-
-## Официальный high-level entrypoint
+## Попробовать за минуту
 
 ```python
-from policyscope.comparison import compare_policies
+import policyscope as ps
 
-summary = compare_policies(
-    logged_dataset,
-    policyB,
-    estimator="dr",
-    target="accept",
-    propensity_source="auto",
+sim = ps.synthetic.OfferSimulator(seed=0)          # синтетический банк с известной истиной
+clients = sim.sample_clients(20_000)
+policy_a = sim.policy("epsilon_greedy", epsilon=0.2, seed=1)   # текущая политика
+policy_b = sim.policy("softmax", temperature=1.0, seed=2)      # кандидат
+logs = sim.simulate(clients, policy_a)              # логи A: offer, propensity, accepted, revenue
+
+report = ps.evaluate(
+    logs, policy_b,
+    action="offer", reward=["accepted", "revenue"], propensity="propensity",
 )
-
-print(summary.to_dict())
+report            # в Jupyter отчёт отрисуется сам; в консоли — print(report.to_markdown())
 ```
 
-## Про experiment runners (скрипты)
+Пошаговый разбор с проверкой против истины — в [`examples/tutorial.ipynb`](https://github.com/Yurashku/OffPolicyLab/blob/main/examples/tutorial.ipynb).
 
-Файлы в `examples/`:
-- `run_synthetic_experiment.py`
-- `run_validation_experiment.py`
+## На своих данных
 
-Это **script-like experiment runners** для пакетных прогонов/артефактов, а не основной обучающий путь. Для обучения и first-run используйте notebook'и из раздела «Быстрый навигатор».
+### 1. Логи политики A
 
-## Дополнительный tutorial
+Одна строка — одно решение A. Нужны колонки:
 
-- `examples/tutorial.ipynb` сохранён как расширенный walkthrough.
-- Для первого запуска рекомендуется `examples/quickstart_own_data_ru.ipynb`.
+| Что | Аргумент | Обязательно |
+|---|---|---|
+| Выбранное действие (любые метки: `"card"`, `17`, …) | `action=` | да |
+| Награда: одна метрика или список | `reward=` | да |
+| **Вероятность, с которой A выбрала это действие** | `propensity=` | очень желательно |
+| Единица наблюдения, если на неё несколько строк (клиент) | `cluster=` | если строки повторяются |
+| Признаки контекста | `features=` | по умолчанию — авто-выбор |
 
-Для multi-metric сценариев используйте `compare_policies_multi_target` (повторная scalar-оценка по нескольким target).
+Денежные признаки с длинным хвостом (доход, оборот) лучше логарифмировать заранее: модели исхода так
+проще, и оценки менее шумные.
 
-Propensity source modes: `auto`, `logged`, `estimated` (для взвешенных estimators).
+**Логируйте пропенсити.** Это самое дешёвое и самое действенное вложение в офлайн-оценку.
 
-Nuisance model diagnostics возвращаются в summary (`nuisance_diagnostics`) и дополняют overlap/weight diagnostics.
+| | С логированными пропенсити | Без них |
+|---|---|---|
+| Как получаем пропенсити | Берём как есть | Восстанавливаем моделью, ошибка модели входит в оценку |
+| Интервал | Аналитический, секунды | Bootstrap с переобучением моделей, минуты |
+| Доверие | Высокое | Не выше «с осторожностью» |
 
-Важно: OPE + diagnostics/trust metadata помогают с offline screening, но не являются автоматической заменой A/B-теста для high-stakes решений.
+Если A вообще не исследует (всегда выбирает одно действие в одном контексте), оценить по её
+логам можно только похожую на неё политику. Отчёт об этом скажет.
+
+### 2. Политика B
+
+Политика — это таблица вероятностей: строка — строка логов, **колонки — метки действий**.
+Порядок колонок не важен: сопоставление идёт по меткам.
+
+```python
+import pandas as pd
+
+scores = pd.DataFrame(model.predict_proba(logs[cols]), columns=model.classes_, index=logs.index)
+policy_b = ps.greedy(scores)                    # всегда лучшее действие
+policy_b = ps.softmax(scores, temperature=0.5)  # стохастически, по скорам
+policy_b = ps.epsilon_greedy(scores, epsilon=0.1)
+```
+
+Также подходят:
+
+- имя колонки логов с действием, которое выбрала бы B (детерминированная политика);
+- `Series` таких действий;
+- объект с методом `action_probs(df)`. Он вызывается один раз и не видит колонок награды и
+  пропенсити.
+
+> **Важно:** не оценивайте B на тех же логах, на которых её обучали, — оценка будет завышена.
+> Отложите для оценки отдельный (лучше более поздний по времени) период логов.
+
+### 3. Оценка
+
+```python
+ev = ps.Evaluator(
+    logs,
+    action="offer",
+    reward=["accepted", "revenue"],
+    propensity="propensity",
+    cluster="client_id",
+)
+report = ev.evaluate(policy_b)
+```
+
+**Что происходит при вызове:**
+
+1. Обучаются две вспомогательные модели. Модель пропенсити (если пропенсити не залогированы)
+   восстанавливает, как действует A. Модель исхода оценивает ожидаемую награду каждого действия.
+   - Обе считаются **out-of-fold**: прогноз для строки делает модель, которая эту строку не видела.
+   - Обе обучаются один раз на `Evaluator`. С аналитическим интервалом следующие кандидаты
+     считаются за доли секунды; с bootstrap каждый вызов переобучает модели на репликах.
+2. Из одних и тех же моделей считаются пять оценщиков:
+   - `dr` — основной по умолчанию;
+   - `sndr`, `ips`, `snips` — их можно выбрать основным через `estimator=`;
+   - `dm` — по умолчанию только для сверки. Явный выбор `estimator="dm"` обычно даёт самую точную оценку,
+     если модель исхода верна и оценена эффективно (для Ridge при гетероскедастичном шуме DM может
+     проиграть DR). Но её смещение по логам не проверяется. Разбор — в
+     [`docs/estimators.md`](https://github.com/Yurashku/OffPolicyLab/blob/main/docs/estimators.md).
+3. Строится доверительный интервал, по умолчанию `inference="auto"`:
+   - при логированных пропенсити — аналитический, с кластерно-робастной ошибкой;
+   - без них и при `estimator="dm"` — bootstrap с переобучением моделей. Аналитический интервал не
+     учитывает ошибку оценки пропенсити, а для DM — ошибку модели исхода.
+4. Проходит диагностика и формируется вердикт.
+
+### 4. Как читать отчёт
+
+```python
+report                         # полный отчёт (Jupyter)
+report.summary()               # DataFrame: строка на метрику
+report["revenue"].decision     # 'better' | 'worse' | 'no_difference' | 'inconclusive' | 'not_computed'
+report["revenue"].estimators   # DataFrame: все оценщики
+report.to_markdown()           # для Confluence / письма
+report.to_json("report.json")  # для пайплайна: стабильная схема, NaN -> null
+```
+
+- **Вывод** опирается на доверительный интервал для Δ.
+  - Если оценка ненадёжна, вывод не делается, как бы ни выглядел интервал.
+  - «Разница не обнаружена» не означает «разницы нет»: отчёт указывает, какой эффект был бы
+    обнаружен.
+- **p (RW)** — p-value с поправкой Romano–Wolf на все метрики отчёта. Она учитывает, что метрики
+  зависимы, и мощнее Бонферрони и Холма.
+- **Согласие оценщиков** — главная проверка доверия.
+  - IPS опирается только на пропенсити, DM — только на модель исхода, DR — на обе.
+  - Разность DR − IPS в среднем равна нулю при верных пропенсити; DR − DM — при верной модели
+    исхода. Отчёт проверяет обе.
+  - DR смещён, только если неверны обе модели.
+- **Перекрытие политик**:
+  - эффективный размер выборки;
+  - средний вес важности (при полном перекрытии он равен 1);
+  - таблица по действиям: доля в логах, доля у B, средний вес.
+
+## Несколько кандидатов и сравнение с прод-версией
+
+```python
+board = ev.compare({
+    "мягкий": ps.softmax(scores, temperature=1.0),
+    "жёсткий": ps.greedy(scores),
+})
+board                      # таблица кандидат × метрика, p-value Romano–Wolf на всё семейство
+board["жёсткий"]           # полный отчёт по кандидату
+
+# Если в логах A есть исследование, а в проде будет её жадная версия:
+report = ev.evaluate(policy_b, baseline=ps.greedy(scores_a), baseline_name="A (прод)")
+```
+
+Оценка лучшего из многих кандидатов систематически завышена (winner's curse). Подтвердите
+победителя на свежих логах или в A/B-тесте.
+
+## Когда оценке нельзя верить
+
+Основные находки (полный список кодов — в [методологии](https://github.com/Yurashku/OffPolicyLab/blob/main/docs/methodology.md#коды-находок)):
+
+| Находка | Что значит |
+|---|---|
+| `propensity_not_probability` | В колонке пропенсити не вероятность выбора действия: например, передали вероятность отклика. |
+| `deterministic_logging` | A почти не исследует, а B от неё отличается: данных о действиях B нет. |
+| `support_deficit` | Заметная часть массы B — там, где A не действует. Оценка экстраполирует. |
+| `critically_low_ess` | Оценка держится на нескольких строках с огромными весами. |
+| `both_models_rejected` | Неверны и пропенсити, и модель исхода: DR не защищён. |
+| `propensity_estimated` | Пропенсити восстановлены моделью. Доверие не выше «с осторожностью». |
+| `cluster_not_set` | Клиенты повторяются, но кластер не указан: интервал занижен. |
+| `outcome_like_features` | Признак почти идеально предсказывает награду. Похоже на утечку исхода. |
+
+Каждая находка в отчёте приходит с цифрами и советом. Пороги собраны в `ps.Thresholds`.
+
+Две предпосылки не проверяются по данным никаким методом:
+
+- все факторы, влиявшие и на выбор A, и на метрику, есть среди признаков;
+- B не обучалась на оцениваемых логах.
+
+## Когда OPE достаточно, а когда нужен A/B-тест
+
+Офлайн-оценки обычно достаточно:
+- чтобы отобрать кандидатов из многих и отсеять явно слабые;
+- чтобы приоритизировать гипотезы до онлайн-эксперимента;
+- когда решение легко откатить, а цена ошибки мала.
+
+Нужен A/B-тест:
+- перед внедрением победителя из многих кандидатов (winner's curse);
+- при вердикте «с осторожностью» или «ненадёжно», при слабом перекрытии и без логированных
+  пропенсити;
+- когда решение дорого или необратимо, а ожидаемый эффект сравним с шириной интервала;
+- когда есть основания подозревать ненаблюдаемые факторы, влиявшие на выбор A.
+
+«Значимо» в отчёте не означает «безопасно для раскатки»: интервал описывает статистический шум,
+но не нарушения предпосылок.
+
+## Настройка
+
+```python
+from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
+
+ev = ps.Evaluator(
+    logs, action="offer", reward=["revenue", "churn"],
+    propensity=None,                                   # пропенсити не залогированы — оцениваются
+    propensity_model=HistGradientBoostingClassifier(), # нужна, только когда propensity=None
+    outcome_model={"revenue": HistGradientBoostingRegressor()},  # своя модель для метрики
+    features=["age", "income", "region"],              # категории кодируются сами
+    lower_is_better=["churn"],                         # метрики, где меньше — лучше
+    n_folds=5, random_state=0, n_jobs=-1,
+)
+report = ev.evaluate(policy_b, estimator="sndr", n_boot=500, alpha=0.1)
+```
+
+С пользовательской моделью исхода DM нельзя выбрать основным: для гибких моделей у него нет
+валидного интервала. В таблице оценщиков он остаётся точкой для сверки.
+
+## Как проверена корректность
+
+Тестов, которые проверяют только, что код не падает, здесь почти нет. Корректность проверяется
+против известной истины. Тесты и сценарии валидации лежат в репозитории:
+
+```bash
+git clone https://github.com/Yurashku/OffPolicyLab && cd OffPolicyLab
+pip install -e ".[dev]"
+```
+
+- `pytest -m "not slow"` — формулы на ручных примерах, тождества между оценщиками, out-of-fold
+  свойство моделей, выравнивание политик, срабатывание каждой находки.
+- `pytest -m slow` — статистические свойства на сотнях симуляций:
+  - несмещённость IPS и DR;
+  - состоятельность;
+  - двойная робастность с негативным контролем;
+  - покрытие интервалов;
+  - кластерный инференс при повторных визитах;
+  - ложные тревоги и мощность проверок;
+  - контроль FWER у Romano–Wolf.
+- `python examples/validate.py` — восемь сценариев против аналитической истины: логированные и
+  оценённые пропенсити, тяжёлые хвосты весов, слабое перекрытие, повторные визиты клиентов, DM
+  как основной оценщик. Результаты — в [`docs/validation.md`](https://github.com/Yurashku/OffPolicyLab/blob/main/docs/validation.md).
+
+## Документация
+
+- [`examples/tutorial.ipynb`](https://github.com/Yurashku/OffPolicyLab/blob/main/examples/tutorial.ipynb) — сквозной пример: от логов до решения.
+- [`docs/methodology.md`](https://github.com/Yurashku/OffPolicyLab/blob/main/docs/methodology.md) — формулы, интервалы, проверки, коды находок,
+  предпосылки, устройство пакета.
+- [`docs/estimators.md`](https://github.com/Yurashku/OffPolicyLab/blob/main/docs/estimators.md) — почему DR по умолчанию, когда DM точнее и где
+  ломается; разбор решений по оценщикам.
+- [`docs/validation.md`](https://github.com/Yurashku/OffPolicyLab/blob/main/docs/validation.md) — как и насколько хорошо работают оценщики.
+- [`CHANGELOG.md`](https://github.com/Yurashku/OffPolicyLab/blob/main/CHANGELOG.md) — история изменений и переход с версии 0.1.

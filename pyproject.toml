@@ -1,25 +1,81 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "policyscope"
-version = "0.1.0"
-description = "Инструменты оффлайн‑оценки рекомендательных моделей (IPS/SNIPS/DR) на синтетике и логах"
+dynamic = ["version"]
+description = "Офлайн-оценка политик рекомендаций по логам (off-policy evaluation): DR/IPS/SNDR/DM, честные интервалы и диагностика доверия"
 readme = "README.md"
-authors = [{name = "OffPolicyLab"}]
-license = {text = "MIT"}
-requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Yurashku" }]
+requires-python = ">=3.10"
+keywords = [
+    "off-policy evaluation",
+    "contextual bandits",
+    "counterfactual evaluation",
+    "doubly robust",
+    "inverse propensity scoring",
+    "recommender systems",
+    "causal inference",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Natural Language :: Russian",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Typing :: Typed",
+]
 dependencies = [
-    "numpy>=1.22",
-    "pandas>=1.4",
-    "scikit-learn>=1.1",
-    "scipy>=1.8",
-    "matplotlib>=3.5"
+    "numpy>=1.23",
+    "pandas>=1.5",
+    "scikit-learn>=1.2",
+    "scipy>=1.9",
+    "joblib>=1.2",
+    "threadpoolctl>=3.5",
 ]
 
-[tool.setuptools]
-package-dir = {"" = "src"}
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "flake8>=6.0",
+    "nbconvert>=7.0",
+    "ipykernel>=6.0",
+    "build>=1.2",
+    "twine>=6.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/Yurashku/OffPolicyLab"
+Documentation = "https://github.com/Yurashku/OffPolicyLab/tree/main/docs"
+Changelog = "https://github.com/Yurashku/OffPolicyLab/blob/main/CHANGELOG.md"
+Issues = "https://github.com/Yurashku/OffPolicyLab/issues"
+
+[tool.setuptools.dynamic]
+version = { attr = "policyscope.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+policyscope = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q --strict-markers"
+markers = [
+    "slow: статистические проверки на многих симуляциях (несмещённость, покрытие ДИ)",
+]
