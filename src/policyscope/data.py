@@ -231,7 +231,7 @@ def _encode_features(df: pd.DataFrame, cols: list[str]) -> tuple[np.ndarray, lis
                     "редкие уровни или передайте признак в числовом виде."
                 )
             # Через object: у category-колонки могут быть неиспользуемые уровни.
-            codes = pd.Categorical(s.astype(object), categories=levels).codes
+            codes = pd.Categorical(s.to_numpy(dtype=object), categories=levels).codes
             onehot = np.zeros((len(s), len(levels)), dtype=float)
             onehot[np.arange(len(s)), codes] = 1.0
             blocks.append(onehot)
@@ -308,7 +308,7 @@ def prepare_logs(
     if n_nan:
         raise ValueError(f"В колонке действия '{action}' {n_nan} пропусков")
     actions = _sorted_labels(df[action])
-    a = pd.Categorical(df[action].astype(object), categories=actions).codes.astype(int)
+    a = pd.Categorical(df[action].to_numpy(dtype=object), categories=actions).codes.astype(int)
 
     reward_map = {col: _reward_vector(df, col) for col in rewards}
     binary = {col: _is_binary(r) for col, r in reward_map.items()}
