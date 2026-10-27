@@ -355,7 +355,8 @@ class Report:
         out += ["", self._metric_table(level), "", self._settings_line()]
         if len(self.metrics) > 1 and s.get("inference") != "none":
             out.append(
-                f"p (RW) — p-value с поправкой Romano–Wolf на {len(self.metrics)} метрики: "
+                f"p (RW) — p-value с поправкой Romano–Wolf на "
+                f"{_plural(len(self.metrics), 'метрику', 'метрики', 'метрик')}: "
                 "вероятность хотя бы одного ложного «значимо» по всем метрикам не выше α."
             )
         out += ["", "### Можно ли верить оценке", *self._findings_block()]

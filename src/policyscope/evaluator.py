@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import warnings
 from functools import partial
 from typing import Any, Mapping, Optional, Sequence, Union
@@ -77,6 +78,14 @@ def _model_name(model: Any, default: str) -> str:
     if steps:
         return " → ".join(type(step).__name__ for _, step in steps)
     return type(model).__name__
+
+
+def _user_stacklevel() -> int:
+    """``stacklevel`` для warnings: первый кадр стека вне пакета, то есть код пользователя."""
+    frame, level = sys._getframe(1), 1
+    while frame is not None and frame.f_globals.get("__name__", "").startswith("policyscope"):
+        frame, level = frame.f_back, level + 1
+    return level
 
 
 def _terms(
@@ -331,7 +340,7 @@ class Evaluator:
             raise ValueError("n_boot должен быть не меньше 50")
         return inference
 
-    def _bootstrap_eta(self, n_boot: int) -> None:
+    def _bootstrap_eta(self, n_boot: int, estimator: str) -> None:
         if self.n_jobs is None:
             jobs = 1
         elif self.n_jobs < 0:
@@ -344,11 +353,16 @@ class Evaluator:
         if eta > 30:
             # warnings, а не logging: пакет не настраивает логирование, и сообщение
             # иначе не дошло бы до пользователя в Jupyter.
+            if self.data.propensity is None:
+                hint = "Логированные пропенсити позволили бы обойтись аналитическим интервалом."
+            elif estimator == "dm":
+                hint = "Для DM честный интервал — только bootstrap."
+            else:
+                hint = "При логированных пропенсити быстрее inference='influence'."
             warnings.warn(
                 f"Bootstrap: {n_boot} реплик с переобучением моделей, ориентировочно "
-                f"{eta / 60:.1f} мин. Логированные пропенсити позволили бы обойтись "
-                "аналитическим интервалом.",
-                stacklevel=4,
+                f"{eta / 60:.1f} мин. {hint}",
+                stacklevel=_user_stacklevel(),
             )
 
     def _run(
@@ -418,7 +432,7 @@ class Evaluator:
                     advice="Используйте inference='auto' (bootstrap) для честного интервала.",
                 ))
         elif inference == "bootstrap":
-            self._bootstrap_eta(n_boot)
+            self._bootstrap_eta(n_boot, estimator)
 
             samples = run_bootstrap(
                 partial(_replicate, data, self.config, pis, base), clusters=data.clusters, n_clusters=data.n_clusters,
