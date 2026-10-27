@@ -1,0 +1,7 @@
+include CHANGELOG.md
+graft docs
+graft examples
+graft tests
+prune examples/.ipynb_checkpoints
+global-exclude *.py[cod]
+global-exclude __pycache__

@@ -1,5 +1,9 @@
 # Policyscope
 
+[![CI](https://github.com/Yurashku/OffPolicyLab/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Yurashku/OffPolicyLab/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.10%E2%80%933.14-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+
 **Что будет, если заменить текущую политику A на кандидата B?** Policyscope отвечает на
 этот вопрос по логам одной только политики A — без онлайн A/B-теста. Это задача
 off-policy evaluation (OPE) для contextual bandit: выбор оффера, рекомендации, промо.
@@ -14,8 +18,10 @@ off-policy evaluation (OPE) для contextual bandit: выбор оффера, �
   советом, что делать.
 
 ```bash
-pip install -e .
+pip install git+https://github.com/Yurashku/OffPolicyLab
 ```
+
+Нужен Python ≥ 3.10. После публикации на PyPI установка будет `pip install policyscope`.
 
 ## Попробовать за минуту
 
@@ -35,7 +41,7 @@ report = ps.evaluate(
 report            # в Jupyter отчёт отрисуется сам; в консоли — print(report.to_markdown())
 ```
 
-Пошаговый разбор с проверкой против истины — в [`examples/tutorial.ipynb`](examples/tutorial.ipynb).
+Пошаговый разбор с проверкой против истины — в [`examples/tutorial.ipynb`](https://github.com/Yurashku/OffPolicyLab/blob/main/examples/tutorial.ipynb).
 
 ## На своих данных
 
@@ -107,14 +113,15 @@ report = ev.evaluate(policy_b)
 1. Обучаются две вспомогательные модели. Модель пропенсити (если пропенсити не залогированы)
    восстанавливает, как действует A. Модель исхода оценивает ожидаемую награду каждого действия.
    - Обе считаются **out-of-fold**: прогноз для строки делает модель, которая эту строку не видела.
-   - Обе обучаются один раз на `Evaluator`. Следующие кандидаты считаются за доли секунды.
+   - Обе обучаются один раз на `Evaluator`. С аналитическим интервалом следующие кандидаты
+     считаются за доли секунды; с bootstrap каждый вызов переобучает модели на репликах.
 2. Из одних и тех же моделей считаются пять оценщиков:
    - `dr` — основной по умолчанию;
    - `sndr`, `ips`, `snips` — их можно выбрать основным через `estimator=`;
    - `dm` — по умолчанию только для сверки. Явный выбор `estimator="dm"` обычно даёт самую точную оценку,
      если модель исхода верна и оценена эффективно (для Ridge при гетероскедастичном шуме DM может
      проиграть DR). Но её смещение по логам не проверяется. Разбор — в
-     [`docs/estimators.md`](docs/estimators.md).
+     [`docs/estimators.md`](https://github.com/Yurashku/OffPolicyLab/blob/main/docs/estimators.md).
 3. Строится доверительный интервал, по умолчанию `inference="auto"`:
    - при логированных пропенсити — аналитический, с кластерно-робастной ошибкой;
    - без них и при `estimator="dm"` — bootstrap с переобучением моделей. Аналитический интервал не
@@ -126,7 +133,7 @@ report = ev.evaluate(policy_b)
 ```python
 report                         # полный отчёт (Jupyter)
 report.summary()               # DataFrame: строка на метрику
-report["revenue"].decision     # 'better' | 'worse' | 'no_difference' | 'inconclusive'
+report["revenue"].decision     # 'better' | 'worse' | 'no_difference' | 'inconclusive' | 'not_computed'
 report["revenue"].estimators   # DataFrame: все оценщики
 report.to_markdown()           # для Confluence / письма
 report.to_json("report.json")  # для пайплайна: стабильная схема, NaN -> null
@@ -167,6 +174,8 @@ report = ev.evaluate(policy_b, baseline=ps.greedy(scores_a), baseline_name="A (�
 
 ## Когда оценке нельзя верить
 
+Основные находки (полный список кодов — в [методологии](https://github.com/Yurashku/OffPolicyLab/blob/main/docs/methodology.md#коды-находок)):
+
 | Находка | Что значит |
 |---|---|
 | `propensity_not_probability` | В колонке пропенсити не вероятность выбора действия: например, передали вероятность отклика. |
@@ -185,26 +194,52 @@ report = ev.evaluate(policy_b, baseline=ps.greedy(scores_a), baseline_name="A (�
 - все факторы, влиявшие и на выбор A, и на метрику, есть среди признаков;
 - B не обучалась на оцениваемых логах.
 
+## Когда OPE достаточно, а когда нужен A/B-тест
+
+Офлайн-оценки обычно достаточно:
+- чтобы отобрать кандидатов из многих и отсеять явно слабые;
+- чтобы приоритизировать гипотезы до онлайн-эксперимента;
+- когда решение легко откатить, а цена ошибки мала.
+
+Нужен A/B-тест:
+- перед внедрением победителя из многих кандидатов (winner's curse);
+- при вердикте «с осторожностью» или «ненадёжно», при слабом перекрытии и без логированных
+  пропенсити;
+- когда решение дорого или необратимо, а ожидаемый эффект сравним с шириной интервала;
+- когда есть основания подозревать ненаблюдаемые факторы, влиявшие на выбор A.
+
+«Значимо» в отчёте не означает «безопасно для раскатки»: интервал описывает статистический шум,
+но не нарушения предпосылок.
+
 ## Настройка
 
 ```python
 from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
 
 ev = ps.Evaluator(
-    logs, action="offer", reward="revenue", propensity="propensity",
-    features=["age", "income", "region"],          # категории кодируются сами
-    outcome_model=HistGradientBoostingRegressor(),  # любая sklearn-модель
-    propensity_model=HistGradientBoostingClassifier(),
-    lower_is_better=[],                              # метрики, где меньше — лучше
+    logs, action="offer", reward=["revenue", "churn"],
+    propensity=None,                                   # пропенсити не залогированы — оцениваются
+    propensity_model=HistGradientBoostingClassifier(), # нужна, только когда propensity=None
+    outcome_model={"revenue": HistGradientBoostingRegressor()},  # своя модель для метрики
+    features=["age", "income", "region"],              # категории кодируются сами
+    lower_is_better=["churn"],                         # метрики, где меньше — лучше
     n_folds=5, random_state=0, n_jobs=-1,
 )
-report = ev.evaluate(policy_b, estimator="sndr", inference="bootstrap", n_boot=500, alpha=0.1)
+report = ev.evaluate(policy_b, estimator="sndr", n_boot=500, alpha=0.1)
 ```
+
+С пользовательской моделью исхода DM нельзя выбрать основным: для гибких моделей у него нет
+валидного интервала. В таблице оценщиков он остаётся точкой для сверки.
 
 ## Как проверена корректность
 
 Тестов, которые проверяют только, что код не падает, здесь почти нет. Корректность проверяется
-против известной истины.
+против известной истины. Тесты и сценарии валидации лежат в репозитории:
+
+```bash
+git clone https://github.com/Yurashku/OffPolicyLab && cd OffPolicyLab
+pip install -e ".[dev]"
+```
 
 - `pytest -m "not slow"` — формулы на ручных примерах, тождества между оценщиками, out-of-fold
   свойство моделей, выравнивание политик, срабатывание каждой находки.
@@ -216,15 +251,16 @@ report = ev.evaluate(policy_b, estimator="sndr", inference="bootstrap", n_boot=5
   - кластерный инференс при повторных визитах;
   - ложные тревоги и мощность проверок;
   - контроль FWER у Romano–Wolf.
-- `python examples/validate.py` — сценарии logged / softmax / weak_overlap / estimated / clustered / dm против
-  аналитической истины. Результаты — в [`docs/validation.md`](docs/validation.md).
+- `python examples/validate.py` — восемь сценариев против аналитической истины: логированные и
+  оценённые пропенсити, тяжёлые хвосты весов, слабое перекрытие, повторные визиты клиентов, DM
+  как основной оценщик. Результаты — в [`docs/validation.md`](https://github.com/Yurashku/OffPolicyLab/blob/main/docs/validation.md).
 
 ## Документация
 
-- [`examples/tutorial.ipynb`](examples/tutorial.ipynb) — сквозной пример: от логов до решения.
-- [`docs/methodology.md`](docs/methodology.md) — формулы, интервалы, проверки, предпосылки,
-  устройство пакета.
-- [`docs/estimators.md`](docs/estimators.md) — почему DR по умолчанию, когда DM точнее и где ломается;
-  разбор решений по оценщикам.
-- [`docs/validation.md`](docs/validation.md) — как и насколько хорошо работают оценщики.
-- [`CHANGELOG.md`](CHANGELOG.md) — история изменений и миграция с 0.2.
+- [`examples/tutorial.ipynb`](https://github.com/Yurashku/OffPolicyLab/blob/main/examples/tutorial.ipynb) — сквозной пример: от логов до решения.
+- [`docs/methodology.md`](https://github.com/Yurashku/OffPolicyLab/blob/main/docs/methodology.md) — формулы, интервалы, проверки, коды находок,
+  предпосылки, устройство пакета.
+- [`docs/estimators.md`](https://github.com/Yurashku/OffPolicyLab/blob/main/docs/estimators.md) — почему DR по умолчанию, когда DM точнее и где
+  ломается; разбор решений по оценщикам.
+- [`docs/validation.md`](https://github.com/Yurashku/OffPolicyLab/blob/main/docs/validation.md) — как и насколько хорошо работают оценщики.
+- [`CHANGELOG.md`](https://github.com/Yurashku/OffPolicyLab/blob/main/CHANGELOG.md) — история изменений и переход с версии 0.1.

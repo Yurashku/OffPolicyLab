@@ -2,12 +2,13 @@
 
 Для каждого сценария генерирует много независимых логов, оценивает политику B и
 сравнивает результат с истинным Δ = V(B) − V(A): смещение, RMSE, фактическое
-покрытие 95% интервала основного оценщика (DR).
+покрытие 95% интервала каждого оценщика; пороги приёмки проверяются для основного
+оценщика сценария (DR или DM).
 
 Примеры:
-    python examples/validate.py                       # все сценарии, таблица в консоль
-    python examples/validate.py --runs 20 --strict    # с проверкой порогов (для CI)
-    python examples/validate.py --output docs/validation_results.md
+    python examples/validate.py --runs 60                     # все сценарии, таблица в консоль
+    python examples/validate.py --runs 30 --clients 2000 --n-boot 60 --strict   # как в CI
+    python examples/validate.py --runs 60 --output validation_table.md
 """
 
 from __future__ import annotations
@@ -133,8 +134,11 @@ def aggregate(raw: pd.DataFrame) -> pd.DataFrame:
         })
 
     order = {name: i for i, name in enumerate(["dr", "sndr", "ips", "snips", "dm"])}
-    grouped = raw.groupby(["scenario", "metric", "estimator"])
-    out = grouped.apply(summarize, include_groups=False).reset_index()
+    keys = ["scenario", "metric", "estimator"]
+    out = pd.DataFrame([
+        {**dict(zip(keys, key)), **summarize(group).to_dict()}
+        for key, group in raw.groupby(keys)
+    ])
     out["_order"] = out["estimator"].map(order)
     return out.sort_values(["scenario", "metric", "_order"]).drop(columns="_order")
 

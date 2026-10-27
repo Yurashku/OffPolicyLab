@@ -23,9 +23,14 @@ def test_public_api_exports_exist():
     assert all(hasattr(ps, name) for name in ps.__all__)
 
 
-def test_version_matches_pyproject(repo_root):
-    declared = re.search(r'^version = "([^"]+)"', _read(repo_root, "pyproject.toml"), re.MULTILINE)
-    assert declared and declared.group(1) == ps.__version__
+def test_version_has_single_source(repo_root):
+    """Версия задаётся только в policyscope.__version__; pyproject и CHANGELOG с ней согласны."""
+    text = _read(repo_root, "pyproject.toml")
+    assert 'dynamic = ["version"]' in text
+    assert 'version = { attr = "policyscope.__version__" }' in text
+    assert re.fullmatch(r"\d+\.\d+\.\d+", ps.__version__)
+    first = re.search(r"^## (\S+)", _read(repo_root, "CHANGELOG.md"), re.MULTILINE)
+    assert first and first.group(1) == ps.__version__
 
 
 @pytest.mark.parametrize("doc", ["README.md", "docs/methodology.md"])

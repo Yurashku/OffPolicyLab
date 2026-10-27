@@ -253,6 +253,39 @@ stepdown-процедурой Romano–Wolf (2005, 2016). Она контрол�
 При вердикте «ненадёжно» вывод не делается, даже если интервал не накрывает ноль. Пороги
 собраны в `ps.Thresholds`.
 
+### Коды находок
+
+Код — стабильный идентификатор для пайплайнов (`report.to_dict()["findings"]`, поле `code`);
+текст и совет в отчёте — для людей. Уровни: **block** — вывод не делается, **caution** —
+«с осторожностью», **info** — к сведению.
+
+| Код | Уровень | Когда возникает |
+|---|---|---|
+| `too_few_rows` | block | В логах меньше 30 строк. |
+| `constant_metric` | block | Метрика в логах не меняется — оценивать нечего. |
+| `non_finite_estimate` | block | Основной оценщик дал нечисловое значение или интервал. |
+| `propensity_not_probability` | block | Колонка пропенсити нарушает тождество $\mathbb{E}[\mathbb{1}\{A=a\}/p] \le 1$. |
+| `deterministic_logging` | block | A почти не исследует, а кандидат от неё отличается. Для базовой политики — `deterministic_logging_baseline`. |
+| `support_deficit` | caution / block | Средний вес значимо меньше 1: масса кандидата там, где A не действует. Если дефицит больше 20% — block. |
+| `critically_low_ess` | block | Эффективный размер выборки меньше 30. |
+| `low_ess` | caution | ESS меньше 5% выборки. |
+| `weights_inflated` | caution | Средний вес значимо больше 1: пропенсити занижены. |
+| `propensity_check_failed` | block для IPS/SNIPS, caution для DR/SNDR | IPS и DR существенно расходятся. |
+| `outcome_check_failed` | block для DM; caution при оценённых пропенсити; иначе info | DR и DM существенно расходятся: модель исхода смещена. |
+| `both_models_rejected` | block | Провалены обе проверки — DR не защищён. |
+| `variance_concentration` | caution | Один клиент или строка даёт больше половины дисперсии Δ. |
+| `propensity_estimated` | caution | Пропенсити не залогированы и восстановлены моделью. |
+| `propensity_floor_active` | caution | Больше 5% строк упёрлись в пол пропенсити. |
+| `floor_sensitive` | caution | Δ меняется больше чем на SE при изменении пола вдвое. |
+| `rare_actions_in_folds` | caution | Действие не встретилось в обучающем фолде модели пропенсити. |
+| `influence_with_estimated_propensity` | caution | Аналитический интервал запрошен при оценённых пропенсити. |
+| `model_based_estimate` | caution | Основной оценщик — DM: оценка держится только на модели исхода. |
+| `bootstrap_failures` | caution / block | Часть bootstrap-реплик не посчиталась. Если их больше 10% — block. |
+| `few_clusters` | caution | Кластеров меньше 30. |
+| `cluster_not_set` | caution | Колонка вроде `client_id` повторяется, но `cluster` не указан. |
+| `outcome_like_features` | caution | Явно заданный признак почти идеально предсказывает награду. |
+| `auto_features` | info | Признаки выбраны автоматически; в тексте — список использованных и пропущенных. |
+
 ## 7. Предпосылки и ограничения
 
 - **Нет ненаблюдаемых конфаундеров.** Всё, что влияло и на выбор A, и на награду, есть среди
