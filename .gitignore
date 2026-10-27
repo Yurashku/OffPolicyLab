@@ -2,6 +2,8 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+*.egg
+*.so
 build/
 dist/
 .eggs/
@@ -10,18 +12,30 @@ dist/
 .venv/
 venv/
 env/
+ENV/
+.env
 
 # Tooling caches
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.tox/
+.hypothesis/
 .coverage
 coverage.xml
 htmlcov/
 
-# IDE
+# IDE and editors
 .idea/
 .vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
 
 # Experiment artifacts
 artifacts/
