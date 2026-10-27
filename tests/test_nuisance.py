@@ -171,3 +171,39 @@ def test_non_finite_outcome_predictions_are_refused():
     data = prep(b.logs.assign(reward=b.logs["reward"] * 3.0 - 1.0))
     with pytest.raises(ValueError, match="нечисловые"):
         fit_nuisance(data, NuisanceConfig(outcome_model=Exploding()), seed=0)
+
+
+class TestOutcomeDesign:
+    def test_interactions_used_when_design_fits(self):
+        b = make_bandit(600, seed=31)
+        nuis = fit_nuisance(prep(b.logs, propensity="propensity"), NuisanceConfig(), seed=0)
+        assert nuis.interactions == {"reward": True}
+
+    def test_too_wide_design_falls_back_to_main_effects(self, monkeypatch):
+        import policyscope.nuisance as nuisance_module
+
+        monkeypatch.setattr(nuisance_module, "MAX_DESIGN_CELLS", 100)
+        b = make_bandit(600, seed=31)
+        nuis = fit_nuisance(prep(b.logs, propensity="propensity"), NuisanceConfig(), seed=0)
+        assert nuis.interactions == {"reward": False}
+        assert "слишком велика" in nuis.design_notes["reward"]
+        assert np.isfinite(nuis.mu["reward"]).all()
+
+    def test_bootstrap_replicates_keep_the_chosen_design(self, monkeypatch):
+        import policyscope as ps
+        import policyscope.nuisance as nuisance_module
+
+        b = make_bandit(600, seed=32)
+        ev = ps.Evaluator(b.logs, action="action", reward="reward", propensity="propensity",
+                          features=["x1", "x2"])
+        ev.nuisance
+        monkeypatch.setattr(nuisance_module, "MAX_DESIGN_CELLS", 100)  # реплика не должна передумать
+        replicate = fit_nuisance(ev.data, ev._replicate_config(), seed=1, positions=np.arange(ev.data.n))
+        assert replicate.interactions == {"reward": True}
+
+    def test_newton_solver_only_for_narrow_designs(self):
+        from policyscope.nuisance import NEWTON_MAX_COLUMNS, _default_outcome_model
+
+        narrow = _default_outcome_model("binary", NEWTON_MAX_COLUMNS)
+        wide = _default_outcome_model("binary", NEWTON_MAX_COLUMNS + 1)
+        assert narrow[-1].solver == "newton-cholesky" and wide[-1].solver == "lbfgs"
