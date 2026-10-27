@@ -259,11 +259,16 @@ def policy_findings(
     overlap: Overlap,
     th: Thresholds,
     *,
-    role: str,
+    baseline: Optional[str] = None,
 ) -> list[Finding]:
-    """Находки, не зависящие от метрики: перекрытие, пропенсити, кластеры."""
+    """Находки, не зависящие от метрики: перекрытие, пропенсити, кластеры.
+
+    Args:
+        baseline: Имя базовой политики, если находки считаются для неё; ``None`` — для
+            кандидата (тогда добавляются и находки о данных и пропенсити).
+    """
     out: list[Finding] = []
-    suffix = "" if role == "B" else f" (базовая политика «{role}»)"
+    suffix = "" if baseline is None else f" (базовая политика «{baseline}»)"
 
     deficit = 1.0 - overlap.mean_weight
     deficit_low = 1.0 - overlap.mean_weight_high
@@ -273,7 +278,7 @@ def policy_findings(
     )
     if deterministic and overlap.match < th.deterministic_match:
         out.append(Finding(
-            code="deterministic_logging" if role == "B" else "deterministic_logging_baseline",
+            code="deterministic_logging" if baseline is None else "deterministic_logging_baseline",
             severity="block",
             title="Политика A почти не исследует" + suffix,
             detail=(
@@ -316,7 +321,15 @@ def policy_findings(
             advice="Проверьте колонку пропенсити или модель пропенсити.",
         ))
 
-    if overlap.ess < th.min_ess:
+    if overlap.n < th.min_ess:
+        out.append(Finding(
+            code="too_few_rows",
+            severity="block",
+            title="Слишком мало данных" + suffix,
+            detail=f"В логах {overlap.n} строк: этого не хватает ни для моделей, ни для интервала.",
+            advice="Соберите больше логов.",
+        ))
+    elif overlap.ess < th.min_ess:
         out.append(Finding(
             code="critically_low_ess",
             severity="block",
@@ -342,7 +355,7 @@ def policy_findings(
             ),
         ))
 
-    if role != "B":
+    if baseline is not None:
         return out
 
     out.extend(_propensity_validity(data, nuis, th))

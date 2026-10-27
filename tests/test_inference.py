@@ -133,3 +133,28 @@ class TestBootstrap:
         assert centered_pvalue(samples, np.array([0.0]))[0] == pytest.approx(1.0)
         # Реплики разбросаны вокруг оценки 3.5: ноль далеко в хвосте.
         assert centered_pvalue(samples + 3.5, np.array([3.5]))[0] < 0.01
+
+
+def test_degenerate_hypothesis_does_not_poison_romano_wolf():
+    rng = np.random.default_rng(4)
+    psi = np.column_stack([rng.normal(size=500), np.zeros(500), rng.normal(0.2, 1, 500)])
+    s = analytic_summary(psi, np.arange(500), 500, 0.05)
+    null = multiplier_tstats(s["sums"], s["se"], 500, 2000, rng)
+    assert np.isnan(null[:, 1]).all() and np.isfinite(null[:, [0, 2]]).all()
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t = s["estimate"] / s["se"]
+    p = romano_wolf(t, null)
+    assert np.isnan(p[1]) and np.isfinite(p[[0, 2]]).all()
+
+
+def test_percentiles_of_empty_columns_are_silent():
+    import warnings
+
+    from policyscope.inference import nan_std, percentile_interval
+
+    samples = np.column_stack([np.random.default_rng(0).normal(size=100), np.full(100, np.nan)])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        low, high = percentile_interval(samples, 0.05)
+        sd = nan_std(samples)
+    assert np.isfinite(low[0]) and np.isnan(low[1]) and np.isnan(sd[1])

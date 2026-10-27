@@ -157,3 +157,33 @@ class TestInputKinds:
         logs, data, _ = setup
         with pytest.raises(TypeError):
             as_matrix(42, logs, data)
+
+
+class TestShuffledLogs:
+    """Регрессия: позиционная политика молча сопоставлялась по метке после sort/sample."""
+
+    def make(self):
+        rng = np.random.default_rng(3)
+        logs = pd.DataFrame({
+            "x": rng.normal(size=40), "offer": rng.choice(ACTIONS, 40), "p": 1 / 3,
+            "r": rng.integers(0, 2, 40),
+        }).sample(frac=1.0, random_state=0)  # индекс — перестановка 0..39
+        data = prepare_logs(logs, action="offer", reward="r", propensity="p", features=["x"])
+        probs = rng.dirichlet(np.ones(3), 40)  # строки в порядке логов
+        return logs, data, probs
+
+    def test_default_index_with_permuted_logs_is_ambiguous(self):
+        logs, data, probs = self.make()
+        with pytest.raises(ValueError, match="однозначно"):
+            as_matrix(pd.DataFrame(probs, columns=ACTIONS), logs, data)
+
+    def test_explicit_index_is_aligned(self):
+        logs, data, probs = self.make()
+        frame = pd.DataFrame(probs, columns=ACTIONS, index=logs.index)
+        np.testing.assert_allclose(as_matrix(frame.sample(frac=1.0, random_state=1), logs, data), probs)
+
+    def test_array_is_positional(self):
+        logs = pd.DataFrame({"x": [0.1, 0.2, 0.3], "a": [0, 1, 0], "r": [1, 0, 1]}, index=[2, 0, 1])
+        data = prepare_logs(logs, action="a", reward="r", features=["x"])
+        arr = np.array([[0.9, 0.1], [0.2, 0.8], [0.5, 0.5]])
+        np.testing.assert_allclose(policy_matrix(arr, data, logs.drop(columns="r")), arr)

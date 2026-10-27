@@ -42,6 +42,7 @@ __all__ = [
     "cluster_members",
     "run_bootstrap",
     "percentile_interval",
+    "nan_std",
     "centered_pvalue",
 ]
 
@@ -121,13 +122,23 @@ def multiplier_tstats(
     ``R = S'S · G/(G-1) / (n^2 se se')``. Поэтому сэмплируется сразу ``J``-мерное
     нормальное — без ``n_draws × G`` случайных множителей. Корреляция между гипотезами
     сохраняется — ровно то, что нужно Romano–Wolf.
+
+    Гипотезы с нулевой или нечисловой SE (например, постоянная метрика) получают NaN и
+    не портят распределение остальных.
     """
+    se = np.asarray(se, dtype=float)
+    out = np.full((n_draws, len(se)), np.nan)
+    ok = np.isfinite(se) & (se > 0) & np.isfinite(sums).all(axis=0)
+    if not ok.any():
+        return out
     g = sums.shape[0]
-    scale = np.sqrt(g / max(g - 1, 1)) / (n * np.asarray(se, dtype=float))
-    cov = (sums.T @ sums) * np.outer(scale, scale)
+    s = sums[:, ok]
+    scale = np.sqrt(g / max(g - 1, 1)) / (n * se[ok])
+    cov = (s.T @ s) * np.outer(scale, scale)
     values, vectors = np.linalg.eigh((cov + cov.T) / 2)
     root = vectors * np.sqrt(np.clip(values, 0.0, None))
-    return rng.standard_normal((n_draws, len(se))) @ root.T
+    out[:, ok] = rng.standard_normal((n_draws, int(ok.sum()))) @ root.T
+    return out
 
 
 def romano_wolf(t_obs: np.ndarray, t_null: np.ndarray) -> np.ndarray:
@@ -233,11 +244,28 @@ def run_bootstrap(
 
 
 def percentile_interval(samples: np.ndarray, alpha: float) -> tuple[np.ndarray, np.ndarray]:
-    """Percentile-интервалы по столбцам, игнорируя NaN-реплики."""
-    with np.errstate(all="ignore"):
-        low = np.nanpercentile(samples, 100 * alpha / 2, axis=0)
-        high = np.nanpercentile(samples, 100 * (1 - alpha / 2), axis=0)
+    """Percentile-интервалы по столбцам, игнорируя NaN-реплики.
+
+    Колонки, где нет ни одной конечной реплики, получают NaN без предупреждений numpy.
+    """
+    low = np.full(samples.shape[1:], np.nan)
+    high = np.full(samples.shape[1:], np.nan)
+    ok = np.isfinite(samples).any(axis=0)
+    if ok.any():
+        finite = np.where(np.isfinite(samples), samples, np.nan)[:, ok]
+        q = np.nanpercentile(finite, [100 * alpha / 2, 100 * (1 - alpha / 2)], axis=0)
+        low[ok], high[ok] = q[0], q[1]
     return low, high
+
+
+def nan_std(samples: np.ndarray) -> np.ndarray:
+    """Стандартное отклонение по репликам без предупреждений для пустых колонок."""
+    out = np.full(samples.shape[1:], np.nan)
+    finite = np.isfinite(samples)
+    ok = finite.sum(axis=0) >= 2
+    if ok.any():
+        out[ok] = np.nanstd(np.where(finite, samples, np.nan)[:, ok], axis=0)
+    return out
 
 
 def centered_pvalue(samples: np.ndarray, estimate: np.ndarray) -> np.ndarray:

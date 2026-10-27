@@ -49,3 +49,14 @@ def test_revenue_is_zero_without_acceptance():
     logs = sim.simulate(sim.sample_clients(2000), sim.policy("uniform"))
     assert (logs.loc[logs["accepted"] == 0, "revenue"] == 0).all()
     assert (logs.loc[logs["accepted"] == 1, "revenue"] > 0).all()
+
+
+def test_simulator_rejects_malformed_policies():
+    import pandas as pd
+
+    sim = OfferSimulator(seed=5)
+    clients = sim.sample_clients(50)
+    with pytest.raises(ValueError, match="офферы"):
+        sim.true_value(clients, pd.DataFrame({"tv": [1.0] * 50}))
+    with pytest.raises(ValueError, match="распределениями"):
+        sim.true_value(clients, pd.DataFrame({"card": [0.5] * 50}))

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+import warnings
 from functools import partial
 from typing import Any, Mapping, Optional, Sequence, Union
 
@@ -38,6 +39,7 @@ from policyscope.inference import (
     centered_pvalue,
     cluster_sums,
     multiplier_tstats,
+    nan_std,
     percentile_interval,
     romano_wolf,
     run_bootstrap,
@@ -172,7 +174,7 @@ class Evaluator:
         outcome_model: Any = None,
         n_folds: int = 5,
         propensity_floor: float = 0.1,
-        lower_is_better: Sequence[str] = (),
+        lower_is_better: Union[str, Sequence[str]] = (),
         thresholds: Optional[Thresholds] = None,
         random_state: int = 0,
         n_jobs: Optional[int] = -1,
@@ -181,6 +183,17 @@ class Evaluator:
             logs, action=action, reward=reward, propensity=propensity,
             cluster=cluster, features=features,
         )
+        if isinstance(lower_is_better, str):
+            lower_is_better = [lower_is_better]
+        if isinstance(random_state, bool) or not isinstance(random_state, (int, np.integer)):
+            raise ValueError("random_state должен быть целым числом (нужен для воспроизводимости)")
+        groups = self.data.n_clusters
+        if groups < n_folds:
+            unit = f"кластеров («{cluster}»)" if cluster else "строк"
+            raise ValueError(
+                f"Для cross-fitting на {n_folds} фолдов нужно не меньше {n_folds} {unit}, а их {groups}. "
+                "Уменьшите n_folds или соберите больше данных."
+            )
         unknown = sorted(set(lower_is_better) - set(self.data.reward_cols))
         if unknown:
             raise ValueError(f"lower_is_better содержит метрики, которых нет в reward: {unknown}")
@@ -329,10 +342,13 @@ class Evaluator:
         speedup = max(1.0, jobs / 2) if jobs > 1 else 1.0
         eta = self.nuisance.fit_seconds * n_boot / speedup + (5.0 if jobs > 1 else 0.0)
         if eta > 30:
-            logger.warning(
-                "Bootstrap: %d реплик с переобучением моделей, ориентировочно %.1f мин. "
-                "Логированные пропенсити позволили бы обойтись аналитическим интервалом.",
-                n_boot, eta / 60,
+            # warnings, а не logging: пакет не настраивает логирование, и сообщение
+            # иначе не дошло бы до пользователя в Jupyter.
+            warnings.warn(
+                f"Bootstrap: {n_boot} реплик с переобучением моделей, ориентировочно "
+                f"{eta / 60:.1f} мин. Логированные пропенсити позволили бы обойтись "
+                "аналитическим интервалом.",
+                stacklevel=4,
             )
 
     def _run(
@@ -421,7 +437,7 @@ class Evaluator:
                 ))
             d = samples[..., e_primary, 0] - samples[..., e_primary, 1]
             delta_hat = v_b[:, :, e_primary] - v_a[None, :, e_primary]
-            sd = np.nanstd(d, axis=0)
+            sd = nan_std(d)
             with np.errstate(divide="ignore", invalid="ignore"):
                 rw_t_obs = np.where(sd > 0, delta_hat / sd, np.nan)
                 rw_null = ((d - delta_hat) / sd).reshape(n_boot, -1)
@@ -442,6 +458,15 @@ class Evaluator:
                 i, name, base_label, pis[i], base, psi_b, psi_a, v_b, v_a, stats, p_adj,
                 terms_b, estimator, inference, alpha, extra_findings, settings,
             )
+        # Рейтинг: лучший по первой метрике — первым (с учётом её направления).
+        first = metrics[0]
+        sign = -1.0 if first in self.lower_is_better else 1.0
+
+        def rank_key(name: str) -> float:
+            value = reports[name][first].delta.value
+            return -sign * value if np.isfinite(value) else np.inf
+
+        reports = {name: reports[name] for name in sorted(reports, key=rank_key)}
         table = pd.concat(
             {name: rep.summary() for name, rep in reports.items()}, names=["candidate"]
         ).reset_index()
@@ -488,7 +513,7 @@ class Evaluator:
         a_low, a_high = percentile_interval(sa, alpha)
         out["v_a_low"], out["v_a_high"] = a_low, a_high
         out["delta_low"], out["delta_high"] = percentile_interval(d, alpha)
-        out["delta_se"] = np.nanstd(d, axis=0)
+        out["delta_se"] = nan_std(d)
         out["p_value"] = centered_pvalue(d, delta)
         with np.errstate(divide="ignore", invalid="ignore"):
             ratio = np.where((sb > 0) & (sa > 0), sb / sa - 1, np.nan)
@@ -570,10 +595,10 @@ class Evaluator:
         data, th, nuis = self.data, self.thresholds, self.nuisance
         e_primary = ESTIMATORS.index(estimator)
         overlap = overlap_summary(data, nuis, pi, alpha)
-        findings = policy_findings(data, nuis, overlap, th, role="B")
+        findings = policy_findings(data, nuis, overlap, th)
         if base is not None:
             base_overlap = overlap_summary(data, nuis, base, alpha)
-            findings += policy_findings(data, nuis, base_overlap, th, role=base_label)
+            findings += policy_findings(data, nuis, base_overlap, th, baseline=base_label)
         findings += extra_findings
         if estimator == "dm":
             findings.append(Finding(
@@ -619,6 +644,19 @@ class Evaluator:
                 estimated_propensity=nuis.source == "estimated",
                 ess_value=ess_value, th=th,
             )
+            r_metric = data.rewards[metric]
+            if np.ptp(r_metric) == 0:
+                metric_findings.append(Finding(
+                    code="constant_metric",
+                    severity="block",
+                    metric=metric,
+                    title="Метрика в логах не меняется",
+                    detail=(
+                        f"Все {data.n} значений «{metric}» равны {r_metric[0]:g}: по таким логам "
+                        "нельзя оценить, изменит ли её другая политика."
+                    ),
+                    advice="Проверьте период логов и определение метрики.",
+                ))
             concentration = variance_concentration(
                 psi_b[i, m, e_primary] - psi_a[m, e_primary], data, th, metric
             )
@@ -734,9 +772,17 @@ def evaluate(
     alpha: float = 0.05,
     n_boot: int = 200,
     name: str = "B",
+    baseline_name: Optional[str] = None,
     **evaluator_options: Any,
 ) -> Report:
     """Одноразовая оценка: ``Evaluator(logs, ...).evaluate(policy, ...)``.
+
+    Аргументы данных (``action``, ``reward``, ``propensity``, ``cluster``, ``features``)
+    и ``evaluator_options`` (``propensity_model``, ``outcome_model``, ``n_folds``,
+    ``propensity_floor``, ``lower_is_better``, ``thresholds``, ``random_state``,
+    ``n_jobs``) — как у :class:`Evaluator`; аргументы оценки (``baseline``, ``estimator``,
+    ``inference``, ``alpha``, ``n_boot``, ``name``, ``baseline_name``) — как у
+    :meth:`Evaluator.evaluate`.
 
     Для нескольких кандидатов на одних логах создайте :class:`Evaluator` один раз —
     модели не будут переобучаться.
@@ -747,5 +793,5 @@ def evaluate(
     )
     return ev.evaluate(
         policy, baseline=baseline, estimator=estimator, inference=inference,
-        alpha=alpha, n_boot=n_boot, name=name,
+        alpha=alpha, n_boot=n_boot, name=name, baseline_name=baseline_name,
     )

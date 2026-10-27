@@ -27,8 +27,8 @@ __all__ = ["Estimate", "EstimatorRow", "MetricReport", "Report", "Leaderboard"]
 
 TRUST_LABELS = {"reliable": "надёжно", "caution": "с осторожностью", "unreliable": "ненадёжно"}
 DECISION_LABELS = {
-    "better": "B лучше",
-    "worse": "B хуже",
+    "better": "лучше",
+    "worse": "хуже",
     "no_difference": "разница не обнаружена",
     "inconclusive": "вывод сделать нельзя",
     "not_computed": "интервал не считался",
@@ -205,7 +205,14 @@ class MetricReport:
 
     @property
     def decision_label(self) -> str:
+        """Вывод коротко: «лучше», «хуже», «разница не обнаружена» и т.д."""
         return DECISION_LABELS[self.decision]
+
+    def decision_text(self, baseline: str = "A") -> str:
+        """Вывод с именем базы: «лучше A», «хуже A» или ``decision_label``."""
+        if self.decision in ("better", "worse"):
+            return f"{self.decision_label} {baseline}"
+        return self.decision_label
 
     @property
     def trust_label(self) -> str:
@@ -367,7 +374,7 @@ class Report:
                 f"| {m.metric} | {_value(m.v_a.value, m.binary)} | {_value(m.v_b.value, m.binary)} "
                 f"| {fd(m.delta.value)} | {_pct(m.lift.value) if m.lift else '—'} "
                 f"| {_interval(m.delta.low, m.delta.high, fd)} | {_p(m.p_value)} "
-                f"| {_p(m.p_value_adj)} | {m.decision_label} | {m.trust_label} |"
+                f"| {_p(m.p_value_adj)} | {m.decision_text(self.baseline)} | {m.trust_label} |"
             )
         return "\n".join(lines)
 
@@ -510,8 +517,9 @@ class Report:
 class Leaderboard:
     """Сравнение нескольких кандидатов с одной базой.
 
-    ``table`` — строка на пару «кандидат × метрика»; ``reports`` — полный отчёт
-    по каждому кандидату. p-value скорректированы методом Romano–Wolf на всё семейство.
+    ``table`` — строка на пару «кандидат × метрика», кандидаты упорядочены по Δ первой
+    метрики (лучший — первым); ``reports`` — полный отчёт по каждому кандидату. p-value
+    скорректированы методом Romano–Wolf на всё семейство «кандидат × метрика».
     """
 
     table: pd.DataFrame
@@ -521,6 +529,14 @@ class Leaderboard:
 
     def __getitem__(self, name: str) -> Report:
         return self.reports[name]
+
+    def __repr__(self) -> str:
+        lines = [f"Leaderboard({len(self.reports)} кандидатов против {self.baseline})"]
+        for name, report in self.reports.items():
+            for m in report.metrics.values():
+                lines.append(f"  {name} / {m.metric}: Δ = {_diff(m.delta.value, m.binary)}, "
+                             f"{m.decision_text(self.baseline)}, доверие: {m.trust_label}")
+        return "\n".join(lines)
 
     def _repr_markdown_(self) -> str:
         return self.to_markdown()
@@ -533,21 +549,24 @@ class Leaderboard:
             f"| Кандидат | Метрика | Δ | Δ, % | {level} ДИ для Δ | p | p (RW) | Вывод | Доверие |",
             "|---|---|---|---|---|---|---|---|---|",
         ]
+        adjusted = False
         for name, report in self.reports.items():
             for m in report.metrics.values():
+                adjusted = adjusted or m.p_value_adj is not None
                 fd = lambda x, b=m.binary: _diff(x, b)  # noqa: E731
                 lines.append(
                     f"| {name} | {m.metric} | {fd(m.delta.value)} | {_pct(m.lift.value) if m.lift else '—'} "
                     f"| {_interval(m.delta.low, m.delta.high, fd)} | {_p(m.p_value)} "
-                    f"| {_p(m.p_value_adj)} | {m.decision_label} | {m.trust_label} |"
+                    f"| {_p(m.p_value_adj)} | {m.decision_text(self.baseline)} | {m.trust_label} |"
                 )
-        n = len(self.table)
-        lines += [
-            "",
-            f"p (RW) скорректированы методом Romano–Wolf на все {n} пар «кандидат × метрика». "
+        lines.append("")
+        if adjusted:
+            pairs = _plural(len(self.table), "пару", "пары", "пар")
+            lines.append(f"p (RW) скорректированы методом Romano–Wolf на {pairs} «кандидат × метрика».")
+        lines.append(
             "Оценка лучшего из многих кандидатов систематически завышена (winner's curse): "
-            "перед внедрением подтвердите победителя на свежих логах или в A/B-тесте.",
-        ]
+            "перед внедрением подтвердите победителя на свежих логах или в A/B-тесте."
+        )
         return "\n".join(lines)
 
     def to_dict(self) -> dict:
@@ -557,3 +576,11 @@ class Leaderboard:
             "table": self.table.to_dict(orient="records"),
             "reports": {k: v.to_dict() for k, v in self.reports.items()},
         })
+
+    def to_json(self, path: Optional[str] = None) -> str:
+        """JSON-представление; при ``path`` ещё и записывает его в файл."""
+        text = json.dumps(self.to_dict(), ensure_ascii=False, indent=2, allow_nan=False)
+        if path is not None:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+        return text

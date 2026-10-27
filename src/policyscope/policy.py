@@ -81,17 +81,45 @@ def epsilon_greedy(scores: Any, epsilon: float = 0.1) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
+def _is_default_index(index: pd.Index, n: int) -> bool:
+    return isinstance(index, pd.RangeIndex) and len(index) == n and index.start == 0 and index.step == 1
+
+
+def _is_permuted_range(index: pd.Index, n: int) -> bool:
+    if not pd.api.types.is_integer_dtype(index) or len(index) != n:
+        return False
+    return bool(np.array_equal(np.sort(index.to_numpy()), np.arange(n)))
+
+
 def _aligned_rows(frame: pd.DataFrame, logs_index: pd.Index, role: str) -> pd.DataFrame:
-    if len(frame) == len(logs_index) and frame.index.equals(logs_index):
+    """Сопоставляет строки таблицы политики со строками логов.
+
+    - Индексы совпадают — строки уже выровнены.
+    - У таблицы индекс по умолчанию (0..n-1) — это порядок строк логов (типичный результат
+      ``pd.DataFrame(model.predict_proba(X))``). Если же индекс логов — перестановка 0..n-1
+      (после ``sort_values`` или ``sample``), понять, имелись в виду позиции или метки,
+      нельзя: это ошибка, а не молчаливая перестановка строк.
+    - Иначе — по меткам индекса, если множества меток совпадают.
+    """
+    n = len(logs_index)
+    if len(frame) == n and frame.index.equals(logs_index):
         return frame
-    if frame.index.is_unique and len(frame) == len(logs_index) and set(frame.index) == set(logs_index):
-        return frame.loc[logs_index]
-    if isinstance(frame.index, pd.RangeIndex) and len(frame) == len(logs_index):
+    if _is_default_index(frame.index, n):
+        if _is_permuted_range(logs_index, n):
+            raise ValueError(
+                f"Строки политики {role} нельзя однозначно сопоставить с логами: у таблицы индекс "
+                "по умолчанию 0..n-1, а индекс логов — его перестановка (например, после "
+                "sort_values или sample). Непонятно, сопоставлять строки по позиции или по метке. "
+                "Передайте таблицу с index=logs.index или сбросьте индекс логов: "
+                "logs.reset_index(drop=True)."
+            )
         return frame.set_axis(logs_index, axis=0)
+    if frame.index.is_unique and len(frame) == n and set(frame.index) == set(logs_index):
+        return frame.loc[logs_index]
     raise ValueError(
         f"Строки политики {role} не сопоставляются со строками логов: индексы различаются "
-        f"({len(frame)} строк против {len(logs_index)}). Передайте таблицу с тем же индексом, "
-        "что у логов, или с RangeIndex той же длины."
+        f"({len(frame)} строк против {n}). Передайте таблицу с тем же индексом, что у логов, "
+        "или с индексом по умолчанию той же длины."
     )
 
 
@@ -167,7 +195,8 @@ def _from_array(arr: np.ndarray, data: LogData, role: str) -> np.ndarray:
             f"{data.actions[:6]}. Передайте DataFrame, у которого колонки — метки действий: "
             "pd.DataFrame(probs, columns=model.classes_)."
         )
-    frame = pd.DataFrame(arr, columns=list(range(arr.shape[1])))
+    # У массива нет индекса: строки по определению идут в порядке логов.
+    frame = pd.DataFrame(arr, index=data.index, columns=list(range(arr.shape[1])))
     return _from_frame(frame, data, role)
 
 

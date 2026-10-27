@@ -109,7 +109,10 @@ class TestCaching:
 class TestCompare:
     def test_leaderboard(self, bandit, evaluator):
         board = evaluator.compare({"b": bandit.policy_b, "a": bandit.policy_a})
-        assert list(board.table["candidate"]) == ["b", "a"]
+        assert set(board.table["candidate"]) == {"a", "b"}
+        deltas = board.table["delta"].tolist()
+        assert deltas == sorted(deltas, reverse=True)  # рейтинг: лучший первым
+        assert list(board.reports) == list(board.table["candidate"])
         assert board["b"]["reward"].p_value_adj >= board["b"]["reward"].p_value - 0.02
         assert "Romano–Wolf" in board.to_markdown()
         json.dumps(board.to_dict(), allow_nan=False)
@@ -256,3 +259,47 @@ def test_outlying_feature_does_not_break_revenue_estimates():
     rows = m.estimators.set_index("estimator")["delta"]
     assert abs(rows["dr"] - truth) < 4 * m.delta.se
     assert abs(rows["dm"] - truth) < 10
+
+
+class TestInputGuards:
+    def test_constant_metric_blocks_the_decision(self, bandit):
+        logs = bandit.logs.assign(visits=1)
+        rep = ps.evaluate(logs, bandit.policy_b, action="action", reward=["reward", "visits"],
+                          propensity="propensity", features=["x1", "x2"])
+        m = rep["visits"]
+        assert m.decision == "inconclusive"
+        assert "constant_metric" in {f.code for f in m.findings}
+        assert rep["reward"].p_value_adj is not None and np.isfinite(rep["reward"].p_value_adj)
+
+    def test_lower_is_better_accepts_a_string(self, bandit):
+        ev = ps.Evaluator(bandit.logs, action="action", reward="reward", lower_is_better="reward",
+                          features=["x1", "x2"], propensity="propensity")
+        assert ev.lower_is_better == frozenset({"reward"})
+
+    def test_random_state_must_be_integer(self, bandit):
+        with pytest.raises(ValueError, match="random_state"):
+            ps.Evaluator(bandit.logs, action="action", reward="reward", random_state=None)
+
+    def test_too_few_clusters_for_folds(self, bandit):
+        logs = bandit.logs.assign(user_id=np.arange(len(bandit.logs)) % 3)
+        with pytest.raises(ValueError, match="фолдов"):
+            ps.Evaluator(logs, action="action", reward="reward", cluster="user_id")
+
+    def test_too_few_rows_is_explained(self):
+        b = make_bandit(20, seed=1)
+        m = ps.evaluate(b.logs, b.policy_b, action="action", reward="reward", propensity="propensity",
+                        features=["x1", "x2"])["reward"]
+        assert "too_few_rows" in {f.code for f in m.findings} and m.decision == "inconclusive"
+
+    def test_one_shot_evaluate_accepts_baseline_name(self, bandit):
+        rep = ps.evaluate(bandit.logs, bandit.policy_b, action="action", reward="reward",
+                          propensity="propensity", features=["x1", "x2"],
+                          baseline=bandit.policy_a, baseline_name="прод")
+        assert rep.baseline == "прод"
+
+
+def test_leaderboard_repr_and_json(bandit, evaluator):
+    board = evaluator.compare({"b": bandit.policy_b, "a": bandit.policy_a}, inference="none")
+    assert "кандидат" in repr(board).lower()
+    assert "Romano–Wolf" not in board.to_markdown()  # p-value не считались
+    json.loads(board.to_json())

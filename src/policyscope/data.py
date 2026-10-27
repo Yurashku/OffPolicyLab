@@ -18,6 +18,8 @@ __all__ = ["LogData", "prepare_logs"]
 #: Категориальный признак с большим числом уровней в авто-режиме пропускается:
 #: one-hot на тысячи уровней раздувает модели и почти всегда означает идентификатор.
 MAX_AUTO_LEVELS = 50
+#: Даже явно заданный категориальный признак с большим числом уровней — почти всегда ошибка.
+MAX_EXPLICIT_LEVELS = 500
 
 #: Имена, которые почти всегда обозначают единицу наблюдения (клиента, сессию).
 _CLUSTER_NAMES = ("user_id", "userid", "user", "client_id", "clientid", "client",
@@ -91,7 +93,8 @@ def _require_columns(df: pd.DataFrame, cols: Sequence[str], what: str) -> None:
 
 
 def _sorted_labels(values: pd.Series) -> list:
-    labels = list(pd.unique(values))
+    # Python-скаляры, а не numpy: иначе в сообщениях и JSON видны np.int64(…).
+    labels = [v.item() if isinstance(v, np.generic) else v for v in pd.unique(values)]
     try:
         return sorted(labels)
     except TypeError:  # смешанные типы меток — оставляем порядок появления
@@ -123,10 +126,10 @@ def _propensity_vector(df: pd.DataFrame, col: str) -> np.ndarray:
     s = df[col]
     if not pd.api.types.is_numeric_dtype(s):
         raise ValueError(f"Пропенсити '{col}' должны быть числовыми, а не {s.dtype}")
-    p = s.to_numpy(dtype=float)
-    n_nan = int(np.isnan(p).sum())
+    n_nan = int(s.isna().sum())
     if n_nan:
         raise ValueError(f"В пропенсити '{col}' {n_nan} пропусков")
+    p = s.to_numpy(dtype=float)
     bad = int(((p <= 0.0) | (p > 1.0)).sum())
     if bad:
         raise ValueError(
@@ -163,6 +166,8 @@ def _select_features(
             skipped[col] = "константа"
         elif _is_id_like(col, s):
             skipped[col] = "похоже на идентификатор"
+        elif "propens" in str(col).lower():
+            skipped[col] = "похоже на пропенсити: передайте её через propensity="
         elif pd.api.types.is_numeric_dtype(s) or pd.api.types.is_bool_dtype(s):
             chosen.append(col)
         elif s.nunique() > MAX_AUTO_LEVELS:
@@ -219,7 +224,14 @@ def _encode_features(df: pd.DataFrame, cols: list[str]) -> tuple[np.ndarray, lis
             names.append(str(col))
         else:
             levels = _sorted_labels(s.astype(object))
-            codes = pd.Categorical(s, categories=levels).codes
+            if len(levels) > MAX_EXPLICIT_LEVELS:
+                raise ValueError(
+                    f"Признак '{col}' категориальный, уровней {len(levels)}: one-hot на столько "
+                    "уровней раздует модели и почти наверняка означает идентификатор. Сгруппируйте "
+                    "редкие уровни или передайте признак в числовом виде."
+                )
+            # Через object: у category-колонки могут быть неиспользуемые уровни.
+            codes = pd.Categorical(s.astype(object), categories=levels).codes
             onehot = np.zeros((len(s), len(levels)), dtype=float)
             onehot[np.arange(len(s)), codes] = 1.0
             blocks.append(onehot)
@@ -296,7 +308,7 @@ def prepare_logs(
     if n_nan:
         raise ValueError(f"В колонке действия '{action}' {n_nan} пропусков")
     actions = _sorted_labels(df[action])
-    a = pd.Categorical(df[action], categories=actions).codes.astype(int)
+    a = pd.Categorical(df[action].astype(object), categories=actions).codes.astype(int)
 
     reward_map = {col: _reward_vector(df, col) for col in rewards}
     binary = {col: _is_binary(r) for col, r in reward_map.items()}

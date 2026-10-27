@@ -147,3 +147,40 @@ class TestClusterHint:
         df["client_id"] = np.arange(len(df)) // 3
         d = prep(df, features=["age"], cluster="client_id")
         assert d.cluster_hint is None and d.n_clusters == len(df) // 3 + (len(df) % 3 > 0)
+
+
+class TestDtypes:
+    def test_category_columns_with_unused_levels_do_not_warn(self):
+        import warnings
+
+        df = frame()
+        df["offer"] = pd.Categorical(df["offer"], categories=["card", "loan", "mortgage"])
+        df["region"] = pd.Categorical(df["region"], categories=["north", "south", "east", "west"])
+        df["age_band"] = pd.cut(df["age"], bins=[0, 30, 50, 100])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            d = prep(df, features=["age", "region", "age_band"])
+        assert d.actions == ["card", "loan"]
+        assert "region=west" not in d.feature_names  # уровень без наблюдений не кодируется
+
+    def test_action_labels_are_python_scalars(self):
+        df = frame().assign(offer=lambda x: np.where(x["vip"], 7, 3))
+        d = prep(df, features=["age"])
+        assert d.actions == [3, 7] and all(type(a) is int for a in d.actions)
+
+    def test_nullable_propensity_gives_friendly_error(self):
+        df = frame()
+        df["p"] = pd.array([0.5] * (len(df) - 1) + [None], dtype="Float64")
+        with pytest.raises(ValueError, match="пропусков"):
+            prep(df, propensity="p")
+
+    def test_huge_explicit_categorical_is_refused(self):
+        df = frame(n=1200)
+        df["code"] = [f"c{i}" for i in range(len(df))]
+        with pytest.raises(ValueError, match="уровней"):
+            prep(df, features=["age", "code"])
+
+    def test_auto_features_skip_propensity_like_columns(self):
+        df = frame().rename(columns={"p": "propensity_logged"})
+        d = prep(df)
+        assert "propensity_logged" not in d.features

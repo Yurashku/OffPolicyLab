@@ -197,10 +197,19 @@ class OfferSimulator:
         return SimPolicy(self, kind, weights, epsilon=epsilon, temperature=temperature)
 
     def _probs(self, policy: Any, df: pd.DataFrame) -> np.ndarray:
+        """Матрица политики ``(n, 4)`` в порядке ``ACTIONS`` с проверкой формы и сумм."""
         probs = policy.action_probs(df) if hasattr(policy, "action_probs") else policy
         if isinstance(probs, pd.DataFrame):
-            return probs.reindex(columns=list(ACTIONS), fill_value=0.0).to_numpy(dtype=float)
-        return np.asarray(probs, dtype=float)
+            unknown = [c for c in probs.columns if c not in ACTIONS]
+            if unknown:
+                raise ValueError(f"Колонки политики {unknown} — не офферы симулятора {list(ACTIONS)}")
+            probs = probs.reindex(columns=list(ACTIONS), fill_value=0.0)
+        values = np.asarray(probs, dtype=float)
+        if values.shape != (len(df), len(ACTIONS)):
+            raise ValueError(f"Политика должна иметь форму ({len(df)}, {len(ACTIONS)}), а не {values.shape}")
+        if not np.allclose(values.sum(axis=1), 1.0, atol=1e-6) or (values < 0).any():
+            raise ValueError("Строки политики должны быть распределениями: неотрицательны и суммируются в 1")
+        return values
 
     def simulate(self, df: pd.DataFrame, policy: Any, *, log_propensity: bool = True) -> pd.DataFrame:
         """Логи политики: к строкам ``df`` добавляются ``offer``, ``propensity``,
