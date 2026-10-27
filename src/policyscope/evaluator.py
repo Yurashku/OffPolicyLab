@@ -18,6 +18,7 @@ import logging
 import os
 import sys
 import warnings
+from dataclasses import replace
 from functools import partial
 from typing import Any, Mapping, Optional, Sequence, Union
 
@@ -64,6 +65,19 @@ __all__ = ["Evaluator", "evaluate", "PRIMARY_ESTIMATORS"]
 #: если модель исхода верна, но его смещение целиком определяется этой моделью и по
 #: логам не проверяется (см. docs/estimators.md).
 PRIMARY_ESTIMATORS = ("dr", "sndr", "ips", "snips", "dm")
+#: Почему ``estimator="auto"`` выбирает DR. Выбор по самому узкому интервалу не делается:
+#: он занижает интервал (выбор по шуму) и отдавал бы предпочтение DM, чьё смещение
+#: интервал не отражает (см. docs/methodology.md, «Выбор основного оценщика»).
+AUTO_ESTIMATOR_REASONS = {
+    "logged": (
+        "пропенсити залогированы, поэтому DR несмещён при любой модели исхода, а модель "
+        "исхода уменьшает его разброс по сравнению с IPS и SNIPS"
+    ),
+    "estimated": (
+        "пропенсити оценены моделью: IPS и SNIPS переносят её ошибку в оценку целиком, DM — "
+        "ошибку модели исхода, а DR смещается, только если ошиблись обе модели"
+    ),
+}
 #: Объём, начиная с которого даже небольшая ошибка спецификации модели исхода сравнима
 #: с интервалом DM (симуляции: покрытие падает до ~0.8 к 3·10⁴ строк).
 DM_LARGE_N = 10_000
@@ -241,7 +255,7 @@ class Evaluator:
         policy: Any,
         *,
         baseline: Any = None,
-        estimator: str = "dr",
+        estimator: str = "auto",
         inference: str = "auto",
         alpha: float = 0.05,
         n_boot: int = 200,
@@ -258,8 +272,10 @@ class Evaluator:
                 (``V(A)`` = средняя награда; у DM — прогноз модели на залогированных действиях).
                 Политика в том же формате — с ней (например, с прод-версией A без
                 исследования); её значение оценивается тем же оценщиком.
-            estimator: Основной оценщик: ``dr`` (по умолчанию), ``sndr``, ``ips``, ``snips``
-                или ``dm`` (явный выбор: точнее при верной модели исхода, но её смещение не
+            estimator: Основной оценщик. ``auto`` (по умолчанию) выбирает его по тому,
+                залогированы ли пропенсити, и объясняет выбор в отчёте; сейчас это всегда DR
+                (почему — в ``report.settings["estimator_reason"]``). Явно: ``dr``, ``sndr``, ``ips``,
+                ``snips`` или ``dm`` (точнее при верной модели исхода, но её смещение не
                 проверяется; только со встроенной моделью и bootstrap-интервалом).
                 Остальные оценщики считаются для сверки на тех же моделях.
             inference: ``auto`` — аналитический интервал при логированных пропенсити;
@@ -281,7 +297,7 @@ class Evaluator:
         candidates: Mapping[str, Any],
         *,
         baseline: Any = None,
-        estimator: str = "dr",
+        estimator: str = "auto",
         inference: str = "auto",
         alpha: float = 0.05,
         n_boot: int = 200,
@@ -304,9 +320,22 @@ class Evaluator:
     # Расчёт
     # ------------------------------------------------------------------
 
+    def _resolve_estimator(self, estimator: str) -> tuple[str, Optional[str]]:
+        """Основной оценщик и причина выбора (``None`` — оценщик задан явно)."""
+        if estimator != "auto":
+            return estimator, None
+        source = "logged" if self.data.propensity is not None else "estimated"
+        return "dr", AUTO_ESTIMATOR_REASONS[source]
+
+    def _replicate_config(self) -> NuisanceConfig:
+        """Настройки для bootstrap-реплик: дизайн модели исхода уже выбран на полной выборке."""
+        return replace(self.config, interactions=dict(self.nuisance.interactions))
+
     def _validate(self, estimator: str, inference: str, alpha: float, n_boot: int) -> str:
         if estimator not in PRIMARY_ESTIMATORS:
-            raise ValueError(f"Неизвестный оценщик '{estimator}'. Доступны: {PRIMARY_ESTIMATORS}")
+            raise ValueError(
+                f"Неизвестный оценщик '{estimator}'. Доступны: 'auto', {', '.join(map(repr, PRIMARY_ESTIMATORS))}"
+            )
         if self.data.propensity is None and estimator in ("ips", "snips"):
             raise ValueError(
                 f"При оценённых пропенсити '{estimator}' не может быть основным: смещение от "
@@ -376,6 +405,7 @@ class Evaluator:
         n_boot: int,
         baseline_name: Optional[str],
     ) -> Leaderboard:
+        estimator, estimator_reason = self._resolve_estimator(estimator)
         inference = self._validate(estimator, inference, alpha, n_boot)
         data, th = self.data, self.thresholds
         base_label = baseline_name or ("A" if baseline is None else "база")
@@ -435,7 +465,8 @@ class Evaluator:
             self._bootstrap_eta(n_boot, estimator)
 
             samples = run_bootstrap(
-                partial(_replicate, data, self.config, pis, base), clusters=data.clusters, n_clusters=data.n_clusters,
+                partial(_replicate, data, self._replicate_config(), pis, base),
+                clusters=data.clusters, n_clusters=data.n_clusters,
                 clustered=data.is_clustered, n_boot=n_boot,
                 seed=self.random_state + 2, n_jobs=self.n_jobs,
             ).reshape(n_boot, P, M, E, 2)
@@ -465,7 +496,7 @@ class Evaluator:
         else:
             p_adj = None
 
-        settings = self._settings(estimator, inference, alpha, n_boot)
+        settings = self._settings(estimator, estimator_reason, inference, alpha, n_boot)
         reports = {}
         for i, name in enumerate(names):
             reports[name] = self._report(
@@ -541,10 +572,14 @@ class Evaluator:
     # Сборка отчёта
     # ------------------------------------------------------------------
 
-    def _settings(self, estimator: str, inference: str, alpha: float, n_boot: int) -> dict:
-        d = self.data
+    def _settings(
+        self, estimator: str, estimator_reason: Optional[str], inference: str, alpha: float, n_boot: int,
+    ) -> dict:
+        d, nuis = self.data, self.nuisance
         return {
             "estimator": estimator,
+            "estimator_auto": estimator_reason is not None,
+            "estimator_reason": estimator_reason,
             "inference": inference,
             "alpha": alpha,
             "n_boot": n_boot if inference == "bootstrap" else None,
@@ -565,10 +600,12 @@ class Evaluator:
             "outcome_model": {
                 m: _model_name(
                     self.config.model_for(m),
-                    OUTCOME_KIND_LABELS[outcome_kind(d.rewards[m], d.binary[m])] + " с x×a",
+                    OUTCOME_KIND_LABELS[outcome_kind(d.rewards[m], d.binary[m])]
+                    + (" с x×a" if nuis.interactions.get(m, True) else " без x×a"),
                 )
                 for m in d.reward_cols
             },
+            "outcome_design": dict(nuis.design_notes),
             "random_state": self.random_state,
             "actions": list(d.actions),
         }
@@ -658,6 +695,19 @@ class Evaluator:
                 estimated_propensity=nuis.source == "estimated",
                 ess_value=ess_value, th=th,
             )
+            if not nuis.interactions.get(metric, True) and nuis.design_notes.get(metric, "").startswith("без x×a: "):
+                metric_findings.append(Finding(
+                    code="outcome_without_interactions",
+                    severity="info",
+                    metric=metric,
+                    title="Модель исхода без взаимодействий x×a",
+                    detail=(
+                        f"{nuis.design_notes[metric].removeprefix('без x×a: ').capitalize()}. Модель "
+                        "различает действия только сдвигом: DM теряет неоднородность эффекта, DR — "
+                        "часть точности (смещения при логированных пропенсити это не даёт)."
+                    ),
+                    advice="Передайте features= с меньшим числом признаков или задайте outcome_model=.",
+                ))
             r_metric = data.rewards[metric]
             if np.ptp(r_metric) == 0:
                 metric_findings.append(Finding(
@@ -741,6 +791,15 @@ class Evaluator:
                     p_value=get("p_value", m, e) if show_ci else None,
                 ))
 
+            statuses = [c.status for c in checks]
+            if "fail" in statuses:
+                agreement = "disagree"
+            elif statuses and all(s == "ok" for s in statuses):
+                agreement = "agree"
+            else:
+                agreement = "unclear"
+            point_deltas = [row.delta.value for row in rows if np.isfinite(row.delta.value)]
+
             metric_reports[metric] = MetricReport(
                 metric=metric,
                 estimator=estimator,
@@ -760,6 +819,8 @@ class Evaluator:
                 rows=tuple(rows),
                 outcome_quality=self._outcome_quality(metric),
                 floor_sensitivity=floor,
+                agreement=agreement,
+                agreement_spread=float(np.ptp(point_deltas)) if point_deltas else None,
             )
         return Report(
             policy=name,
@@ -781,7 +842,7 @@ def evaluate(
     cluster: Optional[str] = None,
     features: Optional[Sequence[str]] = None,
     baseline: Any = None,
-    estimator: str = "dr",
+    estimator: str = "auto",
     inference: str = "auto",
     alpha: float = 0.05,
     n_boot: int = 200,

@@ -69,6 +69,7 @@ def test_wrong_propensities_detected_by_triangulation():
     assert {c.name: c.status for c in dr.checks}["propensity"] == "fail"
     assert codes(dr)["propensity_check_failed"] == "caution"
     assert codes(ips)["propensity_check_failed"] == "block"
+    assert dr.agreement == "disagree"
 
 
 def test_wrong_outcome_model_detected_but_harmless_with_logged_propensity():
@@ -79,6 +80,7 @@ def test_wrong_outcome_model_detected_but_harmless_with_logged_propensity():
     assert {c.name: c.status for c in m.checks}["outcome"] == "fail"
     assert codes(m)["outcome_check_failed"] == "info"
     assert m.delta.low <= b.delta <= m.delta.high
+    assert m.agreement == "disagree" and m.agreement_spread > 0
 
 
 def test_critically_low_ess_blocks():

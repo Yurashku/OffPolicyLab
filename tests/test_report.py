@@ -31,6 +31,28 @@ def test_markdown_sections(report):
     assert report._repr_markdown_() == md
 
 
+def test_main_table_shows_values_with_intervals_and_agreement(report):
+    md = report.to_markdown()
+    assert "| V(A) [95% ДИ] | V(B) [95% ДИ] |" in md and "| Оценщики |" in md
+    m = report["reward"]
+    assert f"{100 * m.v_b.value:.2f}% [{100 * m.v_b.low:.2f}%; {100 * m.v_b.high:.2f}%]" in md
+
+
+def test_estimator_choice_and_agreement_are_explained(report):
+    md = report.to_markdown()
+    assert "выбран автоматически" in md
+    assert "Основной оценщик — DR, выбран автоматически: пропенсити залогированы" in md
+    assert f"**reward: {report['reward'].agreement_label}.** Δ по 5 оценщикам" in md
+
+
+def test_trust_reason_is_named_in_the_headline():
+    b = make_bandit(1500, seed=22)
+    rep = ps.evaluate(b.logs.drop(columns="propensity"), b.policy_b, action="action",
+                      reward="reward", features=["x1", "x2"], inference="none")
+    assert rep["reward"].trust == "caution"
+    assert "с осторожностью (пропенсити оценены моделью" in rep.to_markdown()
+
+
 def test_binary_metric_in_percentage_points(report):
     md = report.to_markdown()
     assert "п.п." in md and "%" in md

@@ -69,6 +69,12 @@ class TestSchema:
                     "trust", "findings", "checks", "estimators", "outcome_quality"):
             assert key in m
 
+    def test_summary_has_value_intervals_and_agreement(self, bandit, evaluator):
+        s = evaluator.evaluate(bandit.policy_b).summary()
+        for col in ("V_A_low", "V_A_high", "V_B_low", "V_B_high", "agreement"):
+            assert col in s.columns
+        assert s.loc["reward", "V_B_low"] < s.loc["reward", "V_B"] < s.loc["reward", "V_B_high"]
+
     def test_summary_frame(self, bandit, evaluator):
         s = evaluator.evaluate(bandit.policy_b).summary()
         assert list(s.index) == ["reward"]
@@ -114,7 +120,9 @@ class TestCompare:
         assert deltas == sorted(deltas, reverse=True)  # рейтинг: лучший первым
         assert list(board.reports) == list(board.table["candidate"])
         assert board["b"]["reward"].p_value_adj >= board["b"]["reward"].p_value - 0.02
-        assert "Romano–Wolf" in board.to_markdown()
+        md = board.to_markdown()
+        assert "Romano–Wolf" in md and "| V(A) [95% ДИ] | V(кандидата) [95% ДИ] |" in md
+        assert {"V_B_low", "V_B_high", "agreement"} <= set(board.table.columns)
         json.dumps(board.to_dict(), allow_nan=False)
 
     def test_empty_candidates(self, evaluator):
@@ -186,6 +194,54 @@ class TestDirectMethod:
     def test_dm_row_without_interval_when_not_primary(self, bandit, evaluator):
         row = evaluator.evaluate(bandit.policy_b)["reward"].estimators.set_index("estimator").loc["dm"]
         assert pd.isna(row["delta_low"])
+
+
+class TestAutoEstimator:
+    def test_auto_is_default_and_explained(self, bandit, evaluator):
+        s = evaluator.evaluate(bandit.policy_b).settings
+        assert s["estimator"] == "dr" and s["estimator_auto"]
+        assert "залогированы" in s["estimator_reason"]
+
+    def test_auto_reason_for_estimated_propensities(self):
+        b = make_bandit(1500, seed=12)
+        ev = ps.Evaluator(b.logs.drop(columns="propensity"), action="action", reward="reward",
+                          features=["x1", "x2"])
+        s = ev.evaluate(b.policy_b, inference="none").settings
+        assert s["estimator"] == "dr" and "оценены моделью" in s["estimator_reason"]
+
+    def test_explicit_estimator_is_not_auto(self, bandit, evaluator):
+        s = evaluator.evaluate(bandit.policy_b, estimator="sndr").settings
+        assert s["estimator"] == "sndr" and not s["estimator_auto"] and s["estimator_reason"] is None
+
+    def test_unknown_estimator_lists_auto(self, evaluator, bandit):
+        with pytest.raises(ValueError, match="'auto'"):
+            evaluator.evaluate(bandit.policy_b, estimator="magic")
+
+
+class TestAgreement:
+    def test_estimators_agree_on_well_specified_logs(self, bandit, evaluator):
+        m = evaluator.evaluate(bandit.policy_b)["reward"]
+        assert m.agreement == "agree"
+        deltas = [row.delta.value for row in m.rows]
+        assert m.agreement_spread == pytest.approx(max(deltas) - min(deltas))
+
+    def test_absolute_values_have_intervals(self, bandit, evaluator):
+        m = evaluator.evaluate(bandit.policy_b, baseline=bandit.policy_a)["reward"]
+        for est in (m.v_a, m.v_b):
+            assert est.low < est.value < est.high
+        assert m.v_b.low <= bandit.value_b <= m.v_b.high
+
+
+def test_too_wide_outcome_design_is_reported(bandit, monkeypatch):
+    import policyscope.nuisance as nuisance_module
+
+    monkeypatch.setattr(nuisance_module, "MAX_DESIGN_CELLS", 100)
+    ev = ps.Evaluator(bandit.logs, action="action", reward="reward", propensity="propensity",
+                      features=["x1", "x2"])
+    rep = ev.evaluate(bandit.policy_b)
+    assert "без x×a" in rep.settings["outcome_model"]["reward"]
+    finding = next(f for f in rep["reward"].findings if f.code == "outcome_without_interactions")
+    assert finding.severity == "info" and "слишком велика" in finding.detail
 
 
 class TestInferenceModes:
