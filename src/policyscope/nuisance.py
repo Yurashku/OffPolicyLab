@@ -45,6 +45,13 @@ __all__ = [
 #: Если блок взаимодействий x×a его превышает, модель строится на главных эффектах.
 MAX_DESIGN_CELLS = 30_000_000
 
+#: Сетка обратной силы L2-штрафа (``C``) модели пропенсити по умолчанию. Перебирается от
+#: слабой регуляризации к сильной; выбирается значение с наименьшей out-of-fold log-loss.
+#: Без подбора (C = 1) модель на многих разреженных признаках переобучается: на Open Bandit
+#: Dataset (равномерная политика, 34 действия, 66 признаков) она выдавала пропенсити от 0 до
+#: 0.98 вместо 1/34, и DR занижал V(B) на четверть.
+PROPENSITY_C_GRID = (10.0, 1.0, 1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6)
+
 #: До этой ширины дизайна бинарные логистические регрессии решаются методом Ньютона:
 #: на узких матрицах он в разы быстрее lbfgs и сходится точнее; на широких его
 #: память и время растут как квадрат числа столбцов.
@@ -64,6 +71,9 @@ class NuisanceConfig:
         n_folds: Число фолдов cross-fitting.
         propensity_floor: Доля от частоты действия, ниже которой оценённое пропенсити
             не опускается. Применяется только к оценённым пропенсити.
+        propensity_C: ``C`` модели пропенсити по умолчанию. ``None`` — подобрать по
+            out-of-fold log-loss на сетке :data:`PROPENSITY_C_GRID`; как и дизайн модели
+            исхода, выбирается на полной выборке и передаётся bootstrap-репликам.
         interactions: Метрика -> использовать ли блок x×a в модели исхода. ``None`` (или
             метрика, отсутствующая в словаре) — использовать, если дизайн помещается в
             :data:`MAX_DESIGN_CELLS`. Решение принимается на полной выборке, и
@@ -74,6 +84,7 @@ class NuisanceConfig:
     outcome_model: Any = None
     n_folds: int = 5
     propensity_floor: float = 0.1
+    propensity_C: Optional[float] = None
     interactions: Optional[Mapping[str, bool]] = None
 
     def model_for(self, metric: str) -> Any:
@@ -103,9 +114,12 @@ class Nuisance:
         floor: Пол для каждого действия ``(k,)`` (только для оценённых).
         unseen_share: Доля строк, чьё действие не встретилось в обучающем фолде.
         mu: Метрика -> прогнозы ``(n, k)``.
-        fit_seconds: Время обучения (для прогноза длительности bootstrap).
+        fit_seconds: Время обучения без подбора ``C`` (для прогноза длительности bootstrap).
         interactions: Метрика -> использован ли блок x×a в модели исхода.
         design_notes: Метрика -> дизайн модели исхода и причина (для отчёта).
+        propensity_C: ``C`` модели пропенсити по умолчанию (``None`` — пропенсити
+            залогированы или модель задана пользователем).
+        propensity_losses: ``C`` -> out-of-fold log-loss, если ``C`` подбиралось.
     """
 
     p_taken: np.ndarray
@@ -118,6 +132,8 @@ class Nuisance:
     fit_seconds: float
     interactions: dict[str, bool] = field(default_factory=dict)
     design_notes: dict[str, str] = field(default_factory=dict)
+    propensity_C: Optional[float] = None
+    propensity_losses: dict[float, float] = field(default_factory=dict)
 
     def floored(self, a: np.ndarray, factor: float) -> np.ndarray:
         """Пропенсити с полом, умноженным на ``factor`` (анализ чувствительности)."""
@@ -127,8 +143,8 @@ class Nuisance:
         return np.maximum(self.p_raw, factor * self.floor[a])
 
 
-def _default_propensity_model():
-    return make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000))
+def _default_propensity_model(C: float = 1.0):
+    return make_pipeline(StandardScaler(), LogisticRegression(C=C, max_iter=1000))
 
 
 class TwoPartRegressor(RegressorMixin, BaseEstimator):
@@ -271,6 +287,46 @@ def _propensity_oof(
     return probs, unseen
 
 
+def _tune_propensity(
+    X: np.ndarray, a: np.ndarray, k: int, folds: np.ndarray, n_folds: int,
+) -> tuple[float, np.ndarray, int, dict[float, float], float]:
+    """Подбирает ``C`` модели пропенсити по умолчанию по out-of-fold log-loss.
+
+    Log-loss — правдоподобие залогированных действий, то есть ровно то, что модель
+    пропенсити должна предсказывать (в отличие от модели исхода, где ошибка на
+    залогированных действиях не видит ошибок в контрастах).
+
+    Сетка идёт от слабой регуляризации к сильной и обрывается, когда потери растут два
+    шага подряд. Направление важно: при сильной регуляризации все модели почти
+    маргинальные, потери там лежат на плато, и шум на плато выглядел бы как рост — путь
+    от сильной регуляризации останавливался бы, не дойдя до моделей, которые учат
+    контекст. Выбор — одно значение из сетки, поэтому OOF-прогнозы победителя
+    используются как есть.
+
+    Последний элемент — время на отвергнутые значения ``C``: bootstrap-реплики их не
+    обучают, и прогноз длительности bootstrap не должен их учитывать.
+    """
+    rows = np.arange(len(a))
+    losses: dict[float, float] = {}
+    best: Optional[tuple[float, float, np.ndarray, int, float]] = None
+    worse, total = 0, 0.0
+    for C in PROPENSITY_C_GRID:
+        start = time.perf_counter()
+        probs, unseen = _propensity_oof(X, a, k, folds, n_folds, _default_propensity_model(C))
+        seconds = time.perf_counter() - start
+        total += seconds
+        loss = float(-np.mean(np.log(np.clip(probs[rows, a], 1e-12, None))))
+        losses[C] = loss
+        if best is None or loss < best[1]:
+            best, worse = (C, loss, probs, unseen, seconds), 0
+        else:
+            worse += 1
+            if worse == 2:
+                break
+    assert best is not None
+    return best[0], best[2], best[3], losses, total - best[4]
+
+
 def _outcome_oof(
     X: np.ndarray, a: np.ndarray, r: np.ndarray, k: int, binary: bool,
     folds: np.ndarray, n_folds: int, model: Any, kind: str, interactions: bool = True,
@@ -371,12 +427,24 @@ def _fit_nuisance(
     folds = make_folds(groups, config.n_folds, np.random.default_rng(seed))
 
     unseen = 0
+    propensity_C: Optional[float] = None
+    losses: dict[float, float] = {}
+    tuning_seconds = 0.0
     if data.propensity is not None:
         p_taken = data.propensity[idx]
         source, p_raw, p_max, floor = "logged", None, None, None
     else:
-        model = config.propensity_model or _default_propensity_model()
-        probs, unseen = _propensity_oof(X, a, k, folds, config.n_folds, model)
+        if config.propensity_model is not None:
+            probs, unseen = _propensity_oof(X, a, k, folds, config.n_folds, config.propensity_model)
+        elif config.propensity_C is not None:
+            propensity_C = config.propensity_C
+            probs, unseen = _propensity_oof(
+                X, a, k, folds, config.n_folds, _default_propensity_model(propensity_C),
+            )
+        else:
+            propensity_C, probs, unseen, losses, tuning_seconds = _tune_propensity(
+                X, a, k, folds, config.n_folds,
+            )
         rows = np.arange(len(a))
         p_raw = probs[rows, a]
         p_max = probs.max(axis=1)
@@ -402,7 +470,9 @@ def _fit_nuisance(
         floor=floor,
         unseen_share=unseen / len(a),
         mu=mu,
-        fit_seconds=time.perf_counter() - start,
+        fit_seconds=time.perf_counter() - start - tuning_seconds,
         interactions=interactions,
         design_notes=notes,
+        propensity_C=propensity_C,
+        propensity_losses=losses,
     )

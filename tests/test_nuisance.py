@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 from sklearn.dummy import DummyRegressor
 
@@ -207,3 +208,45 @@ class TestOutcomeDesign:
         narrow = _default_outcome_model("binary", NEWTON_MAX_COLUMNS)
         wide = _default_outcome_model("binary", NEWTON_MAX_COLUMNS + 1)
         assert narrow[-1].solver == "newton-cholesky" and wide[-1].solver == "lbfgs"
+
+
+class TestPropensityRegularization:
+    def test_uniform_logging_is_recovered_by_strong_regularization(self):
+        """Равномерная A и много шумных признаков: без подбора C пропенсити расползаются."""
+        rng = np.random.default_rng(41)
+        n, k = 3000, 6
+        logs = pd.DataFrame(rng.normal(size=(n, 20)), columns=[f"f{i}" for i in range(20)])
+        logs["action"] = rng.integers(0, k, n)
+        logs["reward"] = rng.integers(0, 2, n)
+        nuis = fit_nuisance(prep(logs, features=[f"f{i}" for i in range(20)]), NuisanceConfig(), seed=0)
+        assert nuis.propensity_C <= 1e-3
+        assert np.abs(nuis.p_raw - 1 / k).max() < 0.02
+        assert nuis.propensity_losses[nuis.propensity_C] == min(nuis.propensity_losses.values())
+
+    def test_contextual_logging_keeps_weak_regularization(self):
+        rng = np.random.default_rng(42)
+        n = 3000
+        x1, x2 = rng.normal(size=n), rng.normal(size=n)
+        scores = np.column_stack([1.5 * x1, -1.5 * x1, x2])
+        probs = np.exp(scores) / np.exp(scores).sum(axis=1, keepdims=True)
+        a = (rng.random(n)[:, None] > probs.cumsum(axis=1)).sum(axis=1).clip(0, 2)
+        logs = pd.DataFrame({"x1": x1, "x2": x2, "action": a, "reward": rng.integers(0, 2, n)})
+        nuis = fit_nuisance(prep(logs), NuisanceConfig(), seed=0)
+        assert nuis.propensity_C >= 0.1
+        assert np.corrcoef(nuis.p_raw, probs[np.arange(n), a])[0, 1] > 0.95
+
+    def test_pinned_C_skips_tuning(self):
+        b = make_bandit(600, seed=43)
+        nuis = fit_nuisance(prep(b.logs), NuisanceConfig(propensity_C=0.01), seed=0)
+        assert nuis.propensity_C == 0.01 and nuis.propensity_losses == {}
+
+    def test_custom_propensity_model_is_not_tuned(self):
+        import policyscope as ps
+        from sklearn.linear_model import LogisticRegression
+
+        b = make_bandit(600, seed=44)
+        ev = ps.Evaluator(b.logs.drop(columns="propensity"), action="action", reward="reward",
+                          features=["x1", "x2"], propensity_model=LogisticRegression(max_iter=500))
+        rep = ev.evaluate(b.policy_b, inference="none")
+        assert ev.nuisance.propensity_C is None
+        assert rep.settings["propensity_model"] == "LogisticRegression"

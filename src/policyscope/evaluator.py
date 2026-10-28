@@ -74,8 +74,8 @@ AUTO_ESTIMATOR_REASONS = {
         "исхода уменьшает его разброс по сравнению с IPS и SNIPS"
     ),
     "estimated": (
-        "пропенсити оценены моделью: IPS и SNIPS переносят её ошибку в оценку целиком, DM — "
-        "ошибку модели исхода, а DR смещается, только если ошиблись обе модели"
+        "пропенсити оценены моделью, а IPS и SNIPS переносят её ошибку в оценку целиком, DM — "
+        "ошибку модели исхода; DR смещается, только если ошиблись обе модели"
     ),
 }
 #: Объём, начиная с которого даже небольшая ошибка спецификации модели исхода сравнима
@@ -328,8 +328,9 @@ class Evaluator:
         return "dr", AUTO_ESTIMATOR_REASONS[source]
 
     def _replicate_config(self) -> NuisanceConfig:
-        """Настройки для bootstrap-реплик: дизайн модели исхода уже выбран на полной выборке."""
-        return replace(self.config, interactions=dict(self.nuisance.interactions))
+        """Настройки для bootstrap-реплик: ``C`` пропенсити и дизайн модели исхода уже выбраны."""
+        nuis = self.nuisance
+        return replace(self.config, propensity_C=nuis.propensity_C, interactions=dict(nuis.interactions))
 
     def _validate(self, estimator: str, inference: str, alpha: float, n_boot: int) -> str:
         if estimator not in PRIMARY_ESTIMATORS:
@@ -595,8 +596,13 @@ class Evaluator:
             "skipped_features": dict(d.skipped_features),
             "propensity_model": (
                 "логированные" if d.propensity is not None else
-                _model_name(self.config.propensity_model, "LogisticRegression (OOF)")
+                _model_name(
+                    self.config.propensity_model,
+                    f"LogisticRegression (OOF, C = {nuis.propensity_C:g} по out-of-fold log-loss)"
+                    if nuis.propensity_C is not None else "LogisticRegression (OOF)",
+                )
             ),
+            "propensity_C": nuis.propensity_C,
             "outcome_model": {
                 m: _model_name(
                     self.config.model_for(m),
