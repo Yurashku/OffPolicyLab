@@ -44,3 +44,6 @@ validation_artifacts/
 
 # Notebook checkpoints
 .ipynb_checkpoints/
+
+# Downloaded datasets (examples/real_data.py)
+data/
