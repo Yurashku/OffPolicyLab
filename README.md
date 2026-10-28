@@ -41,7 +41,9 @@ report = ps.evaluate(
 report            # в Jupyter отчёт отрисуется сам; в консоли — print(report.to_markdown())
 ```
 
-Пошаговый разбор с проверкой против истины — в [`examples/tutorial.ipynb`](https://github.com/Yurashku/OffPolicyLab/blob/main/examples/tutorial.ipynb).
+Пошаговый разбор — в [`examples/tutorial.ipynb`](https://github.com/Yurashku/OffPolicyLab/blob/main/examples/tutorial.ipynb):
+основной сценарий без пропенсити, чтение отчёта, несколько кандидатов и случаи, когда оценке верить
+нельзя. Каждый результат там сверяется с истиной.
 
 ## На своих данных
 
@@ -292,7 +294,7 @@ pip install -e ".[dev]"
 
 ## Документация
 
-- [`examples/tutorial.ipynb`](https://github.com/Yurashku/OffPolicyLab/blob/main/examples/tutorial.ipynb) — сквозной пример: от логов до решения.
+- [`examples/tutorial.ipynb`](https://github.com/Yurashku/OffPolicyLab/blob/main/examples/tutorial.ipynb) — сквозной пример: от логов до решения, со сверкой с истиной.
 - [`docs/methodology.md`](https://github.com/Yurashku/OffPolicyLab/blob/main/docs/methodology.md) — формулы, интервалы, проверки, коды находок,
   предпосылки, устройство пакета.
 - [`docs/estimators.md`](https://github.com/Yurashku/OffPolicyLab/blob/main/docs/estimators.md) — почему DR по умолчанию, когда DM точнее и где
