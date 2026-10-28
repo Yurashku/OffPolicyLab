@@ -112,6 +112,11 @@ def _with_interval(est: "Estimate", binary: bool) -> str:
     return fmt(est.value) if ci == "—" else f"{fmt(est.value)} {ci}"
 
 
+def _period(text: str) -> str:
+    """Точка в конце фразы, если её ещё нет (значение в «п.п.» уже кончается точкой)."""
+    return text if text.endswith(".") else text + "."
+
+
 def _plural(n: int, one: str, few: str, many: str) -> str:
     """Русское склонение существительного после числа: 1 действие, 2 действия, 5 действий."""
     n = abs(int(n))
@@ -472,7 +477,7 @@ class Report:
                 f"- **{m.metric}: {m.agreement_label}.** Δ по {len(m.rows)} оценщикам — от "
                 f"{_diff(min(r.delta.value for r in m.rows), m.binary)} до "
                 f"{_diff(max(r.delta.value for r in m.rows), m.binary)}, разброс "
-                f"{_diff(spread, m.binary).lstrip('+')}{scale}."
+                + _period(f"{_diff(spread, m.binary).lstrip('+')}{scale}")
             )
         lines += [
             "",
@@ -519,10 +524,10 @@ class Report:
                 )
             if m.floor_sensitivity:
                 fs = m.floor_sensitivity
-                lines.append(
+                lines.append(_period(
                     f"- {m.metric}, чувствительность Δ к полу пропенсити: ×0.5 → {_diff(fs['x0.5'], m.binary)}, "
-                    f"×1 → {_diff(fs['x1'], m.binary)}, ×2 → {_diff(fs['x2'], m.binary)}."
-                )
+                    f"×1 → {_diff(fs['x1'], m.binary)}, ×2 → {_diff(fs['x2'], m.binary)}"
+                ))
         return lines
 
     def _overlap_block(self) -> list[str]:

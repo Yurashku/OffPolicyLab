@@ -73,6 +73,14 @@ def report_fields():
                 outcome_quality={})
 
 
+def test_no_double_period_after_percentage_points():
+    b = make_bandit(1500, seed=23)
+    rep = ps.evaluate(b.logs.drop(columns="propensity"), b.policy_b, action="action",
+                      reward="reward", features=["x1", "x2"], inference="none")
+    md = rep.to_markdown()
+    assert "чувствительность Δ к полу пропенсити" in md and "п.п.." not in md
+
+
 def test_binary_metric_in_percentage_points(report):
     md = report.to_markdown()
     assert "п.п." in md and "%" in md

@@ -600,7 +600,7 @@ class Evaluator:
                 "логированные" if d.propensity is not None else
                 _model_name(
                     self.config.propensity_model,
-                    f"LogisticRegression (OOF, C = {nuis.propensity_C:g} по out-of-fold log-loss)"
+                    f"LogisticRegression (OOF, C = {nuis.propensity_C:g}, подобрано по out-of-fold log-loss)"
                     if nuis.propensity_C is not None else "LogisticRegression (OOF)",
                 )
             ),
