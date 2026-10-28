@@ -31,6 +31,48 @@ def test_markdown_sections(report):
     assert report._repr_markdown_() == md
 
 
+def test_main_table_shows_values_with_intervals_and_agreement(report):
+    md = report.to_markdown()
+    assert "| V(A) [95% ДИ] | V(B) [95% ДИ] |" in md and "| Оценщики |" in md
+    m = report["reward"]
+    assert f"{100 * m.v_b.value:.2f}% [{100 * m.v_b.low:.2f}%; {100 * m.v_b.high:.2f}%]" in md
+
+
+def test_estimator_choice_and_agreement_are_explained(report):
+    md = report.to_markdown()
+    assert "выбран автоматически" in md
+    assert "Основной оценщик — DR, выбран автоматически: пропенсити залогированы" in md
+    assert f"**reward: {report['reward'].agreement_label}.** Δ по 5 оценщикам" in md
+
+
+def test_trust_reason_is_named_in_the_headline():
+    b = make_bandit(1500, seed=22)
+    rep = ps.evaluate(b.logs.drop(columns="propensity"), b.policy_b, action="action",
+                      reward="reward", features=["x1", "x2"], inference="none")
+    assert rep["reward"].trust == "caution"
+    assert "с осторожностью (пропенсити оценены моделью" in rep.to_markdown()
+
+
+def test_trust_reasons_keep_abbreviations():
+    from policyscope.diagnostics import Finding
+    from policyscope.report import MetricReport
+
+    m = MetricReport(**{**report_fields(), "trust": "caution", "findings": (
+        Finding(code="x", severity="caution", title="IPS и DR расходятся", detail=""),
+        Finding(code="y", severity="caution", title="Пропенсити оценены моделью", detail=""),
+    )})
+    assert m.trust_reasons == ["IPS и DR расходятся", "пропенсити оценены моделью"]
+
+
+def report_fields():
+    from policyscope.report import Estimate
+
+    return dict(metric="m", estimator="dr", binary=True, lower_is_better=False, v_a=Estimate(0.1),
+                v_b=Estimate(0.2), delta=Estimate(0.1), p_value=None, p_value_adj=None, lift=None,
+                mde=None, decision="not_computed", trust="reliable", findings=(), checks=(), rows=(),
+                outcome_quality={})
+
+
 def test_binary_metric_in_percentage_points(report):
     md = report.to_markdown()
     assert "п.п." in md and "%" in md

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import numpy as np
@@ -41,6 +41,22 @@ __all__ = [
     "outcome_kind",
 ]
 
+#: Предел размера дизайн-матрицы модели исхода (строк × столбцов, ~240 МБ в float64).
+#: Если блок взаимодействий x×a его превышает, модель строится на главных эффектах.
+MAX_DESIGN_CELLS = 30_000_000
+
+#: Сетка обратной силы L2-штрафа (``C``) модели пропенсити по умолчанию. Перебирается от
+#: слабой регуляризации к сильной; выбирается значение с наименьшей out-of-fold log-loss.
+#: Без подбора (C = 1) модель на многих разреженных признаках переобучается: на Open Bandit
+#: Dataset (равномерная политика, 34 действия, 66 признаков) она выдавала пропенсити от 0 до
+#: 0.98 вместо 1/34, и DR занижал V(B) на четверть.
+PROPENSITY_C_GRID = (10.0, 1.0, 1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6)
+
+#: До этой ширины дизайна бинарные логистические регрессии решаются методом Ньютона:
+#: на узких матрицах он в разы быстрее lbfgs и сходится точнее; на широких его
+#: память и время растут как квадрат числа столбцов.
+NEWTON_MAX_COLUMNS = 300
+
 
 @dataclass(frozen=True)
 class NuisanceConfig:
@@ -55,12 +71,21 @@ class NuisanceConfig:
         n_folds: Число фолдов cross-fitting.
         propensity_floor: Доля от частоты действия, ниже которой оценённое пропенсити
             не опускается. Применяется только к оценённым пропенсити.
+        propensity_C: ``C`` модели пропенсити по умолчанию. ``None`` — подобрать по
+            out-of-fold log-loss на сетке :data:`PROPENSITY_C_GRID`; как и дизайн модели
+            исхода, выбирается на полной выборке и передаётся bootstrap-репликам.
+        interactions: Метрика -> использовать ли блок x×a в модели исхода. ``None`` (или
+            метрика, отсутствующая в словаре) — использовать, если дизайн помещается в
+            :data:`MAX_DESIGN_CELLS`. Решение принимается на полной выборке, и
+            bootstrap-реплики получают готовое: модель не меняется от реплики к реплике.
     """
 
     propensity_model: Any = None
     outcome_model: Any = None
     n_folds: int = 5
     propensity_floor: float = 0.1
+    propensity_C: Optional[float] = None
+    interactions: Optional[Mapping[str, bool]] = None
 
     def model_for(self, metric: str) -> Any:
         """Пользовательская модель исхода для метрики или ``None`` (модель по умолчанию)."""
@@ -89,7 +114,12 @@ class Nuisance:
         floor: Пол для каждого действия ``(k,)`` (только для оценённых).
         unseen_share: Доля строк, чьё действие не встретилось в обучающем фолде.
         mu: Метрика -> прогнозы ``(n, k)``.
-        fit_seconds: Время обучения (для прогноза длительности bootstrap).
+        fit_seconds: Время обучения без подбора ``C`` (для прогноза длительности bootstrap).
+        interactions: Метрика -> использован ли блок x×a в модели исхода.
+        design_notes: Метрика -> дизайн модели исхода и причина (для отчёта).
+        propensity_C: ``C`` модели пропенсити по умолчанию (``None`` — пропенсити
+            залогированы или модель задана пользователем).
+        propensity_losses: ``C`` -> out-of-fold log-loss, если ``C`` подбиралось.
     """
 
     p_taken: np.ndarray
@@ -100,6 +130,10 @@ class Nuisance:
     unseen_share: float
     mu: dict[str, np.ndarray]
     fit_seconds: float
+    interactions: dict[str, bool] = field(default_factory=dict)
+    design_notes: dict[str, str] = field(default_factory=dict)
+    propensity_C: Optional[float] = None
+    propensity_losses: dict[float, float] = field(default_factory=dict)
 
     def floored(self, a: np.ndarray, factor: float) -> np.ndarray:
         """Пропенсити с полом, умноженным на ``factor`` (анализ чувствительности)."""
@@ -109,8 +143,8 @@ class Nuisance:
         return np.maximum(self.p_raw, factor * self.floor[a])
 
 
-def _default_propensity_model():
-    return make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000))
+def _default_propensity_model(C: float = 1.0):
+    return make_pipeline(StandardScaler(), LogisticRegression(C=C, max_iter=1000))
 
 
 class TwoPartRegressor(RegressorMixin, BaseEstimator):
@@ -147,7 +181,9 @@ class TwoPartRegressor(RegressorMixin, BaseEstimator):
         self.p_const_ = float(positive.mean())
         self.classifier_ = None
         if 0 < n_pos < len(y):
-            self.classifier_ = LogisticRegression(C=self.C, max_iter=1000).fit(Z, positive)
+            self.classifier_ = LogisticRegression(
+                C=self.C, max_iter=1000, solver=_binary_solver(Z.shape[1]),
+            ).fit(Z, positive)
         self.m_const_ = float(y[positive].mean()) if n_pos else 0.0
         self.cap_ = float(y.max())
         self.regressor_ = None
@@ -187,9 +223,15 @@ OUTCOME_KIND_LABELS = {
 }
 
 
-def _default_outcome_model(kind: str):
+def _binary_solver(n_columns: int) -> str:
+    return "newton-cholesky" if n_columns <= NEWTON_MAX_COLUMNS else "lbfgs"
+
+
+def _default_outcome_model(kind: str, n_columns: int):
     if kind == "binary":
-        return make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000))
+        return make_pipeline(
+            StandardScaler(), LogisticRegression(max_iter=1000, solver=_binary_solver(n_columns)),
+        )
     if kind == "two_part":
         return TwoPartRegressor()
     return make_pipeline(StandardScaler(), Ridge(alpha=1.0))
@@ -209,17 +251,23 @@ def make_folds(groups: np.ndarray, n_folds: int, rng: np.random.Generator) -> np
     return fold_of_group[group_of_row]
 
 
-def outcome_design(X: np.ndarray, a: np.ndarray, k: int) -> np.ndarray:
+def outcome_design(X: np.ndarray, a: np.ndarray, k: int, interactions: bool = True) -> np.ndarray:
     """Дизайн-матрица модели исхода: ``[x, onehot(a), x * onehot(a)]``.
 
     Блок произведений даёт каждому действию собственные наклоны: без него модель
     отличает действия только сдвигом и не может выразить, что оффер работает по-разному
-    для разных клиентов.
+    для разных клиентов. При ``interactions=False`` — только ``[x, onehot(a)]``.
     """
     onehot = np.zeros((len(a), k))
     onehot[np.arange(len(a)), a] = 1.0
+    if not interactions:
+        return np.hstack([X, onehot])
     inter = (X[:, :, None] * onehot[:, None, :]).reshape(len(a), -1)
     return np.hstack([X, onehot, inter])
+
+
+def _design_width(p: int, k: int, interactions: bool) -> int:
+    return p + k + (p * k if interactions else 0)
 
 
 def _propensity_oof(
@@ -239,12 +287,53 @@ def _propensity_oof(
     return probs, unseen
 
 
+def _tune_propensity(
+    X: np.ndarray, a: np.ndarray, k: int, folds: np.ndarray, n_folds: int,
+) -> tuple[float, np.ndarray, int, dict[float, float], float]:
+    """Подбирает ``C`` модели пропенсити по умолчанию по out-of-fold log-loss.
+
+    Log-loss — правдоподобие залогированных действий, то есть ровно то, что модель
+    пропенсити должна предсказывать (в отличие от модели исхода, где ошибка на
+    залогированных действиях не видит ошибок в контрастах).
+
+    Сетка идёт от слабой регуляризации к сильной и обрывается, когда потери растут два
+    шага подряд. Направление важно: при сильной регуляризации все модели почти
+    маргинальные, потери там лежат на плато, и шум на плато выглядел бы как рост — путь
+    от сильной регуляризации останавливался бы, не дойдя до моделей, которые учат
+    контекст. Выбор — одно значение из сетки, поэтому OOF-прогнозы победителя
+    используются как есть.
+
+    Последний элемент — время на отвергнутые значения ``C``: bootstrap-реплики их не
+    обучают, и прогноз длительности bootstrap не должен их учитывать.
+    """
+    rows = np.arange(len(a))
+    losses: dict[float, float] = {}
+    best: Optional[tuple[float, float, np.ndarray, int, float]] = None
+    worse, total = 0, 0.0
+    for C in PROPENSITY_C_GRID:
+        start = time.perf_counter()
+        probs, unseen = _propensity_oof(X, a, k, folds, n_folds, _default_propensity_model(C))
+        seconds = time.perf_counter() - start
+        total += seconds
+        loss = float(-np.mean(np.log(np.clip(probs[rows, a], 1e-12, None))))
+        losses[C] = loss
+        if best is None or loss < best[1]:
+            best, worse = (C, loss, probs, unseen, seconds), 0
+        else:
+            worse += 1
+            if worse == 2:
+                break
+    assert best is not None
+    return best[0], best[2], best[3], losses, total - best[4]
+
+
 def _outcome_oof(
     X: np.ndarray, a: np.ndarray, r: np.ndarray, k: int, binary: bool,
-    folds: np.ndarray, n_folds: int, model: Any, kind: str,
+    folds: np.ndarray, n_folds: int, model: Any, kind: str, interactions: bool = True,
 ) -> np.ndarray:
     mu = np.zeros((len(a), k))
-    base = model if model is not None else _default_outcome_model(kind)
+    width = _design_width(X.shape[1], k, interactions)
+    base = model if model is not None else _default_outcome_model(kind, width)
     for f in range(n_folds):
         train, hold = folds != f, folds == f
         n_hold = int(hold.sum())
@@ -252,24 +341,51 @@ def _outcome_oof(
         if np.unique(r_train).size < 2:
             mu[hold] = float(r_train.mean())
             continue
-        fitted = clone(base).fit(outcome_design(X[train], a[train], k), r_train)
-        stacked = np.vstack([
-            outcome_design(X[hold], np.full(n_hold, j), k) for j in range(k)
-        ])
-        if binary and hasattr(fitted, "predict_proba"):
-            pred = fitted.predict_proba(stacked)[:, 1]
-        else:
-            pred = fitted.predict(stacked)
-            if binary:  # регрессор на бинарной награде: прогноз — вероятность
-                pred = np.clip(pred, 0.0, 1.0)
-        # Непрерывные прогнозы не обрезаются: обрезка по [min r, max r] смещает DM.
-        mu[hold] = np.asarray(pred, dtype=float).reshape(k, n_hold).T
+        fitted = clone(base).fit(outcome_design(X[train], a[train], k, interactions), r_train)
+        # По одному действию: матрица для всех k сразу в k раз больше обучающей.
+        for j in range(k):
+            design = outcome_design(X[hold], np.full(n_hold, j), k, interactions)
+            if binary and hasattr(fitted, "predict_proba"):
+                pred = fitted.predict_proba(design)[:, 1]
+            else:
+                pred = fitted.predict(design)
+                if binary:  # регрессор на бинарной награде: прогноз — вероятность
+                    pred = np.clip(pred, 0.0, 1.0)
+            # Непрерывные прогнозы не обрезаются: обрезка по [min r, max r] смещает DM.
+            mu[hold, j] = np.asarray(pred, dtype=float)
     if not np.isfinite(mu).all():
         raise ValueError(
             "Модель исхода выдала нечисловые прогнозы (inf/NaN). Проверьте признаки на выбросы "
             "или задайте более устойчивую outcome_model."
         )
     return mu
+
+
+def _outcome_with_design(
+    X: np.ndarray, a: np.ndarray, r: np.ndarray, k: int, binary: bool,
+    folds: np.ndarray, n_folds: int, model: Any, kind: str, interactions: Optional[bool],
+) -> tuple[np.ndarray, bool, str]:
+    """OOF-прогнозы модели исхода и её дизайн (с блоком x×a или без).
+
+    Блок x×a нужен всегда, когда он помещается в память: оценка политики держится на
+    контрастах ``mu(x, a) − mu(x, a')``, а их неоднородность по клиентам без него не
+    выразить. Выбор по out-of-fold ошибке здесь не годится: она считается на
+    залогированных действиях и почти не видит ошибок в контрастах (на Hillstrom такой
+    выбор отбрасывал x×a, и DM терял весь эффект). Поэтому x×a отключается только по
+    размеру матрицы — тогда модель отличает действия лишь сдвигом, и это видно в отчёте.
+    """
+    if interactions is None:
+        width = _design_width(X.shape[1], k, True)
+        interactions = model is not None or len(a) * width <= MAX_DESIGN_CELLS
+        if interactions:
+            note = "с x×a"
+        else:
+            size = f"{len(a):,} × {width:,}".replace(",", " ")
+            note = f"без x×a: матрица с ними слишком велика ({size} ячеек)"
+    else:
+        note = "с x×a" if interactions else "без x×a"
+    mu = _outcome_oof(X, a, r, k, binary, folds, n_folds, model, kind, interactions)
+    return mu, interactions, note
 
 
 def fit_nuisance(
@@ -311,12 +427,24 @@ def _fit_nuisance(
     folds = make_folds(groups, config.n_folds, np.random.default_rng(seed))
 
     unseen = 0
+    propensity_C: Optional[float] = None
+    losses: dict[float, float] = {}
+    tuning_seconds = 0.0
     if data.propensity is not None:
         p_taken = data.propensity[idx]
         source, p_raw, p_max, floor = "logged", None, None, None
     else:
-        model = config.propensity_model or _default_propensity_model()
-        probs, unseen = _propensity_oof(X, a, k, folds, config.n_folds, model)
+        if config.propensity_model is not None:
+            probs, unseen = _propensity_oof(X, a, k, folds, config.n_folds, config.propensity_model)
+        elif config.propensity_C is not None:
+            propensity_C = config.propensity_C
+            probs, unseen = _propensity_oof(
+                X, a, k, folds, config.n_folds, _default_propensity_model(propensity_C),
+            )
+        else:
+            propensity_C, probs, unseen, losses, tuning_seconds = _tune_propensity(
+                X, a, k, folds, config.n_folds,
+            )
         rows = np.arange(len(a))
         p_raw = probs[rows, a]
         p_max = probs.max(axis=1)
@@ -324,14 +452,16 @@ def _fit_nuisance(
         p_taken = np.maximum(p_raw, floor[a])
         source = "estimated"
 
-    mu = {
-        metric: _outcome_oof(
+    mu: dict[str, np.ndarray] = {}
+    interactions: dict[str, bool] = {}
+    notes: dict[str, str] = {}
+    for metric in data.reward_cols:
+        mu[metric], interactions[metric], notes[metric] = _outcome_with_design(
             X, a, data.rewards[metric][idx], k, data.binary[metric],
             folds, config.n_folds, config.model_for(metric),
             outcome_kind(data.rewards[metric], data.binary[metric]),
+            (config.interactions or {}).get(metric),
         )
-        for metric in data.reward_cols
-    }
     return Nuisance(
         p_taken=p_taken,
         source=source,
@@ -340,5 +470,9 @@ def _fit_nuisance(
         floor=floor,
         unseen_share=unseen / len(a),
         mu=mu,
-        fit_seconds=time.perf_counter() - start,
+        fit_seconds=time.perf_counter() - start - tuning_seconds,
+        interactions=interactions,
+        design_notes=notes,
+        propensity_C=propensity_C,
+        propensity_losses=losses,
     )

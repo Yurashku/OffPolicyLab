@@ -41,6 +41,11 @@ ESTIMATOR_LABELS = {
     "dm": "DM (только модель исхода)",
 }
 SEVERITY_ICONS = {"block": "⛔", "caution": "⚠️", "info": "ℹ️"}
+AGREEMENT_LABELS = {
+    "agree": "согласованы",
+    "disagree": "расходятся",
+    "unclear": "проверка неполная",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +103,13 @@ def _interval(low: Optional[float], high: Optional[float], fmt) -> str:
     if not (_finite(low) and _finite(high)):
         return "—"
     return f"[{fmt(low)}; {fmt(high)}]"
+
+
+def _with_interval(est: "Estimate", binary: bool) -> str:
+    """Значение и его интервал в одной ячейке: «18.40% [17.62%; 19.18%]»."""
+    fmt = lambda x: _value(x, binary)  # noqa: E731
+    ci = _interval(est.low, est.high, fmt)
+    return fmt(est.value) if ci == "—" else f"{fmt(est.value)} {ci}"
 
 
 def _plural(n: int, one: str, few: str, many: str) -> str:
@@ -168,6 +180,10 @@ class MetricReport:
             (в рейтинге — на все пары «кандидат × метрика»).
         lift: Относительный прирост ``V(B)/V(A) − 1``; ``None``, если V не положительны.
         mde: Минимальный эффект, который был бы обнаружен с мощностью 80%.
+        agreement: Согласие оценщиков по проверкам DR − IPS и DR − DM: ``agree`` — обе без
+            значимого расхождения, ``disagree`` — хотя бы одна нашла существенное,
+            ``unclear`` — проверить не удалось (мало данных).
+        agreement_spread: Разброс Δ по всем оценщикам (максимум − минимум).
     """
 
     metric: str
@@ -188,6 +204,8 @@ class MetricReport:
     rows: tuple[EstimatorRow, ...]
     outcome_quality: dict[str, float]
     floor_sensitivity: Optional[dict[str, float]] = None
+    agreement: str = "unclear"
+    agreement_spread: Optional[float] = None
 
     @property
     def estimators(self) -> pd.DataFrame:
@@ -217,6 +235,18 @@ class MetricReport:
     @property
     def trust_label(self) -> str:
         return TRUST_LABELS[self.trust]
+
+    @property
+    def agreement_label(self) -> str:
+        return AGREEMENT_LABELS[self.agreement]
+
+    @property
+    def trust_reasons(self) -> list[str]:
+        """Заголовки находок, которые определили уровень доверия (самые серьёзные)."""
+        severity = {"caution": "caution", "unreliable": "block"}.get(self.trust)
+        titles = [f.title for f in self.findings if f.severity == severity]
+        # «Пропенсити …» -> «пропенсити …», но аббревиатуры («IPS и DR …») не трогаем.
+        return list(dict.fromkeys(t[:1].lower() + t[1:] if t[1:2].islower() else t for t in titles))
 
     def sentence(self, policy: str = "B", baseline: str = "A") -> str:
         """Вывод одной фразой."""
@@ -259,6 +289,7 @@ class MetricReport:
             } for r in self.rows],
             "outcome_quality": dict(self.outcome_quality),
             "floor_sensitivity": self.floor_sensitivity,
+            "agreement": {"status": self.agreement, "spread": self.agreement_spread},
         }
 
 
@@ -289,13 +320,17 @@ class Report:
         return max((m.trust for m in self.metrics.values()), key=order.index)
 
     def summary(self) -> pd.DataFrame:
-        """Строка на метрику: значения, Δ, интервалы, p-value, вывод, доверие."""
+        """Строка на метрику: значения с интервалами, Δ, p-value, вывод, доверие, согласие оценщиков."""
         rows = []
         for m in self.metrics.values():
             rows.append({
                 "metric": m.metric,
                 "V_A": m.v_a.value,
+                "V_A_low": m.v_a.low,
+                "V_A_high": m.v_a.high,
                 "V_B": m.v_b.value,
+                "V_B_low": m.v_b.low,
+                "V_B_high": m.v_b.high,
                 "delta": m.delta.value,
                 "delta_low": m.delta.low,
                 "delta_high": m.delta.high,
@@ -307,6 +342,7 @@ class Report:
                 "mde": m.mde,
                 "decision": m.decision,
                 "trust": m.trust,
+                "agreement": m.agreement,
                 "estimator": m.estimator,
             })
         return pd.DataFrame(rows).set_index("metric")
@@ -348,9 +384,10 @@ class Report:
         out = [f"## Off-policy оценка: {self.policy} против {self.baseline}", ""]
         for m in self.metrics.values():
             icon = {"reliable": "✅", "caution": "⚠️", "unreliable": "⛔"}[m.trust]
+            why = f" ({'; '.join(m.trust_reasons)})" if m.trust_reasons else ""
             out.append(
                 f"- **{m.metric}** — {m.sentence(self.policy, self.baseline)} "
-                f"Доверие: {icon} {m.trust_label}."
+                f"Доверие: {icon} {m.trust_label}{why}."
             )
         out += ["", self._metric_table(level), "", self._settings_line()]
         if len(self.metrics) > 1 and s.get("inference") != "none":
@@ -366,16 +403,17 @@ class Report:
         return "\n".join(out)
 
     def _metric_table(self, level: str) -> str:
-        head = (f"| Метрика | V({self.baseline}) | V({self.policy}) | Δ | Δ, % | {level} ДИ для Δ "
-                "| p | p (RW) | Вывод | Доверие |")
-        lines = [head, "|---|---|---|---|---|---|---|---|---|---|"]
+        head = (f"| Метрика | V({self.baseline}) [{level} ДИ] | V({self.policy}) [{level} ДИ] | Δ "
+                f"| {level} ДИ для Δ | Δ, % | p | p (RW) | Вывод | Доверие | Оценщики |")
+        lines = [head, "|---|---|---|---|---|---|---|---|---|---|---|"]
         for m in self.metrics.values():
             fd = lambda x, b=m.binary: _diff(x, b)  # noqa: E731
             lines.append(
-                f"| {m.metric} | {_value(m.v_a.value, m.binary)} | {_value(m.v_b.value, m.binary)} "
-                f"| {fd(m.delta.value)} | {_pct(m.lift.value) if m.lift else '—'} "
-                f"| {_interval(m.delta.low, m.delta.high, fd)} | {_p(m.p_value)} "
-                f"| {_p(m.p_value_adj)} | {m.decision_text(self.baseline)} | {m.trust_label} |"
+                f"| {m.metric} | {_with_interval(m.v_a, m.binary)} | {_with_interval(m.v_b, m.binary)} "
+                f"| {fd(m.delta.value)} | {_interval(m.delta.low, m.delta.high, fd)} "
+                f"| {_pct(m.lift.value) if m.lift else '—'} | {_p(m.p_value)} "
+                f"| {_p(m.p_value_adj)} | {m.decision_text(self.baseline)} | {m.trust_label} "
+                f"| {m.agreement_label} |"
             )
         return "\n".join(lines)
 
@@ -390,7 +428,8 @@ class Report:
                     if s.get("cluster") else "")
         source = (f"пропенсити из логов («{s['propensity']}»)" if s.get("propensity")
                   else "пропенсити оценены моделью")
-        return (f"Оценщик {ESTIMATOR_LABELS[s['estimator']]} · {inference}{clusters} · {source} · "
+        chosen = ", выбран автоматически" if s.get("estimator_auto") else ""
+        return (f"Оценщик {ESTIMATOR_LABELS[s['estimator']]}{chosen} · {inference}{clusters} · {source} · "
                 f"{_plural(self.overlap.n, 'строка', 'строки', 'строк')}, "
                 f"{_plural(self.overlap.k, 'действие', 'действия', 'действий')}.")
 
@@ -410,10 +449,32 @@ class Report:
         return lines
 
     def _estimators_block(self, level: str) -> list[str]:
+        s = self.settings
+        name = s["estimator"].upper()
+        if s.get("estimator_auto"):
+            choice = f"Основной оценщик — {name}, выбран автоматически: {s.get('estimator_reason')}."
+        else:
+            choice = f"Основной оценщик — {name}, задан явно."
         lines = [
+            choice,
+            "",
             "IPS опирается только на пропенсити, DM — только на модель исхода, DR — на обе. "
             "Если они расходятся, хотя бы одна из моделей неверна; согласие исключает только "
             "грубые ошибки.",
+            "",
+        ]
+        for m in self.metrics.values():
+            se = m.delta.se
+            spread = m.agreement_spread
+            scale = (f" ({spread / se:.1f} стандартной ошибки основного оценщика)"
+                     if _finite(spread) and _finite(se) and se > 0 else "")
+            lines.append(
+                f"- **{m.metric}: {m.agreement_label}.** Δ по {len(m.rows)} оценщикам — от "
+                f"{_diff(min(r.delta.value for r in m.rows), m.binary)} до "
+                f"{_diff(max(r.delta.value for r in m.rows), m.binary)}, разброс "
+                f"{_diff(spread, m.binary).lstrip('+')}{scale}."
+            )
+        lines += [
             "",
             f"| Метрика | Оценщик | V({self.policy}) | Δ | {level} ДИ для Δ |",
             "|---|---|---|---|---|",
@@ -547,8 +608,9 @@ class Leaderboard:
         lines = [
             f"## Сравнение кандидатов с {self.baseline}",
             "",
-            f"| Кандидат | Метрика | Δ | Δ, % | {level} ДИ для Δ | p | p (RW) | Вывод | Доверие |",
-            "|---|---|---|---|---|---|---|---|---|",
+            f"| Кандидат | Метрика | V({self.baseline}) [{level} ДИ] | V(кандидата) [{level} ДИ] | Δ "
+            f"| {level} ДИ для Δ | Δ, % | p | p (RW) | Вывод | Доверие | Оценщики |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|",
         ]
         adjusted = False
         for name, report in self.reports.items():
@@ -556,9 +618,11 @@ class Leaderboard:
                 adjusted = adjusted or m.p_value_adj is not None
                 fd = lambda x, b=m.binary: _diff(x, b)  # noqa: E731
                 lines.append(
-                    f"| {name} | {m.metric} | {fd(m.delta.value)} | {_pct(m.lift.value) if m.lift else '—'} "
-                    f"| {_interval(m.delta.low, m.delta.high, fd)} | {_p(m.p_value)} "
-                    f"| {_p(m.p_value_adj)} | {m.decision_text(self.baseline)} | {m.trust_label} |"
+                    f"| {name} | {m.metric} | {_with_interval(m.v_a, m.binary)} "
+                    f"| {_with_interval(m.v_b, m.binary)} | {fd(m.delta.value)} "
+                    f"| {_interval(m.delta.low, m.delta.high, fd)} | {_pct(m.lift.value) if m.lift else '—'} "
+                    f"| {_p(m.p_value)} | {_p(m.p_value_adj)} | {m.decision_text(self.baseline)} "
+                    f"| {m.trust_label} | {m.agreement_label} |"
                 )
         lines.append("")
         if adjusted:
