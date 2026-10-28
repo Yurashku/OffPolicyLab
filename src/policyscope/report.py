@@ -245,7 +245,8 @@ class MetricReport:
         """Заголовки находок, которые определили уровень доверия (самые серьёзные)."""
         severity = {"caution": "caution", "unreliable": "block"}.get(self.trust)
         titles = [f.title for f in self.findings if f.severity == severity]
-        return list(dict.fromkeys(t[:1].lower() + t[1:] for t in titles))
+        # «Пропенсити …» -> «пропенсити …», но аббревиатуры («IPS и DR …») не трогаем.
+        return list(dict.fromkeys(t[:1].lower() + t[1:] if t[1:2].islower() else t for t in titles))
 
     def sentence(self, policy: str = "B", baseline: str = "A") -> str:
         """Вывод одной фразой."""

@@ -377,8 +377,10 @@ class Evaluator:
             jobs = max(1, (os.cpu_count() or 1) + 1 + self.n_jobs)
         else:
             jobs = max(1, int(self.n_jobs))
-        # Реплики на всех ядрах мешают друг другу, плюс старт процессов-воркеров.
-        speedup = max(1.0, jobs / 2) if jobs > 1 else 1.0
+        # Реплики на всех ядрах мешают друг другу (память, частота ядер), плюс старт
+        # процессов-воркеров: на 8-ядерном ноутбуке реальное ускорение около 2× — так на
+        # Hillstrom (13 тыс. строк) и на Open Bandit Dataset (100 тыс. строк, 34 действия).
+        speedup = max(1.0, jobs / 4) if jobs > 1 else 1.0
         eta = self.nuisance.fit_seconds * n_boot / speedup + (5.0 if jobs > 1 else 0.0)
         if eta > 30:
             # warnings, а не logging: пакет не настраивает логирование, и сообщение

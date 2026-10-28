@@ -53,6 +53,26 @@ def test_trust_reason_is_named_in_the_headline():
     assert "с осторожностью (пропенсити оценены моделью" in rep.to_markdown()
 
 
+def test_trust_reasons_keep_abbreviations():
+    from policyscope.diagnostics import Finding
+    from policyscope.report import MetricReport
+
+    m = MetricReport(**{**report_fields(), "trust": "caution", "findings": (
+        Finding(code="x", severity="caution", title="IPS и DR расходятся", detail=""),
+        Finding(code="y", severity="caution", title="Пропенсити оценены моделью", detail=""),
+    )})
+    assert m.trust_reasons == ["IPS и DR расходятся", "пропенсити оценены моделью"]
+
+
+def report_fields():
+    from policyscope.report import Estimate
+
+    return dict(metric="m", estimator="dr", binary=True, lower_is_better=False, v_a=Estimate(0.1),
+                v_b=Estimate(0.2), delta=Estimate(0.1), p_value=None, p_value_adj=None, lift=None,
+                mde=None, decision="not_computed", trust="reliable", findings=(), checks=(), rows=(),
+                outcome_quality={})
+
+
 def test_binary_metric_in_percentage_points(report):
     md = report.to_markdown()
     assert "п.п." in md and "%" in md
