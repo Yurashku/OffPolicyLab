@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 
 import policyscope as ps
@@ -221,3 +222,56 @@ def test_dm_opt_in_bootstrap_interval_covers():
             c.append(d.low <= truth <= d.high)
     for metric, c in covered.items():
         assert np.mean(c) >= 0.8, f"{metric}: покрытие {np.mean(c):.2f}"
+
+
+def test_simultaneous_intervals_and_best_set_cover():
+    """Одновременные ДИ накрывают все Δ сразу, а набор лучших — истинно лучшего кандидата."""
+    all_cover, marginal_all_cover, best_in_set, reps = 0, 0, 0, 200
+    for seed in range(reps):
+        b = make_bandit(2000, seed=300 + seed)
+        oracle = ps.greedy(pd.DataFrame(b.mu, index=b.logs.index, columns=ACTIONS))
+        candidates = {
+            "oracle": oracle,
+            "oracle_soft": 0.85 * oracle + 0.05,
+            "b": b.policy_b,
+            "uniform": pd.DataFrame(1 / 3, index=b.logs.index, columns=ACTIONS),
+        }
+        truth = {name: float(np.mean(np.sum(p[ACTIONS].to_numpy() * b.mu, axis=1))) - b.value_a
+                 for name, p in candidates.items()}
+        board = ps.Evaluator(b.logs, propensity="propensity", **KW).compare(candidates)
+        t = board.table.set_index("candidate")
+        all_cover += all(t.loc[k, "delta_low_sim"] <= v <= t.loc[k, "delta_high_sim"] for k, v in truth.items())
+        marginal_all_cover += all(t.loc[k, "delta_low"] <= v <= t.loc[k, "delta_high"] for k, v in truth.items())
+        best_in_set += max(truth, key=truth.get) in board.best().best_set
+    assert all_cover / reps >= 0.91, all_cover / reps
+    assert marginal_all_cover <= all_cover
+    assert best_in_set / reps >= 0.92, best_in_set / reps
+
+
+def test_mixture_of_deterministic_loggers_is_unbiased():
+    """Две детерминированные модели по периодам: смесь пропенсити даёт честную оценку."""
+    sim = OfferSimulator(seed=11)
+    v1, v2, v3 = (sim.policy("greedy", seed=s) for s in (1, 3, 5))
+    errors, covered, reps = [], 0, 100
+    for _ in range(reps):
+        clients = sim.sample_clients(4000)
+        half = len(clients) // 2
+        logs = pd.concat([
+            sim.simulate(clients.iloc[:half], v1).assign(period="v1"),
+            sim.simulate(clients.iloc[half:], v2).assign(period="v2"),
+        ], ignore_index=True)
+        # Кандидат выбирает между офферами двух моделей — только там, где у смеси есть данные.
+        allowed = (v1.action_probs(logs) + v2.action_probs(logs)) > 0
+        target = ps.greedy(v3.scores(logs).where(allowed, -np.inf).clip(lower=-1e9))
+        rep = ps.evaluate(logs.drop(columns="propensity"), target, action="offer", reward="accepted",
+                          features=["age", "income", "loyal", "risk", "region"],
+                          logging_policy={"v1": v1, "v2": v2}, logger="period")
+        m = rep["accepted"]
+        # V(A) — ожидаемый отклик логирующих политик на своих периодах (не выборочное среднее).
+        truth_a = (sim.true_value(logs.iloc[:half], v1, "accepted") * half
+                   + sim.true_value(logs.iloc[half:], v2, "accepted") * (len(logs) - half)) / len(logs)
+        truth = sim.true_value(logs, target, "accepted") - truth_a
+        errors.append(m.delta.value - truth)
+        covered += m.delta.low <= truth <= m.delta.high
+    assert mc_bias_ok(errors), np.mean(errors)
+    assert covered / reps >= 0.88, covered / reps

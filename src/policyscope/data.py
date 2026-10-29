@@ -259,6 +259,7 @@ def prepare_logs(
     propensity: Optional[str] = None,
     cluster: Optional[str] = None,
     features: Optional[Sequence[str]] = None,
+    logger: Optional[str] = None,
 ) -> LogData:
     """Проверяет логи и переводит их в массивы.
 
@@ -273,6 +274,8 @@ def prepare_logs(
         features: Признаки контекста. ``None`` — авто-выбор: числовые, булевы и
             категориальные колонки, кроме служебных, идентификаторов, констант и колонок
             с пропусками. Категории кодируются one-hot.
+        logger: Колонка с меткой политики, записавшей строку (если логи собраны несколькими
+            политиками). Служебная: в признаки не попадает.
 
     Raises:
         ValueError: при любой проблеме входа — с объяснением, что исправить.
@@ -294,6 +297,8 @@ def prepare_logs(
         service.add(propensity)
     if cluster is not None:
         service.add(cluster)
+    if logger is not None:
+        service.add(logger)
     if action in rewards:
         raise ValueError("Колонка действия не может одновременно быть наградой")
 
@@ -303,6 +308,10 @@ def prepare_logs(
         _require_columns(df, [propensity], "пропенсити")
     if cluster is not None:
         _require_columns(df, [cluster], "кластер")
+    if logger is not None:
+        _require_columns(df, [logger], "источник логов")
+        if df[logger].isna().any():
+            raise ValueError(f"В колонке источника логов '{logger}' есть пропуски")
 
     n_nan = int(df[action].isna().sum())
     if n_nan:
@@ -343,7 +352,7 @@ def prepare_logs(
         leaked = sorted(set(feature_cols) & service)
         if leaked:
             raise ValueError(
-                f"Колонки {leaked} служебные (действие/награда/пропенсити/кластер) и не могут "
+                f"Колонки {leaked} служебные (действие/награда/пропенсити/кластер/источник логов) и не могут "
                 "быть признаками: это утечка ответа в модели."
             )
         with_nan = {c: int(df[c].isna().sum()) for c in feature_cols if df[c].isna().any()}

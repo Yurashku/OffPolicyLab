@@ -21,7 +21,7 @@ import logging
 from policyscope import synthetic
 from policyscope.diagnostics import Finding, Thresholds
 from policyscope.evaluator import Evaluator, evaluate
-from policyscope.policy import epsilon_greedy, greedy, softmax
+from policyscope.policy import epsilon_greedy, greedy, mixture, random_like, softmax, uniform
 from policyscope.report import Leaderboard, MetricReport, Report
 
 logging.getLogger(__name__).addHandler(logging.NullHandler())
@@ -40,5 +40,8 @@ __all__ = [
     "greedy",
     "softmax",
     "epsilon_greedy",
+    "uniform",
+    "random_like",
+    "mixture",
     "synthetic",
 ]

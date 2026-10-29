@@ -104,8 +104,10 @@ jobs:
         run: python -m pytest -m slow --durations=10
       - name: Validation scenarios
         run: python examples/validate.py --runs 30 --clients 2000 --n-boot 60 --output validation.md --strict
-      - name: Tutorial executes
-        run: python -m jupyter nbconvert --to notebook --execute --output /tmp/tutorial.ipynb examples/tutorial.ipynb
+      - name: Tutorials execute
+        run: |
+          python -m jupyter nbconvert --to notebook --execute --output /tmp/tutorial.ipynb examples/tutorial.ipynb
+          python -m jupyter nbconvert --to notebook --execute --output /tmp/monthly_versions.ipynb examples/monthly_versions.ipynb
       - uses: actions/upload-artifact@v4
         if: always()
         with:

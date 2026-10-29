@@ -41,7 +41,7 @@ def test_main_table_shows_values_with_intervals_and_agreement(report):
 def test_estimator_choice_and_agreement_are_explained(report):
     md = report.to_markdown()
     assert "выбран автоматически" in md
-    assert "Основной оценщик — DR, выбран автоматически: пропенсити залогированы" in md
+    assert "Основной оценщик — DR, выбран автоматически: пропенсити известны точно" in md
     assert f"**reward: {report['reward'].agreement_label}.** Δ по 5 оценщикам" in md
 
 

@@ -39,12 +39,14 @@ from policyscope.estimators import ESTIMATORS, PolicyTerms, contributions, ess, 
 from policyscope.inference import (
     analytic_summary,
     centered_pvalue,
+    cluster_se,
     cluster_sums,
     multiplier_tstats,
     nan_std,
     percentile_interval,
     romano_wolf,
     run_bootstrap,
+    simultaneous_critical,
     t_critical,
 )
 from policyscope.nuisance import (
@@ -52,9 +54,10 @@ from policyscope.nuisance import (
     Nuisance,
     NuisanceConfig,
     fit_nuisance,
+    make_folds,
     outcome_kind,
 )
-from policyscope.policy import policy_matrix
+from policyscope.policy import _logging_terms, policy_matrix
 from policyscope.report import Estimate, EstimatorRow, Leaderboard, MetricReport, Report
 
 logger = logging.getLogger(__name__)
@@ -70,7 +73,7 @@ PRIMARY_ESTIMATORS = ("dr", "sndr", "ips", "snips", "dm")
 #: интервал не отражает (см. docs/methodology.md, «Выбор основного оценщика»).
 AUTO_ESTIMATOR_REASONS = {
     "logged": (
-        "пропенсити залогированы, поэтому DR несмещён при любой модели исхода, а модель "
+        "пропенсити известны точно, поэтому DR несмещён при любой модели исхода, а модель "
         "исхода уменьшает его разброс по сравнению с IPS и SNIPS"
     ),
     "estimated": (
@@ -92,6 +95,10 @@ def _model_name(model: Any, default: str) -> str:
     if steps:
         return " → ".join(type(step).__name__ for _, step in steps)
     return type(model).__name__
+
+
+def _fmt_number(x: float) -> str:
+    return f"{x:.3g}"
 
 
 def _user_stacklevel() -> int:
@@ -166,7 +173,15 @@ class Evaluator:
         reward: Колонка метрики или список колонок.
         propensity: Колонка с вероятностью, с которой A выбрала залогированное действие.
             ``None`` — пропенсити оцениваются моделью (тогда по умолчанию включается
-            bootstrap: аналитический интервал не учитывает ошибку их оценки).
+            bootstrap: аналитический интервал не учитывает ошибку их оценки) или
+            считаются по ``logging_policy``.
+        logging_policy: Известная политика A — вместо колонки пропенсити, если их не
+            логировали, но правило выбора известно (скоринговая модель плюс способ выбора);
+            формат — как у кандидата. Если логи собраны несколькими политиками (разные версии
+            модели в разные периоды) — словарь «метка из колонки ``logger`` -> политика»:
+            пропенсити считаются по их смеси (см. :func:`policyscope.policy.logging_propensity`).
+        logger: Колонка с меткой политики, записавшей строку; нужна вместе со словарём
+            ``logging_policy``.
         cluster: Колонка единицы наблюдения (клиент), если на неё приходится несколько
             строк. ``None`` — строки независимы.
         features: Признаки контекста. ``None`` — авто-выбор (список попадает в отчёт).
@@ -193,6 +208,8 @@ class Evaluator:
         propensity: Optional[str] = None,
         cluster: Optional[str] = None,
         features: Optional[Sequence[str]] = None,
+        logging_policy: Any = None,
+        logger: Optional[str] = None,
         propensity_model: Any = None,
         outcome_model: Any = None,
         n_folds: int = 5,
@@ -202,9 +219,13 @@ class Evaluator:
         random_state: int = 0,
         n_jobs: Optional[int] = -1,
     ) -> None:
+        if logging_policy is not None and propensity is not None:
+            raise ValueError("Укажите что-то одно: колонку propensity или logging_policy")
+        if logger is not None and logging_policy is None:
+            raise ValueError("logger= нужен только вместе с logging_policy (словарём политик)")
         self.data: LogData = prepare_logs(
             logs, action=action, reward=reward, propensity=propensity,
-            cluster=cluster, features=features,
+            cluster=cluster, features=features, logger=logger,
         )
         if isinstance(lower_is_better, str):
             lower_is_better = [lower_is_better]
@@ -228,6 +249,17 @@ class Evaluator:
         hidden = list(self.data.reward_cols) + ([propensity] if propensity else [])
         # Политике показываются логи без наград и пропенсити — она не должна их видеть.
         self._frame = logs.drop(columns=hidden).copy()
+        self.propensity_origin = "column" if propensity else None
+        self._logger_matrices: dict = {}
+        if logging_policy is not None:
+            p, self._logger_matrices = _logging_terms(
+                logging_policy, self.data, self._frame, logs[logger] if logger else None,
+            )
+            self.data = replace(self.data, propensity=p)
+            self.propensity_origin = "mixture" if logger else "policy"
+        self.logger_col = logger
+        self._logger_labels = logs[logger].to_numpy(dtype=object) if logger else None
+        self._logger_shares = logs[logger].value_counts(normalize=True).to_dict() if logger else {}
         self.config = NuisanceConfig(
             propensity_model=propensity_model,
             outcome_model=outcome_model,
@@ -235,6 +267,7 @@ class Evaluator:
             propensity_floor=propensity_floor,
         )
         self.thresholds = thresholds or Thresholds()
+        self._mixture_cache: Optional[list[Finding]] = None
         self.random_state = int(random_state)
         self.n_jobs = n_jobs
         self._nuisance: Optional[Nuisance] = None
@@ -273,7 +306,7 @@ class Evaluator:
                 Политика в том же формате — с ней (например, с прод-версией A без
                 исследования); её значение оценивается тем же оценщиком.
             estimator: Основной оценщик. ``auto`` (по умолчанию) выбирает его по тому,
-                залогированы ли пропенсити, и объясняет выбор в отчёте; сейчас это всегда DR
+                известны ли пропенсити, и объясняет выбор в отчёте; сейчас это всегда DR
                 (почему — в ``report.settings["estimator_reason"]``). Явно: ``dr``, ``sndr``, ``ips``,
                 ``snips`` или ``dm`` (точнее при верной модели исхода, но её смещение не
                 проверяется; только со встроенной моделью и bootstrap-интервалом).
@@ -441,7 +474,12 @@ class Evaluator:
         v_b = psi_b.mean(axis=-1)
         v_a = psi_a.mean(axis=-1)
         stats: dict[str, np.ndarray] = {}
+        samples: Optional[np.ndarray] = None
         extra_findings: list[Finding] = []
+        if self.propensity_origin == "mixture":
+            if self._mixture_cache is None:  # от кандидата не зависит — считаем один раз
+                self._mixture_cache = self._mixture_findings()
+            extra_findings += self._mixture_cache
         rw_t_obs = np.full((P, M), np.nan)
         rw_null: Optional[np.ndarray] = None
         rng = np.random.default_rng(self.random_state + 1)
@@ -499,6 +537,10 @@ class Evaluator:
         else:
             p_adj = None
 
+        simultaneous, pairwise = (
+            self._competition(names, psi_b, psi_a, v_b, v_a, samples, inference, alpha, e_primary, rng)
+            if inference != "none" else (None, None)
+        )
         settings = self._settings(estimator, estimator_reason, inference, alpha, n_boot)
         reports = {}
         for i, name in enumerate(names):
@@ -518,7 +560,196 @@ class Evaluator:
         table = pd.concat(
             {name: rep.summary() for name, rep in reports.items()}, names=["candidate"]
         ).reset_index()
-        return Leaderboard(table=table, reports=reports, baseline=base_label, alpha=alpha)
+        if simultaneous is not None:
+            table = table.merge(simultaneous, on=["candidate", "metric"], how="left")
+        return Leaderboard(
+            table=table, reports=reports, baseline=base_label, alpha=alpha,
+            pairwise=pairwise if pairwise is not None else pd.DataFrame(),
+        )
+
+    def _logger_shift_auc(self) -> Optional[float]:
+        """ROC AUC, с которым источник логов угадывается по признакам клиента (out-of-fold).
+
+        Около 0.5 — составы клиентов в периодах разных политик не различаются; заметно
+        выше — различаются, и доли периодов как пропенсити смеси неверны для части клиентов.
+        """
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.metrics import roc_auc_score
+        from sklearn.pipeline import make_pipeline
+        from sklearn.preprocessing import StandardScaler
+
+        data = self.data
+        labels, y = np.unique(self._logger_labels, return_inverse=True)
+        if len(labels) < 2 or data.X.shape[1] == 0:
+            return None
+        groups = data.clusters if data.is_clustered else np.arange(data.n)
+        folds = make_folds(groups, self.config.n_folds, np.random.default_rng(self.random_state))
+        probs = np.zeros((data.n, len(labels)))
+        for f in range(self.config.n_folds):
+            train, hold = folds != f, folds == f
+            if len(np.unique(y[train])) < len(labels):
+                return None
+            model = make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000)).fit(data.X[train], y[train])
+            probs[hold] = model.predict_proba(data.X[hold])
+        if len(labels) == 2:
+            return float(roc_auc_score(y, probs[:, 1]))
+        return float(roc_auc_score(y, probs, multi_class="ovr"))
+
+    def _logger_drift(self) -> tuple[int, list[tuple[str, float, float]]]:
+        """Различается ли отклик между периодами при одном и том же решении.
+
+        Берутся строки, где все логирующие политики выбирают одно и то же действие: там
+        период на решение не влияет, и остаток ``r − mu(x, a)`` модели исхода (период в неё
+        не входит) не должен от него зависеть. Различие средних остатков между периодами
+        (однофакторный дисперсионный анализ) — признак сезонности или изменений продукта.
+
+        Returns:
+            Число таких строк и список «метрика, p-value, разброс средних остатков»; пустой,
+            если строк мало (нужно не меньше 30 в двух периодах).
+        """
+        from scipy import stats
+
+        data, nuis = self.data, self.nuisance
+        stacked = np.stack(list(self._logger_matrices.values()))
+        agree = np.flatnonzero(stacked.min(axis=0).max(axis=1) >= 0.99)
+        labels = self._logger_labels[agree]
+        groups = [agree[labels == label] for label in np.unique(labels)]
+        groups = [g for g in groups if len(g) >= 30]
+        if len(groups) < 2:
+            return len(agree), []
+        out = []
+        for metric in data.reward_cols:
+            resid = data.rewards[metric] - nuis.mu[metric][np.arange(data.n), data.a]
+            samples = [resid[g] for g in groups]
+            if all(np.ptp(s) == 0 for s in samples):
+                continue
+            means = [float(s.mean()) for s in samples]
+            out.append((metric, float(stats.f_oneway(*samples).pvalue), max(means) - min(means)))
+        return len(agree), out
+
+    def _mixture_findings(self) -> list[Finding]:
+        shares = ", ".join(f"{label} — {100 * share:.0f}%" for label, share in self._logger_shares.items())
+        auc = self._logger_shift_auc()
+        shift = auc is not None and auc > self.thresholds.logger_shift_auc
+        n_agree, drift = self._logger_drift()
+        drifted = [(m, p, spread) for m, p, spread in drift if p < self.thresholds.logger_drift_p]
+        if drift and not drifted:
+            drift_text = (f" Сезонность проверена на {n_agree} строках, где все политики выбирают одно и "
+                          "то же: отклик между периодами не различается.")
+        elif not drift:
+            drift_text = (" Проверить сезонность не на чем: мало строк, где все политики выбирают одно и "
+                          "то же.")
+        else:
+            drift_text = ""
+        findings = [Finding(
+            code="logging_mixture",
+            severity="info",
+            title="Пропенсити посчитаны по смеси логирующих политик",
+            detail=(
+                f"Логи записаны {len(self._logger_shares)} политиками (колонка «{self.logger_col}»: "
+                f"{shares}). Оценка несмещена, если клиенты и их отклик в периодах разных политик "
+                "сопоставимы."
+                + (f" Период по признакам клиента угадывается с ROC AUC {auc:.2f}: составы не "
+                   "различаются." if auc is not None and not shift else "")
+                + drift_text
+            ),
+            advice="Убедитесь, что между периодами не менялись продукт и цены.",
+        )]
+        if drifted:
+            worst = min(drifted, key=lambda item: item[1])
+            findings.append(Finding(
+                code="logger_drift",
+                severity="caution",
+                metric=None,
+                title="Отклик различается между периодами",
+                detail=(
+                    f"На {n_agree} строках, где все политики выбирают одно и то же, средний отклик "
+                    f"«{worst[0]}» с поправкой на признаки различается между периодами на "
+                    f"{_fmt_number(worst[2])} (p = {worst[1]:.2g}). Похоже на сезонность или изменения "
+                    "продукта: смесь периодов смешивает и эти различия."
+                ),
+                advice="Возьмите соседние, сопоставимые периоды или оценивайте сезоны по отдельности.",
+            ))
+        if shift:
+            findings.append(Finding(
+                code="logger_shift",
+                severity="caution",
+                title="Клиенты в периодах разных политик различаются",
+                detail=(
+                    f"Период по признакам клиента угадывается с ROC AUC {auc:.2f} (порог "
+                    f"{self.thresholds.logger_shift_auc:.2f}). Доли периодов тогда неверны как "
+                    "пропенсити смеси для части клиентов, и оценка смещается."
+                ),
+                advice="Возьмите периоды с похожим составом клиентов или оценивайте по одному периоду.",
+            ))
+        return findings
+
+    def _competition(
+        self, names, psi_b, psi_a, v_b, v_a, samples, inference, alpha, e, rng,
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Одновременные интервалы Δ кандидатов и попарные сравнения — по каждой метрике.
+
+        Семейство — кандидаты одной метрики (для Δ к базе) и все пары кандидатов (для
+        разностей между ними). Одновременные интервалы остаются честными для кандидата,
+        выбранного по данным, а попарные позволяют понять, отличим ли лидер от остальных.
+        Совместное распределение — то же, что у основного интервала: multiplier bootstrap
+        по кластерным суммам вкладов или реплики bootstrap с переобучением моделей.
+        """
+        data = self.data
+        P = len(names)
+        pairs = [(i, j) for i in range(P) for j in range(i + 1, P)]
+        sim_rows, pair_rows = [], []
+        for m, metric in enumerate(data.reward_cols):
+            delta_hat = v_b[:, m, e] - v_a[m, e]
+            pair_hat = np.array([v_b[i, m, e] - v_b[j, m, e] for i, j in pairs])
+            families = {}
+            if inference == "influence":
+                cols = {
+                    "delta": (psi_b[:, m, e] - psi_a[m, e]).T,
+                    "pair": np.column_stack([psi_b[i, m, e] - psi_b[j, m, e] for i, j in pairs]) if pairs else None,
+                }
+                for key, c in cols.items():
+                    if c is None:
+                        continue
+                    sums = cluster_sums(c, data.clusters, data.n_clusters)
+                    se = cluster_se(sums, data.n)
+                    families[key] = (se, multiplier_tstats(sums, se, data.n, _RW_DRAWS, rng))
+            else:
+                s = samples[:, :, m, e, :]
+                stars = {
+                    "delta": s[..., 0] - s[..., 1],
+                    "pair": np.column_stack([s[:, i, 0] - s[:, j, 0] for i, j in pairs]) if pairs else None,
+                }
+                hats = {"delta": delta_hat, "pair": pair_hat}
+                for key, star in stars.items():
+                    if star is None:
+                        continue
+                    se = nan_std(star)
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        families[key] = (se, (star - hats[key]) / se)
+            se_d, null_d = families["delta"]
+            c_d = simultaneous_critical(null_d, alpha)
+            for i, name in enumerate(names):
+                sim_rows.append({
+                    "candidate": name, "metric": metric,
+                    "delta_low_sim": delta_hat[i] - c_d * se_d[i],
+                    "delta_high_sim": delta_hat[i] + c_d * se_d[i],
+                })
+            if pairs:
+                se_p, null_p = families["pair"]
+                c_p = simultaneous_critical(null_p, alpha)
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    t_obs = np.where(se_p > 0, pair_hat / se_p, np.nan)
+                p_adj = romano_wolf(t_obs, null_p)
+                for q, (i, j) in enumerate(pairs):
+                    pair_rows.append({
+                        "metric": metric, "candidate": names[i], "other": names[j],
+                        "diff": pair_hat[q], "se": se_p[q],
+                        "low": pair_hat[q] - c_p * se_p[q], "high": pair_hat[q] + c_p * se_p[q],
+                        "p_value_adj": p_adj[q],
+                    })
+        columns = ["metric", "candidate", "other", "diff", "se", "low", "high", "p_value_adj"]
+        return pd.DataFrame(sim_rows), pd.DataFrame(pair_rows, columns=columns)
 
     # ------------------------------------------------------------------
     # Инференс
@@ -591,13 +822,17 @@ class Evaluator:
             "rewards": list(d.reward_cols),
             "propensity": d.propensity_col,
             "propensity_source": self.nuisance.source,
+            "propensity_origin": self.propensity_origin,
+            "logger": self.logger_col,
             "propensity_floor": self.config.propensity_floor if d.propensity is None else None,
             "cluster": d.cluster_col,
             "features": list(d.features),
             "features_auto": d.features_auto,
             "skipped_features": dict(d.skipped_features),
             "propensity_model": (
-                "логированные" if d.propensity is not None else
+                {"column": "логированные", "policy": "по заданной политике A",
+                 "mixture": f"по смеси логирующих политик (колонка «{self.logger_col}»)"}
+                [self.propensity_origin] if d.propensity is not None else
                 _model_name(
                     self.config.propensity_model,
                     f"LogisticRegression (OOF, C = {nuis.propensity_C:g}, подобрано по out-of-fold log-loss)"
