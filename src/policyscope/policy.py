@@ -51,40 +51,63 @@ def _scores_frame(scores: Any) -> pd.DataFrame:
     return frame
 
 
-def greedy(scores: Any) -> pd.DataFrame:
+def _allowed_mask(frame: pd.DataFrame, allowed: Any) -> np.ndarray:
+    """Маска допустимых действий той же формы, что скоры; в каждой строке хотя бы одно."""
+    if allowed is None:
+        return np.ones(frame.shape, dtype=bool)
+    if isinstance(allowed, pd.DataFrame):
+        allowed = allowed.reindex(index=frame.index, columns=frame.columns)
+        if allowed.isna().any().any():
+            raise ValueError("allowed: строки и колонки должны совпадать со скорами")
+    mask = np.asarray(allowed, dtype=bool)
+    if mask.shape != frame.shape:
+        raise ValueError(f"allowed должна иметь форму скоров {frame.shape}, а не {mask.shape}")
+    if not mask.any(axis=1).all():
+        raise ValueError("allowed: в каждой строке должно быть хотя бы одно допустимое действие")
+    return mask
+
+
+def greedy(scores: Any, allowed: Any = None) -> pd.DataFrame:
     """Детерминированная политика: действие с максимальным скором.
 
     Ничьи делятся поровну между лучшими действиями — иначе выбор зависел бы от
-    порядка колонок.
+    порядка колонок. ``allowed`` (таблица ``bool`` той же формы) ограничивает выбор
+    допустимыми действиями, например теми, что логирующая политика могла показать:
+    ``ps.greedy(scores, allowed=ev.support())``.
     """
     frame = _scores_frame(scores)
-    values = frame.to_numpy(dtype=float)
+    values = np.where(_allowed_mask(frame, allowed), frame.to_numpy(dtype=float), -np.inf)
     best = np.isclose(values, values.max(axis=1, keepdims=True), rtol=0.0, atol=1e-12)
     probs = best / best.sum(axis=1, keepdims=True)
     return pd.DataFrame(probs, index=frame.index, columns=frame.columns)
 
 
-def softmax(scores: Any, temperature: float = 1.0) -> pd.DataFrame:
+def softmax(scores: Any, temperature: float = 1.0, allowed: Any = None) -> pd.DataFrame:
     """Стохастическая политика ``pi(a|x) ∝ exp(score_a / temperature)``.
 
     Чем ниже температура, тем ближе к :func:`greedy`; чем выше — к равномерной.
+    ``allowed`` — как у :func:`greedy`.
     """
     if temperature <= 0:
         raise ValueError("temperature должна быть положительной")
     frame = _scores_frame(scores)
-    z = frame.to_numpy(dtype=float) / temperature
+    z = np.where(_allowed_mask(frame, allowed), frame.to_numpy(dtype=float) / temperature, -np.inf)
     z = z - z.max(axis=1, keepdims=True)
     ez = np.exp(z)
     return pd.DataFrame(ez / ez.sum(axis=1, keepdims=True), index=frame.index, columns=frame.columns)
 
 
-def epsilon_greedy(scores: Any, epsilon: float = 0.1) -> pd.DataFrame:
-    """С вероятностью ``1 - epsilon`` — лучшее действие, иначе — равномерно случайное."""
+def epsilon_greedy(scores: Any, epsilon: float = 0.1, allowed: Any = None) -> pd.DataFrame:
+    """С вероятностью ``1 - epsilon`` — лучшее действие, иначе — равномерно случайное.
+
+    ``allowed`` — как у :func:`greedy`; случайный выбор тоже идёт только среди допустимых.
+    """
     if not 0.0 <= epsilon <= 1.0:
         raise ValueError("epsilon должна лежать в [0, 1]")
-    best = greedy(scores)
-    k = best.shape[1]
-    return best * (1.0 - epsilon) + epsilon / k
+    best = greedy(scores, allowed)
+    mask = _allowed_mask(best, allowed)
+    explore = mask / mask.sum(axis=1, keepdims=True)
+    return best * (1.0 - epsilon) + epsilon * explore
 
 
 @dataclass(frozen=True)

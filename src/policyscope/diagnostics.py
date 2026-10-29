@@ -143,7 +143,12 @@ class Check:
 
 @dataclass(frozen=True)
 class Overlap:
-    """Перекрытие политик A и B."""
+    """Перекрытие политик A и B.
+
+    ``uncovered`` — доля решений B (по массе вероятности) на действиях, которые A в этом
+    контексте выбрать не могла. Известна точно, только когда логирующая политика задана
+    (``logging_policy=``); иначе ``None``, и о покрытии судят по среднему весу.
+    """
 
     n: int
     n_clusters: int
@@ -162,6 +167,7 @@ class Overlap:
     propensity_source: str
     floor_share: Optional[float]
     actions: tuple[dict, ...]
+    uncovered: Optional[float] = None
 
     def to_dict(self) -> dict:
         out = {k: v for k, v in self.__dict__.items() if k != "actions"}

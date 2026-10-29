@@ -97,6 +97,20 @@ def _model_name(model: Any, default: str) -> str:
     return type(model).__name__
 
 
+def _propensity_label(nuis: Nuisance) -> str:
+    """Подпись модели пропенсити по умолчанию для отчёта."""
+    losses = nuis.propensity_losses
+    logistic = [v for key, v in losses.items() if key != "boosting"]
+    if nuis.propensity_kind == "boosting":
+        if not (losses and logistic):
+            return "градиентный бустинг (OOF)"
+        return (f"градиентный бустинг (OOF, выбран по out-of-fold log-loss: {losses['boosting']:.3f} "
+                f"против {min(logistic):.3f} у логистической регрессии)")
+    if nuis.propensity_C is not None:
+        return f"LogisticRegression (OOF, C = {nuis.propensity_C:g}, подобрано по out-of-fold log-loss)"
+    return "LogisticRegression (OOF)"
+
+
 def _fmt_number(x: float) -> str:
     return f"{x:.3g}"
 
@@ -251,10 +265,13 @@ class Evaluator:
         self._frame = logs.drop(columns=hidden).copy()
         self.propensity_origin = "column" if propensity else None
         self._logger_matrices: dict = {}
+        self._logging_matrix: Optional[np.ndarray] = None
         if logging_policy is not None:
             p, self._logger_matrices = _logging_terms(
                 logging_policy, self.data, self._frame, logs[logger] if logger else None,
             )
+            shares = logs[logger].value_counts(normalize=True) if logger else {None: 1.0}
+            self._logging_matrix = sum(shares[label] * m for label, m in self._logger_matrices.items())
             self.data = replace(self.data, propensity=p)
             self.propensity_origin = "mixture" if logger else "policy"
         self.logger_col = logger
@@ -360,10 +377,25 @@ class Evaluator:
         source = "logged" if self.data.propensity is not None else "estimated"
         return "dr", AUTO_ESTIMATOR_REASONS[source]
 
+    def support(self) -> pd.DataFrame:
+        """Какие действия логирующая политика могла выбрать для каждой строки логов.
+
+        Таблица ``bool`` (строки — логи, колонки — действия). Известна только при
+        ``logging_policy=``. Пригодится, чтобы оценить вариант новой модели, который выбирает
+        лишь среди уже показанных клиенту действий: ``ps.greedy(scores, allowed=ev.support())``.
+        """
+        if self._logging_matrix is None:
+            raise ValueError(
+                "Покрытие известно точно, только когда логирующая политика задана (logging_policy=). "
+                "С колонкой пропенсити известна лишь вероятность залогированного действия."
+            )
+        return pd.DataFrame(self._logging_matrix > 0, index=self.data.index, columns=self.data.actions)
+
     def _replicate_config(self) -> NuisanceConfig:
         """Настройки для bootstrap-реплик: ``C`` пропенсити и дизайн модели исхода уже выбраны."""
         nuis = self.nuisance
-        return replace(self.config, propensity_C=nuis.propensity_C, interactions=dict(nuis.interactions))
+        return replace(self.config, propensity_C=nuis.propensity_C, propensity_kind=nuis.propensity_kind,
+                       interactions=dict(nuis.interactions))
 
     def _validate(self, estimator: str, inference: str, alpha: float, n_boot: int) -> str:
         if estimator not in PRIMARY_ESTIMATORS:
@@ -448,6 +480,12 @@ class Evaluator:
         if base_label in candidates:
             raise ValueError(f"Имя базы '{base_label}' совпадает с именем кандидата")
         names = list(candidates)
+        for role, policy in [*candidates.items(), (base_label, baseline)]:
+            if isinstance(policy, str) and policy in data.features:
+                raise ValueError(
+                    f"Колонка «{policy}» задаёт политику {role}, но она же — признак моделей. Решение "
+                    "политики не может быть признаком клиента: передайте features= без неё."
+                )
         pis = [policy_matrix(candidates[n], data, self._frame, role=n) for n in names]
         base = policy_matrix(baseline, data, self._frame, role=base_label) if baseline is not None else None
 
@@ -833,13 +871,10 @@ class Evaluator:
                 {"column": "логированные", "policy": "по заданной политике A",
                  "mixture": f"по смеси логирующих политик (колонка «{self.logger_col}»)"}
                 [self.propensity_origin] if d.propensity is not None else
-                _model_name(
-                    self.config.propensity_model,
-                    f"LogisticRegression (OOF, C = {nuis.propensity_C:g}, подобрано по out-of-fold log-loss)"
-                    if nuis.propensity_C is not None else "LogisticRegression (OOF)",
-                )
+                _model_name(self.config.propensity_model, _propensity_label(nuis))
             ),
             "propensity_C": nuis.propensity_C,
+            "propensity_kind": nuis.propensity_kind,
             "outcome_model": {
                 m: _model_name(
                     self.config.model_for(m),
@@ -889,6 +924,8 @@ class Evaluator:
         data, th, nuis = self.data, self.thresholds, self.nuisance
         e_primary = ESTIMATORS.index(estimator)
         overlap = overlap_summary(data, nuis, pi, alpha)
+        if self._logging_matrix is not None:
+            overlap = replace(overlap, uncovered=float(np.mean(np.sum(pi * (self._logging_matrix <= 0), axis=1))))
         findings = policy_findings(data, nuis, overlap, th)
         if base is not None:
             base_overlap = overlap_summary(data, nuis, base, alpha)

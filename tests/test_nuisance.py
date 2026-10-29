@@ -232,8 +232,26 @@ class TestPropensityRegularization:
         a = (rng.random(n)[:, None] > probs.cumsum(axis=1)).sum(axis=1).clip(0, 2)
         logs = pd.DataFrame({"x1": x1, "x2": x2, "action": a, "reward": rng.integers(0, 2, n)})
         nuis = fit_nuisance(prep(logs), NuisanceConfig(), seed=0)
-        assert nuis.propensity_C >= 0.1
+        assert nuis.propensity_kind == "logistic" and nuis.propensity_C >= 0.1
         assert np.corrcoef(nuis.p_raw, probs[np.arange(n), a])[0, 1] > 0.95
+
+    def test_step_like_logging_selects_boosting(self):
+        """Смесь детерминированных версий — ступенчатое правило: бустинг описывает его лучше."""
+        import policyscope as ps
+
+        sim = ps.synthetic.OfferSimulator(seed=8)
+        versions = sim.versions(4, drift=0.6, seed=3)
+        clients = sim.sample_clients(12_000)  # на малых выборках бустинг переобучается и проигрывает
+        rows = np.array_split(np.arange(len(clients)), 4)
+        logs = pd.concat([sim.simulate(clients.iloc[r], v) for v, r in zip(versions.values(), rows)],
+                         ignore_index=True).drop(columns="propensity")
+        data = prepare_logs(logs, action="offer", reward="accepted",
+                            features=["age", "income", "loyal", "risk", "region"])
+        nuis = fit_nuisance(data, NuisanceConfig(), seed=0)
+        assert nuis.propensity_kind == "boosting" and nuis.propensity_C is None
+        assert nuis.propensity_losses["boosting"] < min(v for k, v in nuis.propensity_losses.items() if k != "boosting")
+        pinned = fit_nuisance(data, NuisanceConfig(propensity_kind="boosting"), seed=1)
+        assert pinned.propensity_kind == "boosting" and pinned.propensity_losses == {}
 
     def test_pinned_C_skips_tuning(self):
         b = make_bandit(600, seed=43)

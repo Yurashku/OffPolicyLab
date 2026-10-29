@@ -256,3 +256,38 @@ class TestMonthlyVersions:
         md = board.to_markdown()
         assert "Лидер против остальных" in md
         assert md.count("| m") >= len(versions) - 1
+
+
+class TestNewModelOnVersionLogs:
+    def test_allowed_restricts_every_helper(self):
+        scores = pd.DataFrame({"red": [3.0, 1.0], "green": [2.0, 5.0], "blue": [1.0, 0.0]})
+        allowed = pd.DataFrame({"red": [False, True], "green": [True, False], "blue": [True, True]})
+        for policy in (ps.greedy(scores, allowed=allowed), ps.softmax(scores, allowed=allowed),
+                       ps.epsilon_greedy(scores, 0.3, allowed=allowed)):
+            np.testing.assert_allclose(policy.sum(axis=1), 1.0)
+            assert (policy.to_numpy()[~allowed.to_numpy()] == 0).all()
+        assert ps.greedy(scores, allowed=allowed).idxmax(axis=1).tolist() == ["green", "red"]
+        with pytest.raises(ValueError, match="хотя бы одно"):
+            ps.greedy(scores, allowed=allowed & False)
+
+    def test_support_and_exact_uncovered_share(self):
+        sim = ps.synthetic.OfferSimulator(seed=6)
+        versions = sim.versions(3, drift=0.4, seed=2)
+        clients = sim.sample_clients(3000)
+        rows = np.array_split(np.arange(len(clients)), 3)
+        logs = pd.concat([sim.simulate(clients.iloc[r], versions[m]).assign(month=m) for m, r in zip(versions, rows)],
+                         ignore_index=True)
+        ev = ps.Evaluator(logs.drop(columns="propensity"), action="offer", reward="accepted",
+                          logging_policy=versions, logger="month")
+        support = ev.support()
+        recommended = sum(v.action_probs(logs) for v in versions.values()) > 0
+        assert support.equals(recommended[support.columns])
+        other = sim.policy("greedy", seed=9).action_probs(logs)
+        rep = ev.evaluate(other)
+        expected = float((other * ~recommended).sum(axis=1).mean())
+        assert rep.overlap.uncovered == pytest.approx(expected)
+        assert "вне покрытия логов" in rep.to_markdown()
+        inside = ps.greedy(sim.policy("greedy", seed=9).scores(logs), allowed=support)
+        assert ev.evaluate(inside).overlap.uncovered == 0
+        with pytest.raises(ValueError, match="logging_policy"):
+            ps.Evaluator(logs, action="offer", reward="accepted", propensity="propensity").support()
