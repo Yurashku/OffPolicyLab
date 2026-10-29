@@ -181,6 +181,33 @@ class OfferSimulator:
     # Политики, логи, истина
     # ------------------------------------------------------------------
 
+    def versions(
+        self, n: int, *, drift: float = 0.3, seed: int = 0, kind: str = "greedy", names: Any = None,
+    ) -> dict[str, SimPolicy]:
+        """Версии скоринговой модели, которую регулярно переобучают.
+
+        Веса каждой следующей версии — веса предыдущей плюс шум ``N(0, drift²)``: версии
+        похожи, но для части клиентов рекомендуют разное. Для ``kind="greedy"`` это
+        детерминированные политики, как скоринг в проде.
+
+        Args:
+            n: Число версий.
+            drift: Насколько сильно версия меняется за одно переобучение.
+            names: Имена версий (например, месяцы); по умолчанию ``v1..vn``.
+        """
+        if n < 1:
+            raise ValueError("n должно быть положительным")
+        names = list(names) if names is not None else [f"v{i + 1}" for i in range(n)]
+        if len(names) != n:
+            raise ValueError("names: по имени на версию")
+        r = np.random.default_rng(seed)
+        weights = r.normal(0.0, 1.0, size=(len(ACTIONS), 5 + len(REGIONS)))
+        out = {}
+        for name in names:
+            out[name] = SimPolicy(self, kind, weights.copy())
+            weights = weights + r.normal(0.0, drift, size=weights.shape)
+        return out
+
     def policy(
         self, kind: str, *, seed: int = 0, epsilon: float = 0.1, temperature: float = 1.0
     ) -> SimPolicy:
@@ -211,15 +238,22 @@ class OfferSimulator:
             raise ValueError("Строки политики должны быть распределениями: неотрицательны и суммируются в 1")
         return values
 
-    def simulate(self, df: pd.DataFrame, policy: Any, *, log_propensity: bool = True) -> pd.DataFrame:
+    def simulate(
+        self, df: pd.DataFrame, policy: Any, *, log_propensity: bool = True, shift: float = 0.0,
+    ) -> pd.DataFrame:
         """Логи политики: к строкам ``df`` добавляются ``offer``, ``propensity``,
-        ``accepted`` и ``revenue``."""
+        ``accepted`` и ``revenue``.
+
+        ``shift`` сдвигает логит принятия для всех строк — так моделируется сезон, когда
+        клиенты откликаются иначе. :meth:`true_value` сдвига не знает: истина — для
+        обычного сезона.
+        """
         probs = self._probs(policy, df)
         n = len(df)
         draws = self.rng.random(n)[:, None]
         a = (draws > np.cumsum(probs, axis=1)).sum(axis=1).clip(0, len(ACTIONS) - 1)
         rows = np.arange(n)
-        z = self._logits(df)[rows, a] + self._client_effect(df)
+        z = self._logits(df)[rows, a] + self._client_effect(df) + shift
         accepted = (self.rng.random(n) < _sigmoid(z)).astype(int)
         noise = self.rng.lognormal(mean=-0.045, sigma=0.3, size=n)  # E[noise] = 1
         revenue = accepted * self.revenue_if_accepted(df)[rows, a] * noise

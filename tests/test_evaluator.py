@@ -200,7 +200,7 @@ class TestAutoEstimator:
     def test_auto_is_default_and_explained(self, bandit, evaluator):
         s = evaluator.evaluate(bandit.policy_b).settings
         assert s["estimator"] == "dr" and s["estimator_auto"]
-        assert "залогированы" in s["estimator_reason"]
+        assert "известны точно" in s["estimator_reason"]
 
     def test_auto_reason_for_estimated_propensities(self):
         b = make_bandit(1500, seed=12)

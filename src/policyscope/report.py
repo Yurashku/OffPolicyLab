@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -23,7 +24,7 @@ import pandas as pd
 
 from policyscope.diagnostics import Check, Finding, Overlap
 
-__all__ = ["Estimate", "EstimatorRow", "MetricReport", "Report", "Leaderboard"]
+__all__ = ["Estimate", "EstimatorRow", "MetricReport", "Report", "Leaderboard", "Selection"]
 
 TRUST_LABELS = {"reliable": "надёжно", "caution": "с осторожностью", "unreliable": "ненадёжно"}
 DECISION_LABELS = {
@@ -431,8 +432,11 @@ class Report:
         }[s["inference"]]
         clusters = (f", кластеры «{s['cluster']}»: {self.overlap.n_clusters}"
                     if s.get("cluster") else "")
-        source = (f"пропенсити из логов («{s['propensity']}»)" if s.get("propensity")
-                  else "пропенсити оценены моделью")
+        source = {
+            "column": f"пропенсити из логов («{s.get('propensity')}»)",
+            "policy": "пропенсити по заданной политике A",
+            "mixture": f"пропенсити по смеси политик («{s.get('logger')}»)",
+        }.get(s.get("propensity_origin"), "пропенсити оценены моделью")
         chosen = ", выбран автоматически" if s.get("estimator_auto") else ""
         return (f"Оценщик {ESTIMATOR_LABELS[s['estimator']]}{chosen} · {inference}{clusters} · {source} · "
                 f"{_plural(self.overlap.n, 'строка', 'строки', 'строк')}, "
@@ -581,21 +585,187 @@ class Report:
 
 
 @dataclass(frozen=True)
+class Selection:
+    """Выбор лучшего кандидата по одной метрике — результат :meth:`Leaderboard.best`.
+
+    Attributes:
+        metric: Метрика выбора.
+        winner: Лучший по точечной оценке среди допущенных; ``None``, если допущенных нет.
+        best_set: Кандидаты, значимо не уступающие ни одному допущенному. Истинный лучший
+            среди допущенных входит в набор с вероятностью не меньше ``1 - alpha``: если в
+            наборе больше одного кандидата, выбрать между ними по этим логам нельзя.
+        winner_delta: Δ победителя к базе с одновременным интервалом по всем кандидатам —
+            он остаётся честным, хотя победитель выбран по этим же данным.
+        excluded: Кандидат -> почему не допущен (ненадёжная оценка, ограничитель).
+    """
+
+    metric: str
+    winner: Optional[str]
+    best_set: tuple[str, ...]
+    winner_delta: Optional[Estimate]
+    excluded: dict[str, str]
+    baseline: str
+    binary: bool
+    alpha: float
+
+    def lines(self) -> list[str]:
+        level = f"{100 * (1 - self.alpha):.0f}%"
+        fd = lambda x: _diff(x, self.binary)  # noqa: E731
+        if self.winner is None:
+            out = ["Ни один кандидат не допущен к выбору."]
+        else:
+            w = self.winner_delta
+            out = [
+                f"Лидер — «{self.winner}»: Δ к {self.baseline} = {fd(w.value)}, одновременный {level} ДИ "
+                f"{_interval(w.low, w.high, fd)}. Этот интервал честен и после выбора лидера; "
+                "точечная оценка лидера завышена (winner's curse)."
+            ]
+            others = [name for name in self.best_set if name != self.winner]
+            if others:
+                shown = ", ".join(f"«{name}»" for name in others)
+                out.append(
+                    f"Значимо не хуже лидера: {shown}. Выбрать между ними по этим логам нельзя — "
+                    "нужны свежие логи или A/B-тест."
+                )
+            else:
+                out.append("Лидер значимо лучше остальных допущенных кандидатов.")
+        for name, why in self.excluded.items():
+            out.append(_period(f"Не допущен «{name}»: {why}"))
+        return out
+
+    def __repr__(self) -> str:
+        return "\n".join([f"Selection({self.metric})", *("  " + line for line in self.lines())])
+
+    def _repr_markdown_(self) -> str:
+        return "\n".join(f"- {line}" for line in self.lines())
+
+    def to_dict(self) -> dict:
+        return _clean({
+            "metric": self.metric,
+            "winner": self.winner,
+            "best_set": list(self.best_set),
+            "winner_delta": self.winner_delta.to_dict() if self.winner_delta else None,
+            "excluded": dict(self.excluded),
+            "alpha": self.alpha,
+        })
+
+
+@dataclass(frozen=True)
 class Leaderboard:
     """Сравнение нескольких кандидатов с одной базой.
 
     ``table`` — строка на пару «кандидат × метрика», кандидаты упорядочены по Δ первой
     метрики (лучший — первым); ``reports`` — полный отчёт по каждому кандидату. p-value
     скорректированы методом Romano–Wolf на всё семейство «кандидат × метрика».
+
+    Для честного выбора лучшего:
+
+    - ``delta_low_sim`` / ``delta_high_sim`` в ``table`` — одновременные интервалы Δ по всем
+      кандидатам метрики: они накрывают все истинные Δ сразу, поэтому честны и для
+      кандидата, выбранного по данным;
+    - ``pairwise`` — разности кандидатов между собой с одновременными интервалами по всем
+      парам и p-value Romano–Wolf (``diff = V(candidate) − V(other)``);
+    - :meth:`best` — лидер, набор кандидатов, значимо не хуже лидера, и ограничители.
     """
 
     table: pd.DataFrame
     reports: dict[str, Report]
     baseline: str
     alpha: float
+    pairwise: pd.DataFrame = field(default_factory=pd.DataFrame)
 
     def __getitem__(self, name: str) -> Report:
         return self.reports[name]
+
+    def _versus(self, metric: str, leader: str) -> list[tuple]:
+        """Разности «лидер − кандидат» с одновременными интервалами, в порядке рейтинга."""
+        pw = self.pairwise[self.pairwise["metric"] == metric]
+        out = []
+        for other in self.reports:
+            if other == leader:
+                continue
+            direct = pw[(pw["candidate"] == leader) & (pw["other"] == other)]
+            if len(direct):
+                row = direct.iloc[0]
+                out.append((other, row["diff"], row["low"], row["high"], row["p_value_adj"]))
+                continue
+            rev = pw[(pw["candidate"] == other) & (pw["other"] == leader)]
+            if len(rev):
+                row = rev.iloc[0]
+                out.append((other, -row["diff"], -row["high"], -row["low"], row["p_value_adj"]))
+        return out
+
+    def best(self, metric: Optional[str] = None, guardrails: Optional[Mapping[str, float]] = None) -> Selection:
+        """Выбирает лучшего кандидата по ``metric`` (по умолчанию — первой метрике).
+
+        Args:
+            metric: Метрика выбора.
+            guardrails: Ограничители «метрика -> допустимое ухудшение к базе» в единицах
+                метрики (для доли — в долях: 0.01 = 1 п.п.). Кандидат допускается, только если
+                одновременный интервал доказывает, что метрика не хуже базы больше чем на
+                допуск. ``{"accepted": 0.005}`` — доля принятых может упасть не больше чем на
+                0.5 п.п. Допуск 0 требует доказать, что метрика не упала: кандидат, равный
+                базе, его не пройдёт — обычно нужен небольшой положительный допуск.
+
+        Кандидаты с ненадёжной оценкой («ненадёжно») к выбору не допускаются.
+        """
+        if "delta_low_sim" not in self.table.columns:
+            raise ValueError("Для выбора лучшего нужны интервалы: запустите compare с inference != 'none'")
+        metrics = list(dict.fromkeys(self.table["metric"]))
+        metric = metric or metrics[0]
+        if metric not in metrics:
+            raise KeyError(f"Метрики '{metric}' нет в рейтинге; есть: {metrics}")
+        first = next(iter(self.reports.values()))[metric]
+        sign = -1.0 if first.lower_is_better else 1.0
+        rows = {
+            g: frame.set_index("candidate") for g, frame in self.table.groupby("metric", sort=False)
+        }
+        excluded: dict[str, str] = {}
+        for name, report in self.reports.items():
+            if report[metric].trust == "unreliable" or not _finite(report[metric].delta.value):
+                excluded[name] = f"оценка по «{metric}» ненадёжна"
+        for g_metric, margin in (guardrails or {}).items():
+            if g_metric not in metrics:
+                raise KeyError(f"Ограничитель по метрике '{g_metric}', которой нет в рейтинге: {metrics}")
+            if margin < 0:
+                raise ValueError("Допуск ограничителя не может быть отрицательным")
+            g_first = next(iter(self.reports.values()))[g_metric]
+            for name in self.reports:
+                if name in excluded:
+                    continue
+                low, high = rows[g_metric].loc[name, ["delta_low_sim", "delta_high_sim"]]
+                ok = (high <= margin) if g_first.lower_is_better else (low >= -margin)
+                if self.reports[name][g_metric].trust == "unreliable" or not (_finite(low) and _finite(high)) or not ok:
+                    if margin:
+                        tolerance = _diff(margin, g_first.binary).lstrip("+")
+                        excluded[name] = (
+                            f"не доказано, что «{g_metric}» хуже, чем у {self.baseline}, "
+                            f"не больше чем на {tolerance}"
+                        )
+                    else:
+                        excluded[name] = f"не доказано, что «{g_metric}» не хуже, чем у {self.baseline}"
+        eligible = [name for name in self.reports if name not in excluded]
+        own = rows[metric]
+        if not eligible:
+            return Selection(metric, None, (), None, excluded, self.baseline, first.binary, self.alpha)
+        eligible.sort(key=lambda name: -sign * own.loc[name, "delta"])
+        winner = eligible[0]
+
+        def beats(j: str, i: str) -> bool:
+            """Кандидат j значимо лучше i (по одновременным попарным интервалам)."""
+            pw = self.pairwise[self.pairwise["metric"] == metric]
+            direct = pw[(pw["candidate"] == j) & (pw["other"] == i)]
+            if len(direct):
+                low, high = direct.iloc[0][["low", "high"]]
+            else:
+                rev = pw[(pw["candidate"] == i) & (pw["other"] == j)].iloc[0]
+                low, high = -rev["high"], -rev["low"]
+            return bool(low > 0) if sign > 0 else bool(high < 0)
+
+        best_set = tuple(i for i in eligible if not any(beats(j, i) for j in eligible if j != i))
+        w = own.loc[winner]
+        winner_delta = Estimate(float(w["delta"]), float(w["delta_low_sim"]), float(w["delta_high_sim"]))
+        return Selection(metric, winner, best_set, winner_delta, excluded, self.baseline, first.binary, self.alpha)
 
     def __repr__(self) -> str:
         lines = [f"Leaderboard({len(self.reports)} кандидатов против {self.baseline})"]
@@ -633,10 +803,28 @@ class Leaderboard:
         if adjusted:
             pairs = _plural(len(self.table), "пару", "пары", "пар")
             lines.append(f"p (RW) скорректированы методом Romano–Wolf на {pairs} «кандидат × метрика».")
-        lines.append(
-            "Оценка лучшего из многих кандидатов систематически завышена (winner's curse): "
-            "перед внедрением подтвердите победителя на свежих логах или в A/B-тесте."
-        )
+        if len(self.reports) > 1 and "delta_low_sim" in self.table.columns:
+            selection = self.best()
+            lines += ["", f"### Кто лучший по «{selection.metric}»", *(f"- {x}" for x in selection.lines())]
+            vs_leader = self._versus(selection.metric, selection.winner) if selection.winner else []
+            if vs_leader:
+                lines += [
+                    "",
+                    f"Лидер против остальных (одновременные {level} ДИ по всем парам кандидатов, p с поправкой "
+                    "Romano–Wolf; все пары — в `board.pairwise`):",
+                    "",
+                    f"| Против | Разница «{selection.winner}» − кандидат | {level} ДИ | p (RW) |",
+                    "|---|---|---|---|",
+                ]
+                fd = lambda x, b=selection.binary: _diff(x, b)  # noqa: E731
+                for other, diff, low, high, p in vs_leader:
+                    lines.append(f"| {other} | {fd(diff)} | {_interval(low, high, fd)} | {_p(p)} |")
+            lines += ["", "Другая метрика выбора или ограничители — `board.best(metric, guardrails={...})`."]
+        else:
+            lines.append(
+                "Оценка лучшего из многих кандидатов систематически завышена (winner's curse): "
+                "перед внедрением подтвердите победителя на свежих логах или в A/B-тесте."
+            )
         return "\n".join(lines)
 
     def to_dict(self) -> dict:
@@ -644,6 +832,7 @@ class Leaderboard:
             "baseline": self.baseline,
             "alpha": self.alpha,
             "table": self.table.to_dict(orient="records"),
+            "pairwise": self.pairwise.to_dict(orient="records"),
             "reports": {k: v.to_dict() for k, v in self.reports.items()},
         })
 

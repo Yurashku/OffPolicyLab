@@ -71,6 +71,10 @@ class Thresholds:
             стандартной ошибки Δ.
         max_variance_share: Доля дисперсии Δ от одного кластера, выше которой — осторожность.
         failed_replicates: Доля неудавшихся bootstrap-реплик, выше которой вывод не делается.
+        logger_shift_auc: При логах нескольких политик — ROC AUC, с которым период угадывается
+            по признакам клиента; выше — составы клиентов в периодах различаются (осторожность).
+        logger_drift_p: При логах нескольких политик — p-value различия отклика между периодами
+            (на строках, где все политики согласны), ниже которого — осторожность.
     """
 
     min_ess: float = 30.0
@@ -85,6 +89,8 @@ class Thresholds:
     material_bias: float = 0.5
     max_variance_share: float = 0.5
     failed_replicates: float = 0.1
+    logger_shift_auc: float = 0.6
+    logger_drift_p: float = 0.001
 
 
 @dataclass(frozen=True)
@@ -249,6 +255,9 @@ def _propensity_validity(data: LogData, nuis: Nuisance, th: Thresholds) -> list[
         advice=(
             f"Проверьте колонку «{data.propensity_col}»: в ней должна быть вероятность, с "
             "которой A выбрала залогированное действие, а не вероятность отклика или скор."
+            if data.propensity_col else
+            "Проверьте logging_policy: она должна описывать политику, которая на самом деле "
+            "записала эти логи."
         ),
     )]
 

@@ -141,6 +141,26 @@ def multiplier_tstats(
     return out
 
 
+def simultaneous_critical(t_null: np.ndarray, alpha: float) -> float:
+    """Критическое значение max-|t| для одновременных интервалов по семейству гипотез.
+
+    Интервалы ``оценка ± c · SE`` с этим ``c`` накрывают все истинные значения семейства
+    сразу с вероятностью ``1 - alpha`` (корреляция оценок учтена через совместное нулевое
+    распределение ``t_null``, ``(B, J)``). Поэтому интервал остаётся честным и для того
+    элемента семейства, который выбран по данным, — например, для лучшего кандидата.
+    Гипотезы с NaN (вырожденная SE) в максимум не входят.
+    """
+    t_null = np.asarray(t_null, dtype=float)
+    valid = np.isfinite(t_null).any(axis=0)
+    if not valid.any():
+        return float("nan")
+    null_abs = np.abs(t_null[:, valid])
+    null_abs = null_abs[np.isfinite(null_abs).all(axis=1)]
+    if null_abs.shape[0] == 0:
+        return float("nan")
+    return float(np.quantile(null_abs.max(axis=1), 1.0 - alpha))
+
+
 def romano_wolf(t_obs: np.ndarray, t_null: np.ndarray) -> np.ndarray:
     """Скорректированные p-value Romano–Wolf (stepdown по max |t|).
 

@@ -9,19 +9,30 @@
 сама, поэтому кросс-фиттинг и bootstrap не требуют от политики ничего.
 
 Хелперы :func:`greedy`, :func:`softmax`, :func:`epsilon_greedy` превращают скоры
-модели (``DataFrame`` с метками действий в колонках) в такие таблицы.
+модели (``DataFrame`` с метками действий в колонках) в такие таблицы. Случайные политики
+скоров не требуют: :func:`uniform` выбирает действия поровну, :func:`random_like` — с тем же
+балансом, что у наблюдаемой или любой другой политики, но без привязки к клиенту.
+
+:func:`logging_propensity` решает обратную задачу: по известной политике A (или по
+нескольким политикам, работавшим в разные периоды) считает пропенсити залогированных
+действий точно, без модели.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any, Optional, Sequence, Union
 
 import numpy as np
 import pandas as pd
 
 from policyscope.data import LogData
 
-__all__ = ["greedy", "softmax", "epsilon_greedy", "policy_matrix"]
+__all__ = [
+    "greedy", "softmax", "epsilon_greedy", "uniform", "random_like", "mixture", "policy_matrix",
+    "logging_propensity",
+]
 
 _ROW_SUM_TOL = 1e-6
 
@@ -74,6 +85,130 @@ def epsilon_greedy(scores: Any, epsilon: float = 0.1) -> pd.DataFrame:
     best = greedy(scores)
     k = best.shape[1]
     return best * (1.0 - epsilon) + epsilon / k
+
+
+@dataclass(frozen=True)
+class RandomPolicy:
+    """Случайная политика: действие не зависит от клиента (см. :func:`uniform`, :func:`random_like`).
+
+    ``mix`` — откуда взять доли действий: ``None`` — поровну среди ``actions`` (или всех
+    действий из логов); ``"logs"`` — доли залогированных действий; словарь «действие -> доля»;
+    иначе — политика в любом формате кандидата, её доли усредняются по строкам логов.
+    ``by`` — колонки логов, внутри групп которых доли считаются отдельно.
+    """
+
+    mix: Any = None
+    actions: Optional[tuple] = None
+    by: Optional[tuple] = None
+
+
+def uniform(actions: Optional[Sequence] = None) -> RandomPolicy:
+    """Случайная политика: каждое действие с равной вероятностью.
+
+    Args:
+        actions: Среди каких действий выбирать. ``None`` — среди всех действий, которые
+            встречаются в логах.
+
+    Пример: ``ev.evaluate(ps.uniform(), name="случайная")``.
+    """
+    return RandomPolicy(None, None if actions is None else tuple(actions))
+
+
+def random_like(source: Any = "logs", by: Optional[Union[str, Sequence[str]]] = None) -> RandomPolicy:
+    """Случайная политика с тем же балансом действий, что у ``source``, но без таргетинга.
+
+    Каждому клиенту действие назначается случайно, с долями ``source``: так проверяется,
+    даёт ли таргетинг что-то сверх правильного микса действий. Разница
+    ``V(политика) − V(random_like(политика))`` — вклад именно выбора «кому что».
+
+    Args:
+        source: ``"logs"`` (по умолчанию) — доли действий в логах, то есть баланс
+            наблюдаемой политики A; политика в любом формате кандидата (например,
+            скоринговая B) — её средние доли по строкам логов; словарь «действие -> доля».
+        by: Колонка (или колонки) логов, внутри групп которой баланс сохраняется отдельно.
+            ``by="month"`` — случайная политика, у которой доли действий в каждом месяце те же,
+            что у ``source`` в этом месяце.
+
+    Пример: ``ev.evaluate(ps.random_like(by="month"), name="случайная с балансом A по месяцам")``.
+    """
+    if isinstance(source, RandomPolicy):
+        return source
+    if by is not None and isinstance(source, Mapping):
+        raise ValueError("by= сохраняет баланс логов или политики внутри групп; с явными долями он не нужен")
+    groups = None if by is None else ((by,) if isinstance(by, str) else tuple(by))
+    return RandomPolicy(dict(source) if isinstance(source, Mapping) else source, by=groups)
+
+
+def _grouped_shares(policy: RandomPolicy, data: LogData, frame: pd.DataFrame, role: str) -> np.ndarray:
+    """Доли действий ``policy.mix`` внутри групп ``policy.by``: строка получает доли своей группы."""
+    missing = [col for col in policy.by if col not in frame.columns]
+    if missing:
+        raise ValueError(f"Политика {role}: в логах нет колонок для by= {missing}")
+    groups = frame[list(policy.by)].astype(object).apply(tuple, axis=1).to_numpy()
+    if isinstance(policy.mix, str) and policy.mix == "logs":
+        source = np.zeros((data.n, data.k))
+        source[np.arange(data.n), data.a] = 1.0
+    else:
+        source = policy_matrix(policy.mix, data, frame, role)
+    shares = pd.DataFrame(source).groupby(groups).transform("mean").to_numpy()
+    return shares
+
+
+@dataclass(frozen=True)
+class MixturePolicy:
+    """Смесь политик (см. :func:`mixture`)."""
+
+    policies: tuple
+    weights: tuple
+
+
+def mixture(policies: Any, weights: Optional[Sequence[float]] = None) -> MixturePolicy:
+    """Смешивающая политика: для каждого решения случайно выбирается одна из ``policies``.
+
+    Вероятность действия — взвешенное среднее вероятностей политик. Например, смесь
+    ежемесячных версий скоринговой модели — это «каждый раз случайная версия»; её
+    сравнение с лучшей версией показывает, стоит ли выбирать версию, а не смешивать.
+
+    Args:
+        policies: Словарь «имя -> политика» или список политик в любом формате кандидата.
+        weights: Доли политик; ``None`` — поровну.
+    """
+    members = tuple(policies.values()) if isinstance(policies, Mapping) else tuple(policies)
+    if not members:
+        raise ValueError("Смесь пуста: передайте хотя бы одну политику")
+    w = np.full(len(members), 1.0 / len(members)) if weights is None else np.asarray(weights, dtype=float)
+    if w.shape != (len(members),) or (w < 0).any() or not np.isclose(w.sum(), 1.0, atol=_ROW_SUM_TOL):
+        raise ValueError("weights: по доле на политику, неотрицательные, в сумме 1")
+    return MixturePolicy(members, tuple(float(x) for x in w))
+
+
+def _from_random(policy: RandomPolicy, data: LogData, frame: pd.DataFrame, role: str) -> np.ndarray:
+    labels = data.actions if policy.actions is None else list(policy.actions)
+    unknown = [label for label in labels if label not in set(data.actions)]
+    if unknown:
+        raise ValueError(
+            f"Политика {role} выбирает действия, которых нет в логах: {unknown[:5]}. "
+            "Для них нет данных, и off-policy оценка невозможна."
+        )
+    mix = policy.mix
+    if mix is None:
+        if not labels:
+            raise ValueError(f"Политике {role} не из чего выбирать: список действий пуст")
+        shares = np.array([1.0 / len(labels) if label in set(labels) else 0.0 for label in data.actions])
+    elif policy.by is not None:
+        return _grouped_shares(policy, data, frame, role)
+    elif isinstance(mix, str) and mix == "logs":
+        shares = np.bincount(data.a, minlength=data.k) / data.n
+    elif isinstance(mix, Mapping):
+        extra = [label for label in mix if label not in set(data.actions)]
+        if extra:
+            raise ValueError(f"Политика {role}: долей для действий не из логов быть не может: {extra[:5]}")
+        shares = np.array([float(mix.get(label, 0.0)) for label in data.actions])
+        if (shares < 0).any() or not np.isclose(shares.sum(), 1.0, atol=_ROW_SUM_TOL):
+            raise ValueError(f"Политика {role}: доли должны быть неотрицательными и в сумме давать 1")
+    else:
+        shares = policy_matrix(mix, data, frame, role).mean(axis=0)
+    return np.tile(shares, (data.n, 1))
 
 
 # ---------------------------------------------------------------------------
@@ -209,11 +344,17 @@ def policy_matrix(policy: Any, data: LogData, frame: pd.DataFrame, role: str = "
             - ``Series`` или имя колонки логов с действием, которое выбрала бы политика;
             - объект с методом ``action_probs(df)`` или функция ``f(df)``, возвращающие
               одно из перечисленного (вызываются один раз на логах без наград и пропенсити);
-            - ``ndarray`` — только если действия в логах закодированы числами ``0..k-1``.
+            - ``ndarray`` — только если действия в логах закодированы числами ``0..k-1``;
+            - :func:`uniform` / :func:`random_like` — случайные политики, :func:`mixture` — смесь.
         data: Подготовленные логи.
         frame: Логи без колонок наград и пропенсити — то, что видит политика.
         role: Название политики в сообщениях об ошибках.
     """
+    if isinstance(policy, RandomPolicy):
+        return _from_random(policy, data, frame, role)
+    if isinstance(policy, MixturePolicy):
+        return sum(w * policy_matrix(member, data, frame, f"{role}[{i}]")
+                   for i, (member, w) in enumerate(zip(policy.policies, policy.weights)))
     if hasattr(policy, "action_probs"):
         return policy_matrix(policy.action_probs(frame), data, frame, role)
     if callable(policy) and not isinstance(policy, (pd.DataFrame, pd.Series, np.ndarray)):
@@ -233,3 +374,67 @@ def policy_matrix(policy: Any, data: LogData, frame: pd.DataFrame, role: str = "
         f"Не понимаю политику типа {type(policy).__name__}. Ожидается DataFrame вероятностей "
         "(колонки — метки действий), имя колонки, Series действий или объект с action_probs(df)."
     )
+
+
+def logging_propensity(
+    policy: Any, data: LogData, frame: pd.DataFrame, logger: Optional[pd.Series] = None,
+) -> np.ndarray:
+    """Пропенсити залогированных действий по известной логирующей политике.
+
+    Нужна, когда вероятности выбора не сохраняли, но правило A известно (скоринговая
+    модель плюс способ выбора): тогда пропенсити считаются точно, а не оцениваются.
+
+    Если логи собраны несколькими политиками — например, разными версиями модели в
+    разные периоды, — ``policy`` задаётся словарём «метка -> политика», а ``logger``
+    указывает, какая из них записала строку. Пропенсити тогда — смесь
+    ``p_i = sum_k (n_k / n) * pi_k(a_i | x_i)`` (balanced IPS, Agarwal et al., 2017):
+    оценка несмещена, если клиенты и их отклик в разных периодах сопоставимы. Так даже
+    детерминированные политики, которые выбирали по-разному, вместе дают исследование.
+
+    Raises:
+        ValueError: если заданная политика не могла выбрать залогированное действие —
+            значит, политика или логи заданы неверно.
+    """
+    return _logging_terms(policy, data, frame, logger)[0]
+
+
+def _logging_terms(
+    policy: Any, data: LogData, frame: pd.DataFrame, logger: Optional[pd.Series] = None,
+) -> tuple[np.ndarray, dict]:
+    """Пропенсити и матрицы логирующих политик (общая часть :func:`logging_propensity`)."""
+    rows = np.arange(data.n)
+    matrices: dict = {}
+    if logger is None:
+        if isinstance(policy, Mapping):
+            raise ValueError("Для нескольких логирующих политик укажите колонку logger=")
+        matrices[None] = policy_matrix(policy, data, frame, role="A")
+        p = matrices[None][rows, data.a]
+        where = "заданная политика A"
+    else:
+        if not isinstance(policy, Mapping):
+            raise ValueError(
+                "logger= задан, значит, логи собраны несколькими политиками: передайте "
+                "logging_policy словарём «метка из колонки logger -> политика»."
+            )
+        labels = logger.to_numpy(dtype=object)
+        present = list(dict.fromkeys(labels))
+        missing = [label for label in present if label not in policy]
+        if missing:
+            raise ValueError(f"Нет политики для меток logger: {missing[:5]}")
+        unused = [label for label in policy if label not in set(present)]
+        if unused:
+            raise ValueError(f"Политики {unused[:5]} не записали ни одной строки логов: проверьте метки")
+        p = np.zeros(data.n)
+        for label in present:
+            share = float(np.mean(labels == label))
+            matrices[label] = policy_matrix(policy[label], data, frame, role=f"A[{label}]")
+            p += share * matrices[label][rows, data.a]
+        where = "ни одна из заданных логирующих политик"
+    impossible = int(np.sum(p <= 0))
+    if impossible:
+        raise ValueError(
+            f"В {impossible} строках {where} не могла выбрать залогированное действие "
+            "(вероятность 0). Значит, политика задана не та, что работала, или в логах есть "
+            "строки из другого источника."
+        )
+    return np.minimum(p, 1.0), matrices
