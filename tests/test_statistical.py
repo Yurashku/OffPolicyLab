@@ -275,3 +275,104 @@ def test_mixture_of_deterministic_loggers_is_unbiased():
         covered += m.delta.low <= truth <= m.delta.high
     assert mc_bias_ok(errors), np.mean(errors)
     assert covered / reps >= 0.88, covered / reps
+
+
+def _version_logs(seed, n=6000, k=4):
+    sim = OfferSimulator(seed=seed)
+    versions = sim.versions(k, drift=0.4, seed=1)
+    clients = sim.sample_clients(n)
+    rows = np.array_split(np.arange(n), k)
+    logs = pd.concat([sim.simulate(clients.iloc[r], versions[m]).assign(month=m) for m, r in zip(versions, rows)],
+                     ignore_index=True).drop(columns="propensity")
+    truth_a = np.mean([sim.true_value(logs.iloc[r], versions[m], "accepted") for m, r in zip(versions, rows)])
+    return sim, versions, logs, truth_a
+
+
+def test_bounds_cover_the_truth():
+    """Интервал Imbens–Manski накрывает истинное Δ; для покрытой политики — номинально, как DR."""
+    F = ["age", "income", "loyal", "risk", "region"]
+    reps, random_cover, version_cover, inside = 80, 0, 0, 0
+    for seed in range(reps):
+        sim, versions, logs, truth_a = _version_logs(500 + seed)
+        ev = ps.Evaluator(logs, action="offer", reward="accepted", features=F,
+                          logging_policy=versions, logger="month")
+        uniform = pd.DataFrame(0.25, index=logs.index, columns=sim.actions)
+        truth_random = sim.true_value(logs, uniform, "accepted") - truth_a
+        b = ev.bounds(ps.uniform())["accepted"]
+        random_cover += b.ci_low <= truth_random <= b.ci_high
+        inside += b.delta_low <= truth_random <= b.delta_high
+        truth_v2 = sim.true_value(logs, versions["v2"], "accepted") - truth_a
+        bv = ev.bounds(versions["v2"])["accepted"]
+        version_cover += bv.ci_low <= truth_v2 <= bv.ci_high
+    assert random_cover / reps >= 0.95, random_cover / reps
+    assert inside / reps >= 0.9, inside / reps
+    assert version_cover / reps >= 0.9, version_cover / reps
+
+
+def _wrapper_logs(seed, n, informed):
+    sim = OfferSimulator(seed=seed, client_effect=1.5)
+    both = sim.sample_clients(n, visits=2)
+    first, second = both.iloc[::2].reset_index(drop=True), both.iloc[1::2].reset_index(drop=True)
+    prev = sim.simulate(first, sim.policy("softmax", temperature=2.0, seed=1))
+    rec = sim.policy("greedy", seed=1).action_probs(second).to_numpy()
+    u = sim.hidden_trait(second)
+    d = 1 / (1 + np.exp(-(1.5 * u - 0.5))) if informed else np.full(n, 0.4)
+    probs = (1 - d)[:, None] * rec + d[:, None] * (1 - rec) / 3
+    logs = sim.simulate(second, pd.DataFrame(probs, columns=sim.actions, index=second.index))
+    logs["prev_accepted"] = prev["accepted"].to_numpy()
+    return logs.drop(columns="propensity")
+
+
+def test_placebo_rarely_false_alarms_and_catches_informed_deviations():
+    """Случайные отклонения «обвязки» проходят плацебо, отклонения по скрытой склонности — нет."""
+    F = ["age", "income", "loyal", "risk", "region"]
+    reps, rates = 40, {}
+    for informed in (False, True):
+        fails = 0
+        for seed in range(reps):
+            logs = _wrapper_logs(700 + seed, 5000, informed)
+            rep = ps.evaluate(logs, ps.uniform(), action="offer", reward="accepted", features=F,
+                              placebo="prev_accepted", inference="influence")
+            fails += rep.placebo[0].status == "fail"
+        rates[informed] = fails / reps
+    assert rates[False] <= 0.1, rates
+    assert rates[True] >= 0.8, rates
+
+
+def _stochastic_version_logs(seed, n=6000, temperature=1.0):
+    """Три стохастические версии по периодам; прошлый отклик клиента зависит от сезона периода."""
+    from dataclasses import replace
+
+    sim = OfferSimulator(seed=seed, client_effect=1.5)
+    versions = {name: replace(v, temperature=temperature)
+                for name, v in sim.versions(3, drift=0.8, seed=seed, kind="softmax").items()}
+    both = sim.sample_clients(n, visits=2)
+    first, second = both.iloc[::2].reset_index(drop=True), both.iloc[1::2].reset_index(drop=True)
+    parts = []
+    for (name, v), r, shift in zip(versions.items(), np.array_split(np.arange(n), 3), (-1.0, 0.0, 1.0)):
+        prev = sim.simulate(first.iloc[r], v, shift=shift)
+        cur = sim.simulate(second.iloc[r], v).assign(period=name)
+        cur["prev_accepted"] = prev["accepted"].to_numpy()
+        parts.append(cur)
+    return versions, pd.concat(parts, ignore_index=True).drop(columns="propensity")
+
+
+@pytest.mark.parametrize("temperature", [1.0, 0.1])
+def test_placebo_is_centred_under_version_mixtures(temperature):
+    """Смесь версий: в отдельном периоде E[w | x] ≠ 1, но точное центрирование убирает ложные тревоги.
+
+    При низкой температуре версии дают части действий почти нулевую вероятность; без периода
+    в прогнозе плацебо проверка срабатывала почти в половине прогонов.
+    """
+    F = ["age", "income", "loyal", "risk", "region"]
+    estimates, fails, reps = [], 0, 20
+    for seed in range(reps):
+        versions, logs = _stochastic_version_logs(900 + seed, temperature=temperature)
+        rep = ps.evaluate(logs, ps.uniform(), action="offer", reward="accepted", features=F,
+                          logging_policy=versions, logger="period", placebo="prev_accepted",
+                          inference="influence")
+        estimates.append(rep.placebo[0].estimate)
+        fails += rep.placebo[0].status == "fail"
+    assert fails / reps <= 0.1, fails / reps
+    if temperature == 1.0:  # при почти нулевых пропенсити разброс огромен, и среднее неинформативно
+        assert mc_bias_ok(estimates), np.mean(estimates)

@@ -149,17 +149,34 @@ def _is_id_like(name: str, s: pd.Series) -> bool:
     )
 
 
+_DATE_STRING = re.compile(r"^(\d{4}-\d{2}(-\d{2})?([ T].*)?|\d{2}\.\d{2}\.\d{4})$")
+
+
+def _is_date_string(s: pd.Series) -> bool:
+    """Строковая колонка с датами вида 2025-01-31, 2025-01 или 31.01.2025."""
+    if pd.api.types.is_numeric_dtype(s) or pd.api.types.is_bool_dtype(s):
+        return False
+    values = pd.Series(s.dropna().unique()[:500]).astype(str)
+    return len(values) > 0 and bool(values.str.match(_DATE_STRING).all())
+
+
 def _select_features(
-    df: pd.DataFrame, service: set[str]
+    df: pd.DataFrame, service: set[str], actions: Sequence = (),
 ) -> tuple[list[str], dict[str, str]]:
     chosen: list[str] = []
     skipped: dict[str, str] = {}
+    action_labels = set(actions)
     for col in df.columns:
         if col in service:
             continue
         s = df[col]
         if pd.api.types.is_datetime64_any_dtype(s) or pd.api.types.is_timedelta64_dtype(s):
             skipped[col] = "дата/время"
+        elif _is_date_string(s):
+            skipped[col] = "дата/время (строкой)"
+        elif (not pd.api.types.is_numeric_dtype(s) and action_labels
+              and set(_sorted_labels(s.dropna())) <= action_labels):
+            skipped[col] = "значения — метки действий: похоже на решение другой политики"
         elif s.isna().any():
             skipped[col] = "есть пропуски"
         elif s.nunique() <= 1:
@@ -260,6 +277,7 @@ def prepare_logs(
     cluster: Optional[str] = None,
     features: Optional[Sequence[str]] = None,
     logger: Optional[str] = None,
+    exclude: Sequence[str] = (),
 ) -> LogData:
     """Проверяет логи и переводит их в массивы.
 
@@ -276,6 +294,8 @@ def prepare_logs(
             с пропусками. Категории кодируются one-hot.
         logger: Колонка с меткой политики, записавшей строку (если логи собраны несколькими
             политиками). Служебная: в признаки не попадает.
+        exclude: Плацебо-показатели: служебные колонки, которые не могут быть признаками. При
+            авто-выборе признаков попадают в список пропущенных.
 
     Raises:
         ValueError: при любой проблеме входа — с объяснением, что исправить.
@@ -299,6 +319,7 @@ def prepare_logs(
         service.add(cluster)
     if logger is not None:
         service.add(logger)
+    service.update(exclude)
     if action in rewards:
         raise ValueError("Колонка действия не может одновременно быть наградой")
 
@@ -336,7 +357,8 @@ def prepare_logs(
 
     suspicious: dict[str, str] = {}
     if features is None:
-        feature_cols, skipped = _select_features(df, service)
+        feature_cols, skipped = _select_features(df, service, actions)
+        skipped.update({col: "плацебо-показатель: в признаки не входит" for col in exclude})
         for col, metric in _outcome_like(df, feature_cols, reward_map, binary).items():
             feature_cols.remove(col)
             skipped[col] = f"почти идеально предсказывает «{metric}» — похоже на исход действия"
@@ -352,7 +374,7 @@ def prepare_logs(
         leaked = sorted(set(feature_cols) & service)
         if leaked:
             raise ValueError(
-                f"Колонки {leaked} служебные (действие/награда/пропенсити/кластер/источник логов) и не могут "
+                f"Колонки {leaked} служебные (действие/награда/пропенсити/кластер/источник логов/плацебо) и не могут "
                 "быть признаками: это утечка ответа в модели."
             )
         with_nan = {c: int(df[c].isna().sum()) for c in feature_cols if df[c].isna().any()}

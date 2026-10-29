@@ -63,7 +63,7 @@ class TestSchema:
     def test_to_dict_is_json_and_stable(self, bandit, evaluator):
         d = evaluator.evaluate(bandit.policy_b).to_dict()
         json.dumps(d, allow_nan=False)
-        assert set(d) == {"policy", "baseline", "trust", "metrics", "overlap", "findings", "settings"}
+        assert set(d) == {"policy", "baseline", "trust", "metrics", "overlap", "findings", "settings", "placebo"}
         m = d["metrics"]["reward"]
         for key in ("V_A", "V_B", "delta", "p_value", "p_value_adj", "lift", "mde", "decision",
                     "trust", "findings", "checks", "estimators", "outcome_quality"):

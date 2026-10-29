@@ -17,8 +17,9 @@ percentile, p-value — центрированный (доля реплик с `
 максимума |t|-статистик (Romano, Wolf, 2005, 2016). Контролирует вероятность хотя бы
 одного ложного открытия (FWER) и, в отличие от Holm/Bonferroni, учитывает зависимость
 гипотез: метрики и кандидаты оцениваются на одних и тех же логах. Нулевое
-распределение берётся из gaussian multiplier bootstrap по кластерным суммам вкладов (для
-аналитического метода — без переобучения) или из тех же bootstrap-реплик.
+распределение при аналитическом методе — multiplier bootstrap по кластерным суммам вкладов
+без переобучения, приведённый к многомерному распределению Стьюдента с ``G-1`` степенями
+свободы; при bootstrap — центрированные реплики.
 """
 
 from __future__ import annotations
@@ -115,13 +116,18 @@ def analytic_summary(
 def multiplier_tstats(
     sums: np.ndarray, se: np.ndarray, n: int, n_draws: int, rng: np.random.Generator
 ) -> np.ndarray:
-    """Нулевое распределение t-статистик (gaussian multiplier bootstrap): ``(n_draws, J)``.
+    """Нулевое распределение t-статистик (multiplier bootstrap): ``(n_draws, J)``.
 
     Multiplier bootstrap ``t*_j = sum_g xi_g S_gj / (n se_j)`` с ``xi ~ N(0, 1)`` при
     фиксированных кластерных суммах ``S`` распределён ровно как ``N(0, R)``, где
     ``R = S'S · G/(G-1) / (n^2 se se')``. Поэтому сэмплируется сразу ``J``-мерное
     нормальное — без ``n_draws × G`` случайных множителей. Корреляция между гипотезами
     сохраняется — ровно то, что нужно Romano–Wolf.
+
+    Каждая строка делится на общий ``sqrt(chi2_{G-1} / (G-1))``: получается многомерное
+    распределение Стьюдента с ``G − 1`` степенями свободы — тем же числом, что у маргинальных
+    интервалов и p-value. С нормальным распределением при малом числе кластеров
+    «одновременный» интервал бывал уже маргинального, а скорректированный p — меньше сырого.
 
     Гипотезы с нулевой или нечисловой SE (например, постоянная метрика) получают NaN и
     не портят распределение остальных.
@@ -137,8 +143,38 @@ def multiplier_tstats(
     cov = (s.T @ s) * np.outer(scale, scale)
     values, vectors = np.linalg.eigh((cov + cov.T) / 2)
     root = vectors * np.sqrt(np.clip(values, 0.0, None))
-    out[:, ok] = rng.standard_normal((n_draws, int(ok.sum()))) @ root.T
+    draws = rng.standard_normal((n_draws, int(ok.sum()))) @ root.T
+    df = max(g - 1, 1)
+    out[:, ok] = draws / np.sqrt(rng.chisquare(df, size=(n_draws, 1)) / df)
     return out
+
+
+def imbens_manski_critical(
+    width: float, se_low: float, se_high: float, alpha: float, df: Optional[int] = None,
+) -> float:
+    """Критическое значение интервала для частично идентифицированного параметра.
+
+    Если параметр известен лишь с точностью до отрезка ``[L, U]``, интервал
+    ``[L̂ − c·se_L, Û + c·se_U]`` накрывает истинное значение с вероятностью не меньше
+    ``1 − alpha`` при ``c``, решающем ``F(c + width/σ) − F(−c) = 1 − alpha``, ``σ = max(se)``
+    (Imbens, Manski, 2004). Для точки (``width = 0``) это двусторонний квантиль ``1 − α/2``,
+    для широкого отрезка — односторонний ``1 − α``: каждая граница тогда «работает» за себя.
+    ``F`` — распределение Стьюдента с ``df`` степенями свободы (как у остальных интервалов
+    пакета: ``G − 1``) или нормальное при ``df=None``.
+    """
+    from scipy.optimize import brentq
+
+    dist = stats.norm if df is None else stats.t(df=max(int(df), 1))
+    lo, hi = float(dist.ppf(1.0 - alpha)), float(dist.ppf(1.0 - alpha / 2.0))
+    sigma = max(se_low, se_high)
+    if not np.isfinite(sigma) or sigma <= 0:
+        return hi
+    w = max(float(width), 0.0) / sigma
+
+    def gap(c: float) -> float:
+        return float(dist.cdf(c + w) - dist.cdf(-c)) - (1.0 - alpha)
+
+    return float(brentq(gap, lo, hi)) if gap(lo) < 0 else lo
 
 
 def simultaneous_critical(t_null: np.ndarray, alpha: float) -> float:

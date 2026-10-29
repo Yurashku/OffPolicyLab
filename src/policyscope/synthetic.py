@@ -162,6 +162,15 @@ class OfferSimulator:
     def _logits(self, df: pd.DataFrame) -> np.ndarray:
         return self._core(df) @ self.beta.T + self._region_onehot(df) @ self.region_effect.T
 
+    def hidden_trait(self, df: pd.DataFrame) -> np.ndarray:
+        """Скрытая склонность клиента откликаться (клиентский эффект) для строк ``df``.
+
+        В реальных логах её нет. В симуляторе она нужна, чтобы моделировать решения,
+        которые зависят от того, чего не видят признаки (например, менеджер меняет
+        оффер, потому что знает клиента), — ненаблюдаемый конфаундинг.
+        """
+        return self._client_effect(df)
+
     def _client_effect(self, df: pd.DataFrame) -> np.ndarray:
         return self._effects[df["client_id"].to_numpy()]
 
