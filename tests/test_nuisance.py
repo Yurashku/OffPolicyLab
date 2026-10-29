@@ -235,6 +235,7 @@ class TestPropensityRegularization:
         assert nuis.propensity_kind == "logistic" and nuis.propensity_C >= 0.1
         assert np.corrcoef(nuis.p_raw, probs[np.arange(n), a])[0, 1] > 0.95
 
+    @pytest.mark.slow
     def test_step_like_logging_selects_boosting(self):
         """Смесь детерминированных версий — ступенчатое правило: бустинг описывает его лучше."""
         import policyscope as ps
@@ -249,9 +250,19 @@ class TestPropensityRegularization:
                             features=["age", "income", "loyal", "risk", "region"])
         nuis = fit_nuisance(data, NuisanceConfig(), seed=0)
         assert nuis.propensity_kind == "boosting" and nuis.propensity_C is None
+        assert isinstance(nuis.propensity_iterations, int) and 1 <= nuis.propensity_iterations <= 200
         assert nuis.propensity_losses["boosting"] < min(v for k, v in nuis.propensity_losses.items() if k != "boosting")
-        pinned = fit_nuisance(data, NuisanceConfig(propensity_kind="boosting"), seed=1)
-        assert pinned.propensity_kind == "boosting" and pinned.propensity_losses == {}
+        # Точечная оценка — та же процедура, что у bootstrap-реплик: бустинг с выбранным числом итераций.
+        pinned = fit_nuisance(data, NuisanceConfig(propensity_kind="boosting",
+                                                   propensity_iterations=nuis.propensity_iterations), seed=0)
+        np.testing.assert_allclose(pinned.p_matrix, nuis.p_matrix)
+
+    def test_pinned_boosting_skips_tuning(self):
+        b = make_bandit(800, seed=45)
+        nuis = fit_nuisance(prep(b.logs), NuisanceConfig(propensity_kind="boosting", propensity_iterations=20), seed=1)
+        assert nuis.propensity_kind == "boosting" and nuis.propensity_C is None and nuis.propensity_losses == {}
+        assert nuis.propensity_iterations == 20
+        assert np.isfinite(nuis.p_raw).all() and (nuis.p_raw > 0).all()
 
     def test_pinned_C_skips_tuning(self):
         b = make_bandit(600, seed=43)
@@ -268,3 +279,25 @@ class TestPropensityRegularization:
         rep = ev.evaluate(b.policy_b, inference="none")
         assert ev.nuisance.propensity_C is None
         assert rep.settings["propensity_model"] == "LogisticRegression"
+
+
+class TestConfigAndRareActions:
+    def test_config_is_validated(self):
+        with pytest.raises(ValueError, match="propensity_kind"):
+            NuisanceConfig(propensity_kind="forest")
+        with pytest.raises(ValueError, match="propensity_iterations"):
+            NuisanceConfig(propensity_iterations=10)
+        with pytest.raises(ValueError, match="propensity_C"):
+            NuisanceConfig(propensity_kind="boosting", propensity_C=1.0)
+
+    def test_logistic_kind_without_C_tunes_only_logistic(self):
+        b = make_bandit(800, seed=47)
+        nuis = fit_nuisance(prep(b.logs), NuisanceConfig(propensity_kind="logistic"), seed=0)
+        assert nuis.propensity_kind == "logistic" and "boosting" not in nuis.propensity_losses
+
+    def test_rare_action_does_not_break_tuning(self):
+        b = make_bandit(800, seed=48)
+        logs = b.logs.copy()
+        logs.loc[logs.index[:2], "action"] = "purple"  # два наблюдения действия
+        nuis = fit_nuisance(prep(logs.drop(columns="propensity")), NuisanceConfig(), seed=0)
+        assert np.isfinite(nuis.p_taken).all()

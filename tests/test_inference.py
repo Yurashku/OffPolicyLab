@@ -158,3 +158,16 @@ def test_percentiles_of_empty_columns_are_silent():
         low, high = percentile_interval(samples, 0.05)
         sd = nan_std(samples)
     assert np.isfinite(low[0]) and np.isnan(low[1]) and np.isnan(sd[1])
+
+
+def test_multiplier_null_is_student_with_few_clusters():
+    """При G кластерах нулевое распределение — Стьюдент с G − 1 степенями свободы, как у маргинального ДИ."""
+    from scipy import stats
+
+    rng = np.random.default_rng(5)
+    g = 6
+    psi = rng.normal(size=(g, 1))
+    sums = cluster_sums(psi, np.arange(g), g)
+    se = cluster_se(sums, g)
+    t = multiplier_tstats(sums, se, g, 40_000, rng)[:, 0]
+    assert np.quantile(np.abs(t), 0.95) == pytest.approx(stats.t.ppf(0.975, g - 1), rel=0.05)

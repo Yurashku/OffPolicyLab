@@ -45,6 +45,8 @@ def test_readme_symbols_and_arguments_exist(repo_root):
     assert not missing, f"README ссылается на несуществующие символы: {missing}"
     known = (set(inspect.signature(ps.Evaluator).parameters)
              | set(inspect.signature(ps.Evaluator.evaluate).parameters)
+             | set(inspect.signature(ps.Evaluator.compare).parameters)
+             | set(inspect.signature(ps.Evaluator.bounds).parameters)
              | set(inspect.signature(ps.evaluate).parameters))
     mentioned = set(re.findall(r"`(\w+)=`", text))
     assert mentioned <= known, f"README упоминает несуществующие аргументы: {mentioned - known}"

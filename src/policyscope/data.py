@@ -277,6 +277,7 @@ def prepare_logs(
     cluster: Optional[str] = None,
     features: Optional[Sequence[str]] = None,
     logger: Optional[str] = None,
+    exclude: Sequence[str] = (),
 ) -> LogData:
     """Проверяет логи и переводит их в массивы.
 
@@ -293,6 +294,8 @@ def prepare_logs(
             с пропусками. Категории кодируются one-hot.
         logger: Колонка с меткой политики, записавшей строку (если логи собраны несколькими
             политиками). Служебная: в признаки не попадает.
+        exclude: Плацебо-показатели: служебные колонки, которые не могут быть признаками. При
+            авто-выборе признаков попадают в список пропущенных.
 
     Raises:
         ValueError: при любой проблеме входа — с объяснением, что исправить.
@@ -316,6 +319,7 @@ def prepare_logs(
         service.add(cluster)
     if logger is not None:
         service.add(logger)
+    service.update(exclude)
     if action in rewards:
         raise ValueError("Колонка действия не может одновременно быть наградой")
 
@@ -354,6 +358,7 @@ def prepare_logs(
     suspicious: dict[str, str] = {}
     if features is None:
         feature_cols, skipped = _select_features(df, service, actions)
+        skipped.update({col: "плацебо-показатель: в признаки не входит" for col in exclude})
         for col, metric in _outcome_like(df, feature_cols, reward_map, binary).items():
             feature_cols.remove(col)
             skipped[col] = f"почти идеально предсказывает «{metric}» — похоже на исход действия"
@@ -369,7 +374,7 @@ def prepare_logs(
         leaked = sorted(set(feature_cols) & service)
         if leaked:
             raise ValueError(
-                f"Колонки {leaked} служебные (действие/награда/пропенсити/кластер/источник логов) и не могут "
+                f"Колонки {leaked} служебные (действие/награда/пропенсити/кластер/источник логов/плацебо) и не могут "
                 "быть признаками: это утечка ответа в модели."
             )
         with_nan = {c: int(df[c].isna().sum()) for c in feature_cols if df[c].isna().any()}

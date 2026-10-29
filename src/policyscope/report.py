@@ -22,9 +22,12 @@ from typing import Any, Optional
 
 import pandas as pd
 
-from policyscope.diagnostics import Check, Finding, Overlap
+from policyscope.diagnostics import Check, Finding, Overlap, PlaceboCheck
 
-__all__ = ["Estimate", "EstimatorRow", "MetricReport", "Report", "Leaderboard", "Selection"]
+__all__ = [
+    "Estimate", "EstimatorRow", "MetricReport", "Report", "Leaderboard", "Selection", "MetricBounds",
+    "BoundsReport",
+]
 
 TRUST_LABELS = {"reliable": "надёжно", "caution": "с осторожностью", "unreliable": "ненадёжно"}
 DECISION_LABELS = {
@@ -312,6 +315,7 @@ class Report:
     overlap: Overlap
     findings: tuple[Finding, ...]
     settings: dict[str, Any] = field(default_factory=dict)
+    placebo: tuple[PlaceboCheck, ...] = ()
 
     def __getitem__(self, metric: str) -> MetricReport:
         try:
@@ -361,6 +365,7 @@ class Report:
             "metrics": {k: v.to_dict() for k, v in self.metrics.items()},
             "overlap": self.overlap.to_dict(),
             "findings": [f.to_dict() for f in self.findings],
+            "placebo": [c.to_dict() for c in self.placebo],
             "settings": self.settings,
         })
 
@@ -536,16 +541,21 @@ class Report:
 
     def _overlap_block(self) -> list[str]:
         o = self.overlap
-        explore = "оценка по модели" if o.exploration_estimated else "по логированным пропенсити"
+        explore = "оценка по модели" if o.exploration_estimated else {
+            "policy": "по заданной политике A", "mixture": "по смеси логирующих политик",
+        }.get(self.settings.get("propensity_origin"), "по логированным пропенсити")
         lines = [
             f"- Эффективный размер выборки: {o.ess:,.0f} из {o.n:,} ({100 * o.ess_ratio:.0f}%).".replace(",", " "),
             f"- Средний вес важности {o.mean_weight:.3f} [{o.mean_weight_low:.3f}; {o.mean_weight_high:.3f}] "
-            f"(при полном перекрытии — 1); максимальный {_num(o.max_weight)}, 99-й перцентиль {_num(o.p99_weight)}.",
+            + (f"(ожидаемый при заданной политике — {o.expected_weight:.3f})" if o.expected_weight is not None
+               else "(при полном перекрытии — 1)")
+            + f"; максимальный {_num(o.max_weight)}, 99-й перцентиль {_num(o.p99_weight)}.",
             f"- A в среднем оставляет шанс {min(o.exploration, o.k):.1f} "
             f"из {o.k} действий ({explore}); {self.policy} совпадает с залогированным действием "
             f"в {100 * o.match:.0f}% случаев.",
-            *([f"- Решения {self.policy} вне покрытия логов: {100 * o.uncovered:.1f}% (точно, по заданной "
-               "логирующей политике). Эту часть данные не измеряют."]
+            *([f"- Решения {self.policy} вне покрытия логов: {100 * o.uncovered:.1f}% (точно при заданной "
+               "логирующей политике; для смеси версий — при сопоставимых периодах). Эту часть данные не "
+               "измеряют."]
               if o.uncovered is not None else []),
             "",
             f"| Действие | Доля в логах | Доля у {self.policy} | Средний вес |",
@@ -580,9 +590,10 @@ class Report:
         if quality:
             lines.append("- Качество модели исхода (out-of-fold): " + "; ".join(quality) + ".")
         lines += [
-            "- Предпосылки, которые нельзя проверить по данным: все факторы, влиявшие и на "
-            "выбор A, и на метрику, есть среди признаков; политика B не обучалась на этих же "
-            "логах (иначе оценка завышена).",
+            "- Предпосылки, которые напрямую по данным не проверить: все факторы, влиявшие и на "
+            "выбор A, и на метрику, есть среди признаков (скрытые факторы, связанные с показателем "
+            "до решения, частично ловит placebo=); политика B не обучалась на этих же логах (иначе "
+            "оценка завышена).",
         ]
         return lines
 
@@ -599,7 +610,10 @@ class Selection:
             наборе больше одного кандидата, выбрать между ними по этим логам нельзя.
         winner_delta: Δ победителя к базе с одновременным интервалом по всем кандидатам —
             он остаётся честным, хотя победитель выбран по этим же данным.
-        excluded: Кандидат -> почему не допущен (ненадёжная оценка, ограничитель).
+        excluded: Кандидат -> почему не допущен (ненадёжная оценка, ограничитель). Допуск
+            решается по этим же данным, поэтому гарантия набора — для лучшего среди
+            допущенных: истинно лучший в целом мог не пройти ограничитель из-за малой мощности.
+        n_admitted: Сколько кандидатов допущено к выбору.
     """
 
     metric: str
@@ -610,6 +624,7 @@ class Selection:
     baseline: str
     binary: bool
     alpha: float
+    n_admitted: int = 0
 
     def lines(self) -> list[str]:
         level = f"{100 * (1 - self.alpha):.0f}%"
@@ -627,11 +642,13 @@ class Selection:
             if others:
                 shown = ", ".join(f"«{name}»" for name in others)
                 out.append(
-                    f"Значимо не хуже лидера: {shown}. Выбрать между ними по этим логам нельзя — "
-                    "нужны свежие логи или A/B-тест."
+                    f"В наборе лучших также {shown}: их значимо не обходит ни один допущенный кандидат, "
+                    "включая лидера. Выбрать между ними по этим логам нельзя — нужны свежие логи или A/B-тест."
                 )
-            else:
+            elif self.n_admitted > 1:
                 out.append("Лидер значимо лучше остальных допущенных кандидатов.")
+            else:
+                out.append("Других допущенных кандидатов нет: сравнивать лидера не с кем.")
         for name, why in self.excluded.items():
             out.append(_period(f"Не допущен «{name}»: {why}"))
         return out
@@ -649,6 +666,7 @@ class Selection:
             "best_set": list(self.best_set),
             "winner_delta": self.winner_delta.to_dict() if self.winner_delta else None,
             "excluded": dict(self.excluded),
+            "n_admitted": self.n_admitted,
             "alpha": self.alpha,
         })
 
@@ -668,7 +686,8 @@ class Leaderboard:
       кандидата, выбранного по данным;
     - ``pairwise`` — разности кандидатов между собой с одновременными интервалами по всем
       парам и p-value Romano–Wolf (``diff = V(candidate) − V(other)``);
-    - :meth:`best` — лидер, набор кандидатов, значимо не хуже лидера, и ограничители.
+    - :meth:`best` — лидер, набор лучших (допущенные кандидаты, которых ни один допущенный
+      значимо не обходит) и ограничители.
     """
 
     table: pd.DataFrame
@@ -750,7 +769,7 @@ class Leaderboard:
         eligible = [name for name in self.reports if name not in excluded]
         own = rows[metric]
         if not eligible:
-            return Selection(metric, None, (), None, excluded, self.baseline, first.binary, self.alpha)
+            return Selection(metric, None, (), None, excluded, self.baseline, first.binary, self.alpha, 0)
         eligible.sort(key=lambda name: -sign * own.loc[name, "delta"])
         winner = eligible[0]
 
@@ -768,7 +787,9 @@ class Leaderboard:
         best_set = tuple(i for i in eligible if not any(beats(j, i) for j in eligible if j != i))
         w = own.loc[winner]
         winner_delta = Estimate(float(w["delta"]), float(w["delta_low_sim"]), float(w["delta_high_sim"]))
-        return Selection(metric, winner, best_set, winner_delta, excluded, self.baseline, first.binary, self.alpha)
+        return Selection(
+            metric, winner, best_set, winner_delta, excluded, self.baseline, first.binary, self.alpha, len(eligible),
+        )
 
     def __repr__(self) -> str:
         lines = [f"Leaderboard({len(self.reports)} кандидатов против {self.baseline})"]
@@ -846,3 +867,149 @@ class Leaderboard:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(text)
         return text
+
+
+@dataclass(frozen=True)
+class MetricBounds:
+    """Границы для одной метрики — часть :class:`BoundsReport`.
+
+    Attributes:
+        reward_range: Диапазон, в котором лежит средний отклик на действие.
+        range_note: Откуда диапазон: бинарная метрика, задан явно или наблюдаемые min/max.
+        range_assumed: Диапазон хотя бы с одной стороны взят из наблюдаемых значений — это
+            допущение (для бинарной метрики и явно заданного диапазона — ``False``).
+        v_low, v_high: Границы V(кандидата) без допущений о ненаблюдаемых откликах.
+        delta_low, delta_high: Границы Δ = V(кандидата) − V(базы).
+        ci_low, ci_high: Интервал Imbens–Manski: накрывает истинное Δ с вероятностью не
+            меньше ``1 − alpha``.
+        at_most, at_least: Каждая — отдельная односторонняя ``1 − alpha`` граница: «Δ не
+            больше» и «Δ не меньше». Вместе с вероятностью ``1 − alpha`` — ``[ci_low, ci_high]``.
+        sensitivity: λ -> Δ, если отклик на каждое непоказанное действие равен λ × прогноз
+            модели исхода (в пределах ``reward_range``).
+        breakdown: Наименьшее λ, при котором Δ меняет знак; ``None`` — не меняет ни при
+            каком λ ≥ 0.
+    """
+
+    metric: str
+    binary: bool
+    reward_range: tuple[float, float]
+    range_note: str
+    range_assumed: bool
+    v_low: float
+    v_high: float
+    delta_low: float
+    delta_high: float
+    ci_low: float
+    ci_high: float
+    at_most: float
+    at_least: float
+    sensitivity: dict[float, float]
+    breakdown: Optional[float]
+
+    def to_dict(self) -> dict:
+        return _clean({k: v for k, v in self.__dict__.items()})
+
+
+@dataclass(frozen=True)
+class BoundsReport:
+    """Что можно сказать о кандидате, часть решений которого вне покрытия логов.
+
+    Результат :meth:`policyscope.Evaluator.bounds`. Часть решений кандидата (``uncovered``)
+    приходится на действия, которые логирующая политика этим клиентам не показывала:
+    отклик на них в логах не наблюдался. Без допущений о нём значение кандидата
+    известно лишь с точностью до отрезка (частичная идентификация, Manski); с допущением
+    «отклик = λ × прогноз модели исхода» — точкой, и таблица чувствительности показывает,
+    при каком λ меняется вывод.
+    """
+
+    policy: str
+    baseline: str
+    uncovered: float
+    alpha: float
+    metrics: dict[str, MetricBounds]
+    baseline_uncovered: float = 0.0
+    findings: tuple[Finding, ...] = ()
+
+    def __getitem__(self, metric: str) -> MetricBounds:
+        return self.metrics[metric]
+
+    def __repr__(self) -> str:
+        lines = [f"BoundsReport({self.policy} vs {self.baseline}, вне покрытия {100 * self.uncovered:.1f}%)"]
+        for b in self.metrics.values():
+            fd = lambda x, bb=b.binary: _diff(x, bb)  # noqa: E731
+            lines.append(f"  {b.metric}: Δ ∈ [{fd(b.delta_low)}; {fd(b.delta_high)}], "
+                         f"ДИ {_interval(b.ci_low, b.ci_high, fd)}")
+        return "\n".join(lines)
+
+    def _repr_markdown_(self) -> str:
+        return self.to_markdown()
+
+    def to_markdown(self) -> str:
+        level = f"{100 * (1 - self.alpha):.0f}%"
+        p, a = self.policy, self.baseline
+        base_share = (f" У «{a}» таких решений {100 * self.baseline_uncovered:.1f}%."
+                      if self.baseline_uncovered > 0 else "")
+        out = [
+            f"## Границы: {p} против {a}",
+            "",
+            f"{100 * self.uncovered:.1f}% решений «{p}» приходятся на действия, которых логирующая политика "
+            f"этим клиентам не показывала: отклик на них в логах не наблюдался.{base_share} Ниже — что можно "
+            f"сказать о Δ = V({p}) − V({a}) без допущений об этом отклике и с ними.",
+            "",
+            f"| Метрика | Диапазон отклика | V({p}): границы | Δ: границы | {level} ДИ для Δ "
+            f"| Δ не больше ({level}) | Δ не меньше ({level}) |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for b in self.metrics.values():
+            fv = lambda x, bb=b.binary: _value(x, bb)  # noqa: E731
+            fd = lambda x, bb=b.binary: _diff(x, bb)  # noqa: E731
+            lo, hi = b.reward_range
+            out.append(
+                f"| {b.metric} | [{lo:g}; {hi:g}] ({b.range_note}) | {_interval(b.v_low, b.v_high, fv)} "
+                f"| {_interval(b.delta_low, b.delta_high, fd)} | {_interval(b.ci_low, b.ci_high, fd)} "
+                f"| {fd(b.at_most)} | {fd(b.at_least)} |"
+            )
+        assumed = [b.metric for b in self.metrics.values() if b.range_assumed]
+        out += [
+            "",
+            "Границы верны при любом отклике на непоказанные действия в пределах диапазона. «Не больше» и "
+            f"«не меньше» — каждая отдельная односторонняя {level}-граница; интервал накрывает истинное Δ "
+            f"с вероятностью не меньше {level} (Imbens–Manski). Покрытая часть оценивается как обычно и "
+            "опирается на точные пропенсити заданной логирующей политики"
+            + (" и на сопоставимость периодов (проверки ниже)." if self.findings else "."),
+            *([f"Для {', '.join(assumed)} диапазон хотя бы с одной стороны взят по наблюдаемым значениям — это "
+               "допущение: средний отклик на непоказанные действия не выходит за наблюдённые. Задайте его "
+               "явно (low=, high=)."] if assumed else []),
+            "",
+            *(f"- {b.metric}: V({a}) − V({p}) не больше {_diff(-b.at_least, b.binary)} и, отдельно, не меньше "
+              f"{_diff(-b.at_most, b.binary)} (односторонние {level}); вместе с вероятностью {level} — в "
+              f"{_interval(-b.ci_high, -b.ci_low, lambda x, bb=b.binary: _diff(x, bb))}."
+              for b in self.metrics.values()),
+            "",
+            "### Чувствительность",
+            "",
+            "Если отклик на непоказанные действия равен λ × прогноз модели исхода (λ = 1 — модель верна, "
+            "λ > 1 — эти клиенты откликались бы охотнее, чем она предсказывает):",
+            "",
+        ]
+        lambdas = list(next(iter(self.metrics.values())).sensitivity)
+        out.append("| Метрика | " + " | ".join(f"λ = {lam:g}" for lam in lambdas) + " | Δ меняет знак при λ |")
+        out.append("|---|" + "---|" * (len(lambdas) + 1))
+        for b in self.metrics.values():
+            fd = lambda x, bb=b.binary: _diff(x, bb)  # noqa: E731
+            cells = " | ".join(fd(b.sensitivity[lam]) for lam in lambdas)
+            flip = f"{b.breakdown:.2f}" if b.breakdown is not None else "не меняет"
+            out.append(f"| {b.metric} | {cells} | {flip} |")
+        if self.findings:
+            out += ["", "### Предпосылки покрытой части"]
+            for f in self.findings:
+                out.append(f"- {SEVERITY_ICONS[f.severity]} **{f.title}**. {f.detail}")
+        return "\n".join(out)
+
+    def to_dict(self) -> dict:
+        return _clean({
+            "policy": self.policy, "baseline": self.baseline, "uncovered": self.uncovered,
+            "baseline_uncovered": self.baseline_uncovered, "alpha": self.alpha,
+            "metrics": {k: v.to_dict() for k, v in self.metrics.items()},
+            "findings": [f.to_dict() for f in self.findings],
+        })

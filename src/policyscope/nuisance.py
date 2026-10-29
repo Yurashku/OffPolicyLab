@@ -77,6 +77,8 @@ class NuisanceConfig:
             ``"boosting"``. ``None`` — выбрать по out-of-fold log-loss: логистическая регрессия
             с ``C`` из сетки :data:`PROPENSITY_C_GRID` против градиентного бустинга. Выбор
             делается на полной выборке и передаётся bootstrap-репликам.
+        propensity_iterations: Число итераций бустинга пропенсити. ``None`` — выбрать ранней
+            остановкой (медиана по фолдам лучшей итерации); репликам передаётся готовым.
         interactions: Метрика -> использовать ли блок x×a в модели исхода. ``None`` (или
             метрика, отсутствующая в словаре) — использовать, если дизайн помещается в
             :data:`MAX_DESIGN_CELLS`. Решение принимается на полной выборке, и
@@ -89,6 +91,7 @@ class NuisanceConfig:
     propensity_floor: float = 0.1
     propensity_C: Optional[float] = None
     propensity_kind: Optional[str] = None
+    propensity_iterations: Optional[int] = None
     interactions: Optional[Mapping[str, bool]] = None
 
     def model_for(self, metric: str) -> Any:
@@ -102,6 +105,14 @@ class NuisanceConfig:
             raise ValueError("n_folds должен быть не меньше 2")
         if not 0.0 < self.propensity_floor < 1.0:
             raise ValueError("propensity_floor должен лежать в (0, 1)")
+        if self.propensity_kind not in (None, "logistic", "boosting"):
+            raise ValueError("propensity_kind: None, 'logistic' или 'boosting'")
+        if self.propensity_iterations is not None and (
+            self.propensity_kind != "boosting" or self.propensity_iterations < 1
+        ):
+            raise ValueError("propensity_iterations — целое ≥ 1 и только при propensity_kind='boosting'")
+        if self.propensity_C is not None and (self.propensity_kind == "boosting" or self.propensity_C <= 0):
+            raise ValueError("propensity_C — положительное число и только для логистической модели")
 
 
 @dataclass(frozen=True)
@@ -124,8 +135,12 @@ class Nuisance:
         propensity_C: ``C`` логистической модели пропенсити по умолчанию (``None`` — выбран
             бустинг, пропенсити залогированы или модель задана пользователем).
         propensity_kind: ``"logistic"`` / ``"boosting"`` для модели по умолчанию, иначе ``None``.
+        propensity_iterations: Число итераций бустинга, если выбран бустинг: медиана по фолдам
+            лучшей итерации ранней остановки (см. :func:`_early_stopping_iterations`).
         propensity_losses: Out-of-fold log-loss кандидатов, если модель выбиралась: ключ — ``C``
             логистической регрессии или ``"boosting"``.
+        propensity_note: Почему бустинг не участвовал в выборе (например, слишком редкое
+            действие для ранней остановки); ``None`` — участвовал или выбор не делался.
         p_matrix: Оценённые out-of-fold вероятности всех действий ``(n, k)`` без пола
             (только для оценённых) — для проверки калибровки на решениях кандидата.
     """
@@ -142,8 +157,10 @@ class Nuisance:
     design_notes: dict[str, str] = field(default_factory=dict)
     propensity_C: Optional[float] = None
     propensity_kind: Optional[str] = None
+    propensity_iterations: Optional[int] = None
     propensity_losses: dict[Any, float] = field(default_factory=dict)
     p_matrix: Optional[np.ndarray] = field(default=None, repr=False)
+    propensity_note: Optional[str] = None
 
     def floored(self, a: np.ndarray, factor: float) -> np.ndarray:
         """Пропенсити с полом, умноженным на ``factor`` (анализ чувствительности)."""
@@ -157,13 +174,25 @@ def _default_propensity_model(C: float = 1.0):
     return make_pipeline(StandardScaler(), LogisticRegression(C=C, max_iter=1000))
 
 
-def _boosting_propensity_model():
+def _boosting_propensity_model(iterations: Optional[int] = None):
     """Бустинг для пропенсити: описывает ступенчатые правила (argmax скоринга, смеси версий).
 
-    Без ранней остановки и с фиксированным зерном — чтобы bootstrap-реплики и повторные
-    запуски давали одно и то же.
+    Без ``iterations`` — ранняя остановка по отложенным 10% переданных строк: обучение
+    прекращается, когда log-loss на них 10 итераций подряд не улучшается. Так выбирается число
+    итераций (:func:`_early_stopping_iterations`); OOF-прогнозы и bootstrap-реплики затем
+    обучают бустинг ровно с этим числом итераций, без отложенной части. L2-штраф ограничивает
+    шаг Ньютона в листе с очень редким действием: без него одна строка такого действия давала
+    остальным строкам листа вероятность этого действия около 1, и бустинг проигрывал выбор
+    модели. Зерно фиксировано — результат детерминирован.
     """
-    return HistGradientBoostingClassifier(max_iter=100, early_stopping=False, random_state=0)
+    if iterations is not None:
+        return HistGradientBoostingClassifier(
+            max_iter=iterations, early_stopping=False, l2_regularization=1.0, random_state=0,
+        )
+    return HistGradientBoostingClassifier(
+        max_iter=200, early_stopping=True, validation_fraction=0.1, n_iter_no_change=10,
+        l2_regularization=1.0, random_state=0,
+    )
 
 
 class TwoPartRegressor(RegressorMixin, BaseEstimator):
@@ -290,7 +319,8 @@ def _design_width(p: int, k: int, interactions: bool) -> int:
 
 
 def _propensity_oof(
-    X: np.ndarray, a: np.ndarray, k: int, folds: np.ndarray, n_folds: int, model: Any
+    X: np.ndarray, a: np.ndarray, k: int, folds: np.ndarray, n_folds: int, model: Any,
+    fitted_models: Optional[list] = None,
 ) -> tuple[np.ndarray, int]:
     probs = np.zeros((len(a), k))
     unseen = 0
@@ -302,13 +332,50 @@ def _propensity_oof(
         else:
             fitted = clone(model).fit(X[train], a[train])
             probs[np.ix_(hold, np.asarray(fitted.classes_, dtype=int))] = fitted.predict_proba(X[hold])
+            if fitted_models is not None:
+                fitted_models.append(fitted)
         unseen += int(np.sum(~np.isin(a[hold], classes)))
     return probs, unseen
 
 
+def _early_stopping_iterations(
+    X: np.ndarray, a: np.ndarray, folds: np.ndarray, n_folds: int,
+) -> tuple[Optional[int], Optional[str]]:
+    """Число итераций бустинга: медиана по фолдам лучшей итерации ранней остановки.
+
+    На обучающей части каждого фолда бустинг обучается с ранней остановкой, и берётся итерация
+    с лучшим log-loss на отложенных строках. Это не ``n_iter_``: обучение останавливается на
+    10 итераций позже лучшей (терпение ранней остановки), а лишние итерации переобучают модель
+    и раздувают веса. Медиана по фолдам меньше зависит от случайного разбиения, чем одна
+    остановка на полной выборке.
+
+    Действия с одной строкой в фолде в этой подгонке не участвуют: стратифицированной
+    отложенной части нужны две строки каждого класса, а число итераций — лишь гиперпараметр.
+
+    Returns:
+        Число итераций (``None``, если ранняя остановка невозможна ни в одном фолде) и причина.
+    """
+    best: list[int] = []
+    for f in range(n_folds):
+        train = folds != f
+        X_train, a_train = X[train], a[train]
+        labels, counts = np.unique(a_train, return_counts=True)
+        keep = np.isin(a_train, labels[counts >= 2])
+        if len(np.unique(a_train[keep])) < 2:
+            continue
+        try:
+            model = _boosting_propensity_model().fit(X_train[keep], a_train[keep])
+        except ValueError:  # отложенной части не хватает строк на все действия
+            continue
+        best.append(int(np.argmax(model.validation_score_)))
+    if not best:
+        return None, "бустинг не сравнивался: для ранней остановки слишком мало строк редких действий"
+    return max(int(np.median(best)), 1), None
+
+
 def _tune_propensity(
-    X: np.ndarray, a: np.ndarray, k: int, folds: np.ndarray, n_folds: int,
-) -> tuple[str, Optional[float], np.ndarray, int, dict[Any, float], float]:
+    X: np.ndarray, a: np.ndarray, k: int, folds: np.ndarray, n_folds: int, logistic_only: bool = False,
+) -> tuple[str, Optional[float], Optional[int], np.ndarray, int, dict[Any, float], float, Optional[str]]:
     """Выбирает модель пропенсити по умолчанию по out-of-fold log-loss.
 
     Кандидаты — логистическая регрессия (``C`` подбирается по сетке) и градиентный
@@ -321,12 +388,20 @@ def _tune_propensity(
     пропенсити должна предсказывать (в отличие от модели исхода, где ошибка на
     залогированных действиях не видит ошибок в контрастах).
 
-    Сетка идёт от слабой регуляризации к сильной и обрывается, когда потери растут два
-    шага подряд. Направление важно: при сильной регуляризации все модели почти
+    Сетка идёт от слабой регуляризации к сильной и обрывается после двух значений подряд,
+    не улучшивших лучший результат. Направление важно: при сильной регуляризации все модели почти
     маргинальные, потери там лежат на плато, и шум на плато выглядел бы как рост — путь
     от сильной регуляризации останавливался бы, не дойдя до моделей, которые учат
     контекст. Выбор — одно значение из сетки, поэтому OOF-прогнозы победителя
     используются как есть.
+
+    Число итераций бустинга выбирается ранней остановкой (:func:`_early_stopping_iterations`),
+    а его OOF-прогнозы и log-loss считаются бустингом с этим числом итераций — ровно той
+    процедурой, которую повторяют bootstrap-реплики. Иначе точечная оценка и реплики были бы
+    разными оценщиками, и интервалы и p-value смешивали бы их. Если ранняя остановка
+    невозможна (слишком редкие действия), бустинг не участвует, и причина попадает в отчёт.
+
+    ``logistic_only`` — подобрать только ``C`` логистической регрессии.
 
     Последний элемент — время на отвергнутых кандидатов: bootstrap-реплики их не
     обучают, и прогноз длительности bootstrap не должен их учитывать.
@@ -349,14 +424,22 @@ def _tune_propensity(
             if worse == 2:
                 break
     assert best is not None
+    if logistic_only or len(np.unique(a)) < 2:
+        return "logistic", best[0], None, best[2], best[3], losses, total - best[4], None
     start = time.perf_counter()
-    probs, unseen = _propensity_oof(X, a, k, folds, n_folds, _boosting_propensity_model())
+    iterations, note = _early_stopping_iterations(X, a, folds, n_folds)
+    tuning = time.perf_counter() - start
+    total += tuning
+    if iterations is None:
+        return "logistic", best[0], None, best[2], best[3], losses, total - best[4], note
+    start = time.perf_counter()
+    probs, unseen = _propensity_oof(X, a, k, folds, n_folds, _boosting_propensity_model(iterations))
     seconds = time.perf_counter() - start
     total += seconds
     losses["boosting"] = float(-np.mean(np.log(np.clip(probs[rows, a], 1e-12, None))))
     if losses["boosting"] < best[1]:
-        return "boosting", None, probs, unseen, losses, total - seconds
-    return "logistic", best[0], best[2], best[3], losses, total - best[4]
+        return "boosting", None, iterations, probs, unseen, losses, total - seconds, None
+    return "logistic", best[0], None, best[2], best[3], losses, total - best[4], None
 
 
 def _outcome_oof(
@@ -435,9 +518,11 @@ def fit_nuisance(
         seed: Зерно разбиения на фолды.
         positions: Позиции строк реплики; ``None`` — вся выборка.
     """
-    # Многопоточный BLAS на небольших матрицах в разы медленнее однопоточного,
-    # а параллелизм у bootstrap и так есть на уровне реплик.
-    with threadpool_limits(limits=1, user_api="blas"):
+    # Модели обучаются в одном потоке (BLAS и OpenMP). Многопоточный BLAS на небольших
+    # матрицах в разы медленнее однопоточного, а OpenMP-бустинг на части машин (например,
+    # в WSL) медленнее в десятки раз: синхронизация потоков дороже самих вычислений.
+    # Параллелизм у bootstrap и так есть — на уровне реплик.
+    with threadpool_limits(limits=1):
         return _fit_nuisance(data, config, seed=seed, positions=positions)
 
 
@@ -461,8 +546,10 @@ def _fit_nuisance(
     unseen = 0
     propensity_C: Optional[float] = None
     propensity_kind: Optional[str] = None
+    propensity_iterations: Optional[int] = None
     losses: dict[Any, float] = {}
     tuning_seconds = 0.0
+    propensity_note: Optional[str] = None
     probs = None
     if data.propensity is not None:
         p_taken = data.propensity[idx]
@@ -471,16 +558,23 @@ def _fit_nuisance(
         if config.propensity_model is not None:
             probs, unseen = _propensity_oof(X, a, k, folds, config.n_folds, config.propensity_model)
         elif config.propensity_kind == "boosting":
-            propensity_kind = "boosting"
-            probs, unseen = _propensity_oof(X, a, k, folds, config.n_folds, _boosting_propensity_model())
+            propensity_kind, propensity_iterations = "boosting", config.propensity_iterations
+            if propensity_iterations is None:
+                propensity_iterations, reason = _early_stopping_iterations(X, a, folds, config.n_folds)
+                if propensity_iterations is None:
+                    raise ValueError(f"{reason}. Задайте propensity_iterations явно.")
+            probs, unseen = _propensity_oof(
+                X, a, k, folds, config.n_folds, _boosting_propensity_model(propensity_iterations),
+            )
         elif config.propensity_C is not None:
             propensity_kind, propensity_C = "logistic", config.propensity_C
             probs, unseen = _propensity_oof(
                 X, a, k, folds, config.n_folds, _default_propensity_model(propensity_C),
             )
         else:
-            propensity_kind, propensity_C, probs, unseen, losses, tuning_seconds = _tune_propensity(
-                X, a, k, folds, config.n_folds,
+            (propensity_kind, propensity_C, propensity_iterations, probs, unseen, losses,
+             tuning_seconds, propensity_note) = _tune_propensity(
+                X, a, k, folds, config.n_folds, logistic_only=config.propensity_kind == "logistic",
             )
         rows = np.arange(len(a))
         p_raw = probs[rows, a]
@@ -512,6 +606,8 @@ def _fit_nuisance(
         design_notes=notes,
         propensity_C=propensity_C,
         propensity_kind=propensity_kind,
+        propensity_iterations=propensity_iterations,
         propensity_losses=losses,
         p_matrix=probs,
+        propensity_note=propensity_note,
     )
