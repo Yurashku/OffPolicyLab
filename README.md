@@ -1,422 +1,141 @@
-# Policyscope
+# OffPolicyLab · Policyscope
+
+[Подробное руководство на русском](README.ru.md)
 
 [![CI](https://github.com/Yurashku/OffPolicyLab/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Yurashku/OffPolicyLab/actions/workflows/ci.yml)
-![Python](https://img.shields.io/badge/python-3.10%E2%80%933.14-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
 
-**Что будет, если заменить текущую политику A на кандидата B?** Policyscope отвечает на
-этот вопрос по логам одной только политики A — без онлайн A/B-теста. Это задача
-off-policy evaluation (OPE) для contextual bandit: выбор оффера, рекомендации, промо.
+**Estimate how a new recommendation policy would perform using logs from an existing policy — and identify when those logs cannot support the comparison.**
 
-На выходе — отчёт, а не просто число:
+Policyscope is a Python library for off-policy evaluation (OPE) in contextual bandit settings: selecting an offer, recommendation, or promotion. Given logged decisions from policy A and a candidate policy B, it estimates the change in expected reward, Δ = V(B) − V(A), with uncertainty and diagnostics.
 
-- **оценка эффекта** по каждой метрике: Δ = V(B) − V(A), относительный прирост, доверительный
-  интервал, p-value с поправкой на множественность (Romano–Wolf);
-- **вывод**: «B лучше», «B хуже», «разница не обнаружена» (с минимальным обнаружимым эффектом) или
-  «вывод сделать нельзя»;
-- **вердикт доверия** с объяснением, почему оценке можно или нельзя верить на ваших данных, и
-  советом, что делать.
+The useful result is a decision report: an estimated effect, a confidence interval, agreement between estimators, and reasons to trust or withhold the conclusion. This helps decide which candidates warrant an online experiment. The causal interpretation still depends on the assumptions below.
+
+**Package/import:** `policyscope` · **Python:** 3.10+ · **License:** MIT
+
+## What you can inspect
+
+| Engineering question | Implementation and evidence |
+|---|---|
+| How do estimates behave when the true effect is known? | An offer simulator with an analytic policy-value reference, [validation scenarios and recorded results](https://github.com/Yurashku/OffPolicyLab/blob/main/docs/validation.md). |
+| How is uncertainty handled? | Cross-fitted nuisance models; cluster-aware inference; bootstrap refitting when propensities are estimated; [estimator rationale](https://github.com/Yurashku/OffPolicyLab/blob/main/docs/estimators.md). |
+| What happens when the data are insufficient? | Support and weight diagnostics, estimator disagreement, placebo checks, and partial-identification bounds; [methodology](https://github.com/Yurashku/OffPolicyLab/blob/main/docs/methodology.md). |
+| Can the same workflow handle changing production models? | Known logging policies, mixtures of model versions, candidate comparisons and selection; [monthly versions notebook](https://github.com/Yurashku/OffPolicyLab/blob/main/examples/monthly_versions.ipynb). |
+
+The library computes DR, SNDR, IPS, SNIPS and DM estimates. Its default primary estimator is doubly robust (DR). Multiple metrics and candidate policies are supported, including multiplicity adjustment and simultaneous intervals. A narrow interval alone does not establish that an estimate is valid.
+
+## Run a reproducible example
+
+Install from the checked source revision in a virtual environment. This command uses Git; it does not assume a PyPI release.
 
 ```bash
-pip install git+https://github.com/Yurashku/OffPolicyLab
+python -m venv .venv
+# Activate: source .venv/bin/activate (macOS/Linux)
+# Activate: .\.venv\Scripts\Activate.ps1 (Windows PowerShell)
+python -m pip install "policyscope @ git+https://github.com/Yurashku/OffPolicyLab.git@7ded1b1691c94babf531a23198720605cc29d781"
 ```
 
-Нужен Python ≥ 3.10. После публикации на PyPI установка будет `pip install policyscope`.
-
-## Попробовать за минуту
+Save the following as `quickstart.py`, then run `python quickstart.py`. It creates synthetic customer logs with known action probabilities, evaluates a different offer policy, and compares the estimate with the simulator's true effect. No external dataset or account is needed.
 
 ```python
 import policyscope as ps
 
-sim = ps.synthetic.OfferSimulator(seed=0)          # синтетический банк с известной истиной
+sim = ps.synthetic.OfferSimulator(seed=0)
 clients = sim.sample_clients(20_000)
-policy_a = sim.policy("epsilon_greedy", epsilon=0.2, seed=1)   # текущая политика
-policy_b = sim.policy("softmax", temperature=1.0, seed=2)      # кандидат
-logs = sim.simulate(clients, policy_a)              # логи A: offer, propensity, accepted, revenue
+policy_a = sim.policy("epsilon_greedy", epsilon=0.2, seed=1)
+policy_b = sim.policy("softmax", temperature=1.0, seed=2)
+logs = sim.simulate(clients, policy_a)
 
 report = ps.evaluate(
     logs, policy_b,
-    action="offer", reward=["accepted", "revenue"], propensity="propensity",
-)
-report            # в Jupyter отчёт отрисуется сам; в консоли — print(report.to_markdown())
-```
-
-Пошаговый разбор — в [`examples/tutorial.ipynb`](https://github.com/Yurashku/OffPolicyLab/blob/main/examples/tutorial.ipynb):
-основной сценарий без пропенсити, чтение отчёта, несколько кандидатов и случаи, когда оценке верить
-нельзя. Каждый результат там сверяется с истиной.
-
-## На своих данных
-
-### 1. Логи политики A
-
-Одна строка — одно решение A. Нужны колонки:
-
-| Что | Аргумент | Обязательно |
-|---|---|---|
-| Выбранное действие (любые метки: `"card"`, `17`, …) | `action=` | да |
-| Награда: одна метрика или список | `reward=` | да |
-| **Вероятность, с которой A выбрала это действие** | `propensity=` | очень желательно |
-| Единица наблюдения, если на неё несколько строк (клиент) | `cluster=` | если строки повторяются |
-| Признаки контекста | `features=` | по умолчанию — авто-выбор |
-
-Денежные признаки с длинным хвостом (доход, оборот) лучше логарифмировать заранее: модели исхода так
-проще, и оценки менее шумные.
-
-В рабочих сценариях передавайте `features=` явно: тогда используются только перечисленные колонки.
-Авто-выбор (`features=None`) удобен для первого взгляда. Он пропускает идентификаторы, даты (в том
-числе строкой), константы, колонки с пропусками и колонки, значения которых — метки действий (решения
-других политик). Список выбранных и пропущенных колонок — в отчёте.
-
-**Панель «клиент × месяц»** (`id, report_date, признаки, отклики, A_offer, B_offer`):
-
-```python
-ev = ps.Evaluator(df, action="A_offer", reward=["target_1", "target_2"],
-                  features=["f1", "f2", "f3"], cluster="id")
-report = ev.evaluate("B_offer", name="B")          # кандидат — колонка с его решением
-```
-
-- Строка — одно решение. Оценивается среднее по решениям: клиент из 6 месяцев весит в 6 раз
-  больше клиента из одного.
-- `cluster="id"` обязателен. Интервалы и bootstrap учитывают зависимость строк клиента, а фолды
-  моделей не смешивают месяцы одного клиента. Разное число месяцев у клиентов — нормальный случай.
-- Пропущенные месяцы допустимы, если их причина — не сама политика. Если клиент выпал, потому что
-  после оффера ушёл или уже взял продукт, политика влияет на будущие логи: это вне бандитской
-  постановки.
-- Признаки — на дату решения. Прошлые офферы и отклики стоит передать признаками. Месяцы с
-  незакрытым окном отклика лучше исключить.
-- Если модель A менялась по месяцам и версии сохранены, добавьте
-  `logging_policy={дата: версия}, logger="report_date"` — см. раздел о нескольких версиях ниже.
-
-**Логируйте пропенсити.** Это самое дешёвое и самое действенное вложение в офлайн-оценку.
-
-| | С логированными пропенсити | Без них |
-|---|---|---|
-| Как получаем пропенсити | Берём как есть | Восстанавливаем моделью, ошибка модели входит в оценку |
-| Интервал | Аналитический, секунды | Bootstrap с переобучением моделей, минуты |
-| Доверие | Высокое | Не выше «с осторожностью» |
-
-Если A вообще не исследует (всегда выбирает одно действие в одном контексте), оценить по её
-логам можно только похожую на неё политику. Отчёт об этом скажет.
-
-### 2. Политика B
-
-Политика — это таблица вероятностей: строка — строка логов, **колонки — метки действий**.
-Порядок колонок не важен: сопоставление идёт по меткам.
-
-```python
-import pandas as pd
-
-scores = pd.DataFrame(model.predict_proba(logs[cols]), columns=model.classes_, index=logs.index)
-policy_b = ps.greedy(scores)                    # всегда лучшее действие
-policy_b = ps.softmax(scores, temperature=0.5)  # стохастически, по скорам
-policy_b = ps.epsilon_greedy(scores, epsilon=0.1)
-```
-
-Также подходят:
-
-- имя колонки логов с действием, которое выбрала бы B (детерминированная политика);
-- `Series` таких действий;
-- объект с методом `action_probs(df)`. Он вызывается один раз и не видит колонок награды и
-  пропенсити.
-
-Случайные и смешанные политики задаются без скоров:
-
-```python
-ps.uniform()                   # все действия поровну
-ps.random_like()               # случайно, но с тем же балансом действий, что у A в логах
-ps.random_like(policy_b)       # с балансом B: разница «B − её случайная версия» — вклад таргетинга
-ps.random_like(by="month")     # баланс внутри каждого месяца (любая колонка логов); при логах
-                               # нескольких версий (logger=) берите ps.random_like() — см. ниже
-ps.mixture([v1, v2])           # для каждого решения — случайная из политик
-```
-
-> **Важно:** не оценивайте B на тех же логах, на которых её обучали, — оценка будет завышена.
-> Отложите для оценки отдельный (лучше более поздний по времени) период логов.
-
-### 3. Оценка
-
-```python
-ev = ps.Evaluator(
-    logs,
-    action="offer",
-    reward=["accepted", "revenue"],
+    action="offer", reward=["accepted", "revenue"],
     propensity="propensity",
-    cluster="client_id",
+    features=["age", "income", "loyal", "risk", "region"],
+    random_state=0, n_jobs=1,
 )
-report = ev.evaluate(policy_b)
+
+for metric in ("accepted", "revenue"):
+    result = report[metric]
+    truth = (sim.true_value(clients, policy_b, metric)
+             - sim.true_value(clients, policy_a, metric))
+    print(f"{metric}: delta={result.delta.value:.4f}, "
+          f"95% CI=[{result.delta.low:.4f}, {result.delta.high:.4f}], "
+          f"truth={truth:.4f}, {result.decision}, {result.trust}")
 ```
 
-**Что происходит при вызове:**
+Observed output from this revision on Windows with Python 3.14 (NumPy 2.5.4, pandas 3.1.1, scikit-learn 1.9.1, SciPy 1.18.1):
 
-1. Обучаются две вспомогательные модели. Модель пропенсити (если пропенсити не залогированы)
-   восстанавливает, как действует A. Модель исхода оценивает ожидаемую награду каждого действия.
-   - Обе считаются **out-of-fold**: прогноз для строки делает модель, которая эту строку не видела.
-   - Обе обучаются один раз на `Evaluator`. С аналитическим интервалом следующие кандидаты
-     считаются за доли секунды; с bootstrap каждый вызов переобучает модели на репликах.
-2. Из одних и тех же моделей считаются пять оценщиков: DR, SNDR, IPS, SNIPS и DM.
-   - Основной выбирается автоматически (`estimator="auto"`), и отчёт объясняет выбор. Сейчас это
-     всегда DR: при логированных пропенсити он несмещён при любой модели исхода, а при оценённых
-     смещается, только если ошиблись обе модели. IPS и SNIPS в этом режиме переносят ошибку модели
-     пропенсити в оценку целиком.
-   - Выбирать оценщик по самому узкому интервалу нельзя: интервал победителя такого отбора занижен,
-     а побеждал бы DM, чьё смещение в интервал не входит.
-   - Остальные оценщики считаются для сверки (см. «Согласие оценщиков» ниже). Любой из них можно
-     сделать основным явно: `estimator="sndr"`, `"ips"`, `"snips"`, `"dm"`. Явный DM обычно даёт самую
-     точную оценку, если модель исхода верна и оценена эффективно. Но его смещение по логам не
-     проверяется. Разбор — в [`docs/estimators.md`](https://github.com/Yurashku/OffPolicyLab/blob/main/docs/estimators.md).
-3. Строится доверительный интервал, по умолчанию `inference="auto"`:
-   - при логированных пропенсити — аналитический, с кластерно-робастной ошибкой;
-   - без них и при `estimator="dm"` — bootstrap с переобучением моделей. Аналитический интервал не
-     учитывает ошибку оценки пропенсити, а для DM — ошибку модели исхода.
-4. Проходит диагностика и формируется вердикт.
-
-### 4. Как читать отчёт
-
-```python
-report                         # полный отчёт (Jupyter)
-report.summary()               # DataFrame: V(A), V(B) и Δ с интервалами, вывод, доверие, согласие
-report["revenue"].decision     # 'better' | 'worse' | 'no_difference' | 'inconclusive' | 'not_computed'
-report["revenue"].estimators   # DataFrame: все оценщики
-report.to_markdown()           # для Confluence / письма
-report.to_json("report.json")  # для пайплайна: стабильная схема, NaN -> null
+```text
+accepted: delta=0.0313, 95% CI=[0.0183, 0.0443], truth=0.0405, better, reliable
+revenue: delta=14.1110, 95% CI=[11.0706, 17.1514], truth=15.5350, better, reliable
 ```
 
-- **Главная таблица**: V(A) и V(B) — абсолютные значения метрики с интервалами, Δ с интервалом,
-  относительный прирост, p-value, вывод, доверие и вердикт согласия оценщиков. Если доверие
-  ниже «надёжно», причина названа прямо в первой строке отчёта.
-- **Вывод** опирается на доверительный интервал для Δ.
-  - Если оценка ненадёжна, вывод не делается, как бы ни выглядел интервал.
-  - «Разница не обнаружена» не означает «разницы нет»: отчёт указывает, какой эффект был бы
-    обнаружен.
-- **p (RW)** — p-value с поправкой Romano–Wolf на все метрики отчёта. Она учитывает, что метрики
-  зависимы, и мощнее Бонферрони и Холма.
-- **Согласие оценщиков** — главная проверка доверия.
-  - IPS опирается только на пропенсити, DM — только на модель исхода, DR — на обе.
-  - Разность DR − IPS в среднем равна нулю при верных пропенсити и решениях в пределах покрытия
-    логов; DR − DM — при верной модели исхода. Отчёт проверяет обе.
-  - Итог по метрике: «согласованы» (обе проверки без значимого расхождения), «расходятся» (хотя бы
-    одна нашла существенное) или «проверка неполная» (мало данных). Рядом — разброс Δ по всем пяти
-    оценщикам в единицах стандартной ошибки.
-  - DR смещён, только если неверны обе модели.
-- **Перекрытие политик**:
-  - эффективный размер выборки;
-  - средний вес важности (при полном перекрытии он равен 1);
-  - таблица по действиям: доля в логах, доля у B, средний вес.
+Here B improves the simulated acceptance rate by an estimated **3.13 percentage points** (95% CI: 1.83–4.43 pp); the simulator's true effect is 4.05 pp. Both metrics pass this run's diagnostics. Small numerical differences are possible with other dependency versions.
 
-## Типичный сценарий: две политики, пропенсити не залогированы
+The `accepted` effect is a probability difference; multiply it by 100 for percentage points. `revenue` is measured in the simulator's monetary units per decision. The oracle uses the same sampled contexts and integrates over the outcome distribution. One run illustrates the API and an estimate-to-truth comparison; repeated simulation is needed to assess bias and interval coverage.
+
+For a full report, use `print(report.to_markdown())`. Jupyter renders `report` directly. `report.summary()` returns a DataFrame, and `report.to_json("report.json")` writes a structured report. Human-readable report text is currently in Russian; the API and machine-readable status values use English identifiers.
+
+## Use your own logs
+
+One row represents one decision made by the logging policy. Prepare these fields:
+
+| Field | Argument | Meaning |
+|---|---|---|
+| Logged action | `action=` | The action that A actually selected. |
+| Observed reward(s) | `reward=` | One metric name or a list of names. |
+| Logged propensity | `propensity=` | Probability that A selected the recorded action in that context, including exploration. Strongly preferred. |
+| Pre-decision features | `features=` | Explicit list of context columns available before the action. |
+| Repeated-observation ID | `cluster=` | Customer or other unit whose rows may be dependent. Required when a unit appears repeatedly. |
+
+The candidate can be a probability DataFrame whose columns are action labels, a column/Series of candidate actions, or an object with `action_probs(df)`. For example, with columns `A_offer` and `B_offer` in a customer-month panel:
 
 ```python
-ev = ps.Evaluator(logs, action="offer", reward=["visit", "spend"])   # пропенсити оцениваются
-report = ev.evaluate(policy_new, baseline=policy_rule, name="new", baseline_name="rule")
-report.summary()[["V_A", "V_A_low", "V_A_high", "V_B", "V_B_low", "V_B_high",
-                  "delta", "delta_low", "delta_high", "decision", "trust", "agreement"]]
-```
-
-- Оценщик (DR) и интервал (bootstrap с переобучением моделей) выбираются автоматически.
-- Значения обеих политик оцениваются по одним логам и одним моделям, поэтому Δ точнее, чем разность
-  двух отдельных оценок.
-- Доверие в этом режиме не выше «с осторожностью»: часть ошибки модели пропенсити не проверить.
-  Согласие оценщиков и чувствительность к полу пропенсити показывают, насколько это опасно на ваших
-  данных.
-- Bootstrap переобучает модели 200 раз. На 8-ядерном ноутбуке это 2–3.5 минуты для 13 тысяч строк
-  и 3 действий и около 30 минут для 100 тысяч строк и 34 действий. Прогноз длительности выводится
-  предупреждением перед стартом. С логированными пропенсити интервал аналитический и считается за
-  секунды.
-
-Как этот сценарий отработал на открытых данных с известной истиной (рассылка Hillstrom и Open Bandit
-Dataset ZOZOTOWN) — в [`docs/real_data.md`](https://github.com/Yurashku/OffPolicyLab/blob/main/docs/real_data.md).
-
-## Соревнование моделей и сравнение с прод-версией
-
-```python
-board = ev.compare({"бустинг": policy_gbm, "логрег": policy_lr, "правило": policy_rule})
-board                                       # рейтинг, лидер, лидер против остальных
-selection = board.best("revenue", guardrails={"accepted": 0.005})
-selection.winner, selection.best_set        # лидер и набор лучших (кого ни один допущенный значимо не обходит)
-board.pairwise                              # все пары кандидатов между собой
-
-# Если в логах A есть исследование, а в проде будет её жадная версия:
-report = ev.evaluate(policy_b, baseline=ps.greedy(scores_a), baseline_name="A-прод")
-```
-
-Как устроен честный выбор лучшего:
-
-- **Набор лучших** — допущенные кандидаты, которых ни один допущенный значимо не обходит. Истинно
-  лучший среди допущенных попадает в него с вероятностью не меньше 1 − α (95% по умолчанию). Если в
-  наборе несколько кандидатов, выбрать между ними по этим логам нельзя.
-- **Допуск** решается по тем же данным: кандидат с вердиктом «ненадёжно» или с ограничителем, который
-  не удалось доказать, к выбору не допускается, даже если он на деле лучший (у ограничителя может не
-  хватить мощности). Такие кандидаты перечислены в выборе с причиной.
-- **Одновременный интервал** лидера честен, хотя лидер выбран по тем же данным. Точечная оценка
-  лидера завышена (winner's curse).
-- **Ограничители** (`guardrails`) не допускают кандидатов, у которых не доказано, что другая метрика
-  проседает не больше допуска.
-
-## Политика A известна, но пропенсити не логировали
-
-```python
-ev = ps.Evaluator(logs, action="offer", reward="accepted", logging_policy=policy_a)
-```
-
-Если правило выбора A известно (скоринговая модель и способ выбора), пропенсити считаются точно, и
-интервал аналитический. Точно известна и доля решений кандидата, которых A в этих контекстах выбрать
-не могла. Об их отклике в логах нет данных, и эту часть оценка лишь экстраполирует моделью исхода;
-интервал такую экстраполяцию не учитывает. Если таких решений больше 20%, вывод не делается; от 5 до
-20% — вывод «с осторожностью», его стоит проверить границами `ev.bounds(...)`. У детерминированной A
-это все решения, где кандидат с ней расходится.
-
-**Логи нескольких версий модели.** Если модель регулярно обновлялась и каждая версия работала свой
-период, их логи вместе содержат исследование, даже если каждая версия детерминирована:
-
-```python
-versions = {"2025-01": model_jan, "2025-02": model_feb, "2025-03": model_mar}  # месяц -> политика
-ev = ps.Evaluator(logs, action="offer", reward="revenue", logging_policy=versions, logger="month")
-board = ev.compare(versions)   # какая версия лучшая — на всех клиентах сразу
-```
-
-Пропенсити — смесь версий с долями периодов (balanced IPS, Agarwal et al., 2017). Каждая строка
-сверяется с версией своего периода: если версия не могла выбрать залогированный оффер, это ошибка
-(например, рекомендацию иногда меняли менеджеры — тогда пропенсити оцениваются по данным, см. ниже).
-Библиотека проверяет и предпосылку смеси: составы клиентов в периодах и отклик на клиентах, которым
-все версии рекомендуют одно и то же (сезонность). Оцениваемая политика не должна зависеть от периода:
-при сопоставимых периодах случайная выдача с помесячным балансом и `ps.random_like()` имеют одно
-значение, а для политики, зависящей от периода, IPS по смеси версий смещён по построению.
-
-**Когда кандидат выходит за покрытие логов** — случайная выдача по логам детерминированных версий,
-новая модель с непоказанными офферами, — точечной оценки нет, но есть границы:
-
-```python
-effect = ev.bounds(ps.random_like(), name="случайная", low={"revenue": 0}, high={"revenue": 5000})
-effect["revenue"].at_least, effect["revenue"].at_most   # Δ не меньше / не больше
-effect["revenue"].sensitivity, effect["revenue"].breakdown
-```
-
-Покрытая часть решений оценивается точно, а отклик на непоказанные офферы лишь ограничен диапазоном
-метрики. Получаются односторонние оценки «не больше» и «не меньше» без допущений об этом отклике и
-таблица чувствительности: что будет, если он равен λ × прогноз модели исхода, и при каком λ меняется
-вывод. Для бинарной метрики диапазон — [0, 1]; для денег задавайте `low=` и `high=` явно, иначе
-берутся наблюдаемые min и max, и отчёт помечает это как допущение. Разбор с примерами — в
-[`examples/monthly_versions.ipynb`](https://github.com/Yurashku/OffPolicyLab/blob/main/examples/monthly_versions.ipynb).
-
-## Когда оценке нельзя верить
-
-Основные находки (полный список кодов — в [методологии](https://github.com/Yurashku/OffPolicyLab/blob/main/docs/methodology.md#коды-находок)):
-
-| Находка | Что значит |
-|---|---|
-| `propensity_not_probability` | В колонке пропенсити не вероятность выбора действия: например, передали вероятность отклика. |
-| `deterministic_logging` | A почти не исследует, а B от неё отличается: данных о действиях B нет. |
-| `support_deficit` | Заметная часть массы B — там, где A не действует. Оценка экстраполирует. Если политика A задана, доля известна точно. |
-| `critically_low_ess` | Оценка держится на нескольких строках с огромными весами. |
-| `both_models_rejected` | Неверны и пропенсити, и модель исхода: DR не защищён. |
-| `propensity_estimated` | Пропенсити восстановлены моделью. Доверие не выше «с осторожностью». |
-| `cluster_not_set` | Клиенты повторяются, но кластер не указан: интервал занижен. |
-| `outcome_like_features` | Признак почти идеально предсказывает награду. Похоже на утечку исхода. |
-
-Каждая находка в отчёте приходит с цифрами и советом. Пороги собраны в `ps.Thresholds`.
-
-Две предпосылки напрямую по данным не проверяются:
-
-- все факторы, влиявшие и на выбор A, и на метрику, есть среди признаков (частично ловит
-  плацебо-проверка, см. ниже);
-- B не обучалась на оцениваемых логах.
-
-**Случайность нужна в логах, а не в оцениваемой политике.** По логам детерминированной A для каждого
-клиента известен отклик только на одно действие. Другую модель по ним можно оценить лишь с
-экстраполяцией: близкую (до 20% расходящихся решений) — «с осторожностью», а случайную выдачу — никак.
-Выходы — небольшой случайный срез в проде, логи нескольких версий модели или A/B-тест.
-
-Если «случайность» вносят люди или площадки (менеджер меняет рекомендованный оффер), модель
-пропенсити примет её за исследование. Это корректно, только если отклонения не зависят от того, как
-клиент отреагирует. Логируйте и рекомендацию модели, и фактическое действие, передайте рекомендацию
-признаком и включите **плацебо-проверку** на показателе до решения:
-
-```python
-ev = ps.Evaluator(logs, action="offer", reward="revenue", features=["f1", "f2", "rec_offer"],
-                  cluster="id", placebo="revenue_prev_month")
-```
-
-Решение не может изменить прошлое, поэтому «эффект» политики на плацебо должен быть нулевым. Если он
-значимо отличается от нуля и существенен по сравнению с точностью Δ (`placebo_failed`), выбор
-действия зависел от того, чего нет в признаках, или модель пропенсити неверна. Прохождение проверки
-не доказывает, что скрытых факторов нет: отчёт говорит, какой «эффект» на плацебо данные исключают и
-какое смещение Δ это допускает. Правило A не должно использовать плацебо-колонку: иначе это не
-плацебо, а признак.
-
-## Когда OPE достаточно, а когда нужен A/B-тест
-
-Офлайн-оценки обычно достаточно:
-- чтобы отобрать кандидатов из многих и отсеять явно слабые;
-- чтобы приоритизировать гипотезы до онлайн-эксперимента;
-- когда решение легко откатить, а цена ошибки мала.
-
-Нужен A/B-тест:
-- перед внедрением победителя из многих кандидатов (winner's curse);
-- при вердикте «с осторожностью» или «ненадёжно», при слабом перекрытии и без логированных
-  пропенсити;
-- когда решение дорого или необратимо, а ожидаемый эффект сравним с шириной интервала;
-- когда есть основания подозревать ненаблюдаемые факторы, влиявшие на выбор A.
-
-«Значимо» в отчёте не означает «безопасно для раскатки»: интервал описывает статистический шум,
-но не нарушения предпосылок.
-
-## Настройка
-
-```python
-from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
-
 ev = ps.Evaluator(
-    logs, action="offer", reward=["revenue", "churn"],
-    propensity=None,                                   # пропенсити не залогированы — оцениваются
-    propensity_model=HistGradientBoostingClassifier(), # нужна, только когда propensity=None
-    outcome_model={"revenue": HistGradientBoostingRegressor()},  # своя модель для метрики
-    features=["age", "income", "region"],              # категории кодируются сами
-    lower_is_better=["churn"],                         # метрики, где меньше — лучше
-    n_folds=5, random_state=0, n_jobs=-1,
+    df, action="A_offer", reward=["accepted", "revenue"],
+    propensity="A_propensity", cluster="client_id",
+    features=["age", "income", "loyal", "risk", "region"],
 )
-report = ev.evaluate(policy_b, estimator="sndr", n_boot=500, alpha=0.1)
+report = ev.evaluate("B_offer", name="B")
 ```
 
-С пользовательской моделью исхода DM нельзя выбрать основным: для гибких моделей у него нет
-валидного интервала. В таблице оценщиков он остаётся точкой для сверки.
+Use an evaluation period separate from the data used to train B. For panel data, the estimand is the average reward **per decision**: a customer observed six times contributes six rows. Clustering adjusts inference for dependence; it does not turn this into an equally weighted average per customer.
 
-## Как проверена корректность
+If propensities were not logged, the library can estimate them, but this adds modeling assumptions and uncertainty. Passing `logging_policy=` is another option when the actual historical policy is known. For versioned policies and their coverage restrictions, follow the [monthly versions example](https://github.com/Yurashku/OffPolicyLab/blob/main/examples/monthly_versions.ipynb).
 
-Тестов, которые проверяют только, что код не падает, здесь почти нет. Корректность проверяется
-против известной истины. Тесты и сценарии валидации лежат в репозитории:
+## Read the decision and its limits
+
+Each metric exposes `decision` (`better`, `worse`, `no_difference`, `inconclusive`, or `not_computed`) and `trust` (`reliable`, `caution`, or `unreliable`). Read the accompanying findings as well as the effect estimate.
+
+- **Overlap matters.** If B chooses actions that A never took in the relevant contexts, the logs do not identify the full effect. Restrict the candidate to supported actions, collect exploration data, or examine bounds under explicit reward assumptions.
+- **Features must be sufficient and measured before the decision.** Unobserved factors affecting both assignment and reward can invalidate causal interpretation. Diagnostics and placebo checks can reveal some failures; passing them does not prove the absence of confounding.
+- **The setting is a contextual bandit.** Actions that change future states, retention, or which future observations exist require additional modeling. This is not a general sequential reinforcement-learning evaluator.
+- **Uncertainty and identification are different.** A confidence interval does not cover arbitrary model misspecification or hidden bias. Failure to detect a difference does not establish equivalence.
+- **Synthetic validation has a defined scope.** The repository includes difficult and deliberately failing scenarios. Recorded performance is evidence for those settings, not a guarantee on new business data.
+
+## Explore further
+
+- [Main tutorial](https://github.com/Yurashku/OffPolicyLab/blob/main/examples/tutorial.ipynb): end-to-end evaluation, diagnostics, and comparisons with synthetic truth.
+- [Monthly model versions](https://github.com/Yurashku/OffPolicyLab/blob/main/examples/monthly_versions.ipynb): panels, version mixtures, coverage, bounds, and exploration.
+- [Methodology](https://github.com/Yurashku/OffPolicyLab/blob/main/docs/methodology.md) and [estimator comparison](https://github.com/Yurashku/OffPolicyLab/blob/main/docs/estimators.md): assumptions and statistical choices.
+- [Synthetic validation](https://github.com/Yurashku/OffPolicyLab/blob/main/docs/validation.md) and [public-data example](https://github.com/Yurashku/OffPolicyLab/blob/main/docs/real_data.md): evaluation procedures and limitations.
+- [Detailed Russian usage guide](README.ru.md): the complete guide, including panel data, policy versions, diagnostics and further examples.
+- [Changelog](https://github.com/Yurashku/OffPolicyLab/blob/main/CHANGELOG.md), [source](https://github.com/Yurashku/OffPolicyLab/tree/main/src/policyscope), and [tests](https://github.com/Yurashku/OffPolicyLab/tree/main/tests).
+
+## Develop and validate
 
 ```bash
-git clone https://github.com/Yurashku/OffPolicyLab && cd OffPolicyLab
-pip install -e ".[dev]"
+git clone https://github.com/Yurashku/OffPolicyLab.git
+cd OffPolicyLab
+python -m pip install -e ".[dev]"
+python -m flake8 src tests examples
+python -m pytest -m "not slow"
 ```
 
-- `pytest -m "not slow"` — формулы на ручных примерах, тождества между оценщиками, out-of-fold
-  свойство моделей, выравнивание политик, срабатывание каждой находки.
-- `pytest -m slow` — статистические свойства на сотнях симуляций:
-  - несмещённость IPS и DR;
-  - состоятельность;
-  - двойная робастность с негативным контролем;
-  - покрытие интервалов;
-  - кластерный инференс при повторных визитах;
-  - ложные тревоги и мощность проверок;
-  - контроль FWER у Romano–Wolf;
-  - смесь детерминированных версий, одновременные интервалы и набор лучших;
-  - границы для кандидата вне покрытия и плацебо-проверка.
-- `python examples/validate.py` — восемь сценариев против аналитической истины: логированные и
-  оценённые пропенсити, тяжёлые хвосты весов, слабое перекрытие, повторные визиты клиентов, DM
-  как основной оценщик. Результаты — в [`docs/validation.md`](https://github.com/Yurashku/OffPolicyLab/blob/main/docs/validation.md).
-- `python examples/real_data.py` — основной сценарий на открытых реальных данных с известной истиной.
-  Результаты — в [`docs/real_data.md`](https://github.com/Yurashku/OffPolicyLab/blob/main/docs/real_data.md).
+The [CI workflow](https://github.com/Yurashku/OffPolicyLab/blob/main/.github/workflows/ci.yml) also checks minimum dependency versions, builds and tests the wheel, executes both tutorials, and runs statistical validation. The simulation checks take longer:
 
-## Документация
+```bash
+python -m pytest -m slow
+python examples/validate.py --runs 30 --clients 2000 --n-boot 60 --strict
+```
 
-- [`examples/tutorial.ipynb`](https://github.com/Yurashku/OffPolicyLab/blob/main/examples/tutorial.ipynb) — сквозной пример: от логов до решения, со сверкой с истиной.
-- [`examples/monthly_versions.ipynb`](https://github.com/Yurashku/OffPolicyLab/blob/main/examples/monthly_versions.ipynb) — ежемесячные версии скоринговой модели: лучшая
-  версия, сравнение со случайной выдачей, случайный срез, сезонность.
-- [`docs/methodology.md`](https://github.com/Yurashku/OffPolicyLab/blob/main/docs/methodology.md) — формулы, интервалы, проверки, коды находок,
-  предпосылки, устройство пакета.
-- [`docs/estimators.md`](https://github.com/Yurashku/OffPolicyLab/blob/main/docs/estimators.md) — почему DR по умолчанию, когда DM точнее и где
-  ломается; разбор решений по оценщикам.
-- [`docs/validation.md`](https://github.com/Yurashku/OffPolicyLab/blob/main/docs/validation.md) — как и насколько хорошо работают оценщики.
-- [`docs/real_data.md`](https://github.com/Yurashku/OffPolicyLab/blob/main/docs/real_data.md) — проверка на открытых реальных данных с известной истиной.
-- [`CHANGELOG.md`](https://github.com/Yurashku/OffPolicyLab/blob/main/CHANGELOG.md) — история изменений и переход с версии 0.1.
+Maintained by [Yurashku](https://github.com/Yurashku). The [commit history](https://github.com/Yurashku/OffPolicyLab/commits/main/) records contributions, including AI-assisted work credited in commit messages. Distributed under the [MIT license](https://github.com/Yurashku/OffPolicyLab/blob/main/LICENSE).
